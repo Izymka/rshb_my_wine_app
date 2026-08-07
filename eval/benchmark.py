@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from wine_scanner.catalog import Query, load_own, load_xwines
-from wine_scanner.detect import BottleDetector, CachedCropper
+from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, pick_device
 from wine_scanner.index import VectorIndex
 
@@ -86,7 +86,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
         "--detect",
-        choices=["bottle", "label"],
+        choices=["bottle", "label", "trained", "cascade"],
         default=None,
         help="обрезать кадр детектором: bottle — рамка бутылки, label — оценка этикетки (Э3)",
     )
@@ -102,6 +102,18 @@ def main() -> None:
         "--fit", default=None, choices=["center_crop", "squash", "pad"],
         help="как область приводится к квадрату; по умолчанию squash при детекции",
     )
+    parser.add_argument(
+        "--weights", type=Path, default=Path("models/label_detector.pt"),
+        help="веса дообученного детектора этикетки для --detect trained",
+    )
+    parser.add_argument(
+        "--bottle-backbone", default="resnet50", choices=["resnet50", "mobilenet", "mobilenet320"],
+        help="бэкбон первой ступени каскада",
+    )
+    parser.add_argument(
+        "--detect-min-size", type=int, default=None,
+        help="переопределить разрешение входа детектора на инференсе",
+    )
     parser.add_argument("--errors", type=int, default=10, help="сколько худших случаев показать")
     args = parser.parse_args()
 
@@ -116,8 +128,18 @@ def main() -> None:
     )
 
     cropper = None
-    if args.detect:
-        detector = BottleDetector(device=pick_device(), mode=args.detect)
+    if args.detect == "cascade":
+        bottle = BottleDetector(device=pick_device(), mode="bottle", backbone=args.bottle_backbone)
+        label = BottleDetector(device=pick_device(), weights_path=args.weights)
+        cropper = CachedCropper(CascadeCropper(bottle, label), CROP_CACHE)
+    elif args.detect:
+        weights = args.weights if args.detect == "trained" else None
+        detector = BottleDetector(
+            device=pick_device(),
+            mode=args.detect,
+            weights_path=weights,
+            infer_min_size=args.detect_min_size,
+        )
         cropper = CachedCropper(detector, CROP_CACHE)
 
     embedder = Dinov2Embedder(
