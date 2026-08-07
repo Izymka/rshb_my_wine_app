@@ -23,8 +23,9 @@ import numpy as np
 
 from wine_scanner.catalog import Query, load_own, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
-from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, pick_device
+from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
+from wine_scanner.rerank import XFeatMatcher
 
 RESULTS_PATH = Path("eval/results/runs.jsonl")
 CROP_CACHE = Path("models/crop_cache")
@@ -106,6 +107,11 @@ def main() -> None:
         "--weights", type=Path, default=Path("models/label_detector.pt"),
         help="веса дообученного детектора этикетки для --detect trained",
     )
+    parser.add_argument("--rerank", action="store_true", help="ре-ранкинг top-K по XFeat (Э6)")
+    parser.add_argument("--rerank-k", type=int, default=10)
+    parser.add_argument("--rerank-max-side", type=int, default=640)
+    parser.add_argument("--rerank-points", type=int, default=2048)
+    parser.add_argument("--matcher", default="lighterglue", choices=["lighterglue", "descriptors"])
     parser.add_argument(
         "--bottle-backbone", default="resnet50", choices=["resnet50", "mobilenet", "mobilenet320"],
         help="бэкбон первой ступени каскада",
@@ -162,12 +168,44 @@ def main() -> None:
 
     query_vectors = embedder.encode_paths([q.path for q in queries], batch_size=args.batch_size)
 
+    matcher = None
+    if args.rerank:
+        matcher = XFeatMatcher(
+            matcher=args.matcher, max_side=args.rerank_max_side, top_k=args.rerank_points
+        )
+
+    def crop_of(path: Path):
+        image = load_image(path)
+        return cropper(path, image) if cropper is not None else image
+
+    def rerank(hits, query_path: Path):
+        """Переупорядочить top-K по числу инлаеров, остальных оставить как есть.
+
+        Инлаеры — первичный ключ, косинус из индекса — вторичный. Так пары, которые локальный
+        матчинг подтвердить не смог (0 инлаеров), сохраняют порядок глобального поиска,
+        а не перемешиваются случайно. Осмысленные веса подберёт LightGBM на Э10.
+        """
+        head, tail = hits[: args.rerank_k], hits[args.rerank_k :]
+        query_features = matcher.describe(crop_of(query_path), cache_key=str(query_path))
+
+        scored = []
+        for hit in head:
+            path = Path(hit.payload["image_path"])
+            candidate = matcher.describe(crop_of(path), cache_key=str(path))
+            features = matcher.match(query_features, candidate)
+            scored.append((features.score, hit.score, hit))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [item[2] for item in scored] + tail
+
     ranks: list[int] = []
     by_group: dict[str, list[int]] = defaultdict(list)
     mistakes: list[tuple[int, Query, str]] = []
 
     for query, vector in zip(queries, query_vectors, strict=True):
         hits = index.search(vector.numpy(), top_k=RECALL_K)
+        if matcher is not None:
+            hits = rerank(hits, query.path)
         found_ids = [h.item_id for h in hits]
         rank = found_ids.index(query.true_id) if query.true_id in found_ids else -1
         ranks.append(rank)
@@ -197,6 +235,10 @@ def main() -> None:
         "descriptor": args.descriptor,
         "detect": args.detect,
         "fit": embedder.fit,
+        "rerank": args.rerank,
+        "rerank_k": args.rerank_k if args.rerank else None,
+        "matcher": args.matcher if args.rerank else None,
+        "rerank_points": args.rerank_points if args.rerank else None,
         "distractors": not args.no_distractors,
         "catalog_size": len(catalog),
         "overall": overall,
