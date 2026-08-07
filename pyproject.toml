@@ -1,0 +1,82 @@
+[project]
+name = "wine-scanner"
+version = "0.1.0"
+description = "Поиск карточки вина по фотографии этикетки для платформы «Своё Вино»"
+requires-python = ">=3.11,<3.13"
+
+# Ядро: всё, что нужно для baseline (эмбеддинг → индекс → поиск).
+# Остальное вынесено в опциональные группы ниже и ставится по мере прохождения этапов —
+# так неудачная установка тяжёлой библиотеки не блокирует работу над текущим блоком.
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "transformers>=4.44",
+    "faiss-cpu>=1.8",
+    "opencv-python>=4.10",
+    "pillow>=10.4",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "tqdm>=4.66",
+    "pillow-heif>=1.5.0",
+]
+
+[project.optional-dependencies]
+# Э3 — детекция и обрезка этикетки.
+# Пусто намеренно: детектор строим на torchvision (Faster R-CNN, BSD-3), он уже в ядре.
+# Ultralytics YOLO не используем — AGPL-3.0, для коммерческого применения нужна платная
+# лицензия. Подробности и альтернативы в LICENSES.md.
+
+# Э6 — локальный матчинг для ре-ранкинга.
+# XFeat (Apache 2.0) подгружается через torch.hub, отдельного пакета не требует.
+# kornia нужен для RANSAC и вспомогательных геометрических операций.
+rerank = [
+    "kornia>=0.7.3",
+]
+
+# Э7 — текстовая ветка: распознавание и поиск по названиям
+ocr = [
+    "easyocr>=1.7",
+    "rank-bm25>=0.2.2",
+    "rapidfuzz>=3.9",
+]
+
+# Э10 — решающий слой и калибровка вероятности
+decide = [
+    "lightgbm>=4.5",
+    "scikit-learn>=1.5",
+]
+
+# Сервис для демо
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+# Инструменты разработки. Отдельно от project.dependencies, потому что в продакшен-образ
+# они не нужны — uv ставит их локально и не тянет в сборку.
+dev = [
+    "jupyterlab>=4.2",
+    "ipykernel>=6.29",
+    "matplotlib>=3.9",
+    "ruff>=0.6",
+    "pytest>=8.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wine_scanner"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

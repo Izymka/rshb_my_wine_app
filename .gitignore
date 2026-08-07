@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+
+# Данные и веса не в git: слишком тяжёлые, версионируются отдельно.
+# Исключение — splits/: сплит должен быть в истории, иначе метрики невоспроизводимы.
+data/*
+!data/splits/
+models/
+*.faiss
+*.npy
