@@ -24,17 +24,66 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 DEFAULT_SIZE = 224
 
 
-def build_transform(size: int = DEFAULT_SIZE) -> transforms.Compose:
-    """Resize по короткой стороне с запасом, центральный кроп, нормализация.
+class PadToSquare:
+    """Дополнить изображение серым до квадрата, не меняя пропорций.
 
-    Центральный кроп — временное решение на время baseline: он предполагает, что этикетка
-    примерно в середине кадра. На этапе Э3 его заменит обрезка по рамке детектора, и вот тогда
-    метрики на живых фото должны заметно подрасти.
+    Альтернатива режиму squash. Squash растягивает область под квадрат, и степень растяжения
+    зависит от формы рамки: у бутылки в лоб она узкая и высокая, у наклонённой — шире и ниже.
+    Значит одна и та же этикетка искажается по-разному в зависимости от ракурса, и эмбеддинги
+    расходятся. Дополнение полями сохраняет геометрию ценой части полезной площади кадра.
     """
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        side = max(width, height)
+        if width == height:
+            return image
+        canvas = Image.new("RGB", (side, side), (124, 116, 104))  # средний цвет ImageNet
+        canvas.paste(image, ((side - width) // 2, (side - height) // 2))
+        return canvas
+
+
+def build_transform(size: int = DEFAULT_SIZE, fit: str = "center_crop") -> transforms.Compose:
+    """Привести изображение к квадрату size x size и нормализовать.
+
+    Режим `fit` подбирается под то, что подаётся на вход, и это не мелочь — на нём мы уже
+    один раз потеряли восемь пунктов top-1:
+
+    * `center_crop` — для целого кадра с телефона (примерно 3:4). Ужимаем по короткой стороне
+      и берём центральный квадрат. Предполагает, что снимаемое находится в середине кадра.
+
+    * `squash` — для кадра, уже обрезанного детектором. Центральный кроп здесь применять нельзя:
+      обрезанная бутылка имеет пропорции вроде 1:4, и центральный квадрат вырежет из неё узкую
+      горизонтальную полоску, а этикетка окажется срезана. Поэтому масштабируем область целиком,
+      не сохраняя пропорции. Искажение одинаково применяется и к каталогу, и к запросу,
+      поэтому сравнению не мешает.
+    """
+    if fit == "center_crop":
+        head = [
+            transforms.Resize(
+                int(size * 256 / 224), interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(size),
+        ]
+    elif fit == "squash":
+        head = [
+            transforms.Resize(
+                (size, size), interpolation=transforms.InterpolationMode.BICUBIC
+            )
+        ]
+    elif fit == "pad":
+        head = [
+            PadToSquare(),
+            transforms.Resize(
+                (size, size), interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+        ]
+    else:
+        raise ValueError(f"неизвестный fit: {fit}")
+
     return transforms.Compose(
         [
-            transforms.Resize(int(size * 256 / 224), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(size),
+            *head,
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]

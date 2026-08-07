@@ -16,7 +16,9 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("models/index_xwines"))
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--limit", type=int, default=None, help="взять первые N карточек, для проверки")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="взять первые N карточек, для проверки"
+    )
     args = parser.parse_args()
 
     items = load_xwines()

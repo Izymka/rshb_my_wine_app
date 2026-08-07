@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModel
 
-from .preprocess import DEFAULT_SIZE, build_transform, prepare
+from .preprocess import DEFAULT_SIZE, build_transform, load_image
 
 DEFAULT_MODEL = "facebook/dinov2-with-registers-large"
 
@@ -29,15 +29,20 @@ def pick_device() -> torch.device:
 class _ImageDataset(Dataset):
     """Нужен только чтобы DataLoader читал и декодировал файлы в несколько процессов."""
 
-    def __init__(self, paths: list[Path], size: int):
+    def __init__(self, paths: list[Path], size: int, cropper=None, fit: str = "center_crop"):
         self.paths = paths
-        self.transform = build_transform(size)
+        self.transform = build_transform(size, fit)
+        self.cropper = cropper
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, i: int) -> torch.Tensor:
-        return prepare(self.paths[i], self.transform)
+        path = self.paths[i]
+        image = load_image(path)
+        if self.cropper is not None:
+            image = self.cropper(path, image)
+        return self.transform(image)
 
 
 class Dinov2Embedder:
@@ -49,10 +54,17 @@ class Dinov2Embedder:
         device: torch.device | None = None,
         size: int = DEFAULT_SIZE,
         descriptor: str = "cls_patchmean",
+        cropper=None,
+        fit: str | None = None,
     ):
         self.device = device or pick_device()
         self.size = size
         self.descriptor = descriptor
+        # cropper — вызываемый объект (path, PIL.Image) -> PIL.Image, обычно detect.CachedCropper.
+        # Если он задан, кадр обрезается по бутылке до подачи в модель.
+        self.cropper = cropper
+        # После обрезки детектором центральный кроп срезает этикетку — см. build_transform.
+        self.fit = fit or ("squash" if cropper is not None else "center_crop")
         self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
         # Сколько register-токенов вставлено между CLS и патчами. У версии без регистров — 0.
         self.num_registers = getattr(self.model.config, "num_register_tokens", 0)
@@ -107,8 +119,12 @@ class Dinov2Embedder:
     def encode_paths(
         self, paths: list[Path], batch_size: int = 16, num_workers: int = 4, progress: bool = True
     ) -> torch.Tensor:
+        if self.cropper is not None:
+            # Детектор — это модель на GPU, в дочерние процессы DataLoader её не отдать.
+            # После первого прогона кроп берётся из кэша, и медленно уже не будет.
+            num_workers = 0
         loader = DataLoader(
-            _ImageDataset(paths, self.size),
+            _ImageDataset(paths, self.size, self.cropper, self.fit),
             batch_size=batch_size,
             num_workers=num_workers,
             shuffle=False,  # порядок обязан совпадать с порядком paths
@@ -119,4 +135,8 @@ class Dinov2Embedder:
         return torch.cat(chunks) if chunks else torch.empty(0, self.dim)
 
     def encode_one(self, path: Path) -> torch.Tensor:
-        return self.encode_batch(prepare(path, build_transform(self.size)).unsqueeze(0))[0]
+        image = load_image(path)
+        if self.cropper is not None:
+            image = self.cropper(path, image)
+        tensor = build_transform(self.size, self.fit)(image)
+        return self.encode_batch(tensor.unsqueeze(0))[0]

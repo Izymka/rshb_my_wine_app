@@ -16,16 +16,18 @@ import json
 import platform
 import subprocess
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
-from wine_scanner.catalog import load_own, load_xwines
-from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder
+from wine_scanner.catalog import Query, load_own, load_xwines
+from wine_scanner.detect import BottleDetector, CachedCropper
+from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, pick_device
 from wine_scanner.index import VectorIndex
 
 RESULTS_PATH = Path("eval/results/runs.jsonl")
+CROP_CACHE = Path("models/crop_cache")
 RECALL_K = 50
 
 
@@ -78,14 +80,28 @@ def print_table(overall: dict, by_group: dict[str, dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--descriptor", default="cls_patchmean", choices=["cls", "patchmean", "cls_patchmean"])
+    parser.add_argument(
+        "--descriptor", default="cls_patchmean", choices=["cls", "patchmean", "cls_patchmean"]
+    )
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--detect",
+        choices=["bottle", "label"],
+        default=None,
+        help="обрезать кадр детектором: bottle — рамка бутылки, label — оценка этикетки (Э3)",
+    )
     parser.add_argument(
         "--no-distractors",
         action="store_true",
         help="искать только среди своих вин, без карточек X-Wines",
     )
-    parser.add_argument("--tag", default="baseline", help="как называется эта конфигурация в ablation")
+    parser.add_argument(
+        "--tag", default="baseline", help="как называется эта конфигурация в ablation"
+    )
+    parser.add_argument(
+        "--fit", default=None, choices=["center_crop", "squash", "pad"],
+        help="как область приводится к квадрату; по умолчанию squash при детекции",
+    )
     parser.add_argument("--errors", type=int, default=10, help="сколько худших случаев показать")
     args = parser.parse_args()
 
@@ -94,10 +110,23 @@ def main() -> None:
     if not args.no_distractors:
         catalog += load_xwines()
 
-    print(f"своих вин: {len(own_catalog)}, запросов: {len(queries)}, карточек в индексе: {len(catalog)}")
+    print(
+        f"своих вин: {len(own_catalog)}, запросов: {len(queries)}, "
+        f"карточек в индексе: {len(catalog)}"
+    )
 
-    embedder = Dinov2Embedder(model_name=args.model, descriptor=args.descriptor)
-    print(f"модель: {args.model} [{args.descriptor}], устройство: {embedder.device}")
+    cropper = None
+    if args.detect:
+        detector = BottleDetector(device=pick_device(), mode=args.detect)
+        cropper = CachedCropper(detector, CROP_CACHE)
+
+    embedder = Dinov2Embedder(
+        model_name=args.model, descriptor=args.descriptor, cropper=cropper, fit=args.fit
+    )
+    print(
+        f"модель: {args.model} [{args.descriptor}], устройство: {embedder.device}, "
+        f"детекция: {args.detect or 'выкл'}, fit: {embedder.fit}"
+    )
 
     catalog_vectors = embedder.encode_paths(
         [it.image_path for it in catalog], batch_size=args.batch_size
@@ -139,11 +168,13 @@ def main() -> None:
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "tag": args.tag,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         "git": git_revision(),
         "host": platform.platform(),
         "model": args.model,
         "descriptor": args.descriptor,
+        "detect": args.detect,
+        "fit": embedder.fit,
         "distractors": not args.no_distractors,
         "catalog_size": len(catalog),
         "overall": overall,
