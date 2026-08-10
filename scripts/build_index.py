@@ -12,10 +12,13 @@ import argparse
 import json
 from pathlib import Path
 
+from tqdm import tqdm
+
 from wine_scanner.catalog import CatalogItem, load_own, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
-from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, pick_device
+from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
+from wine_scanner.rerank import DescriptorStore, XFeatMatcher
 
 CROP_CACHE = Path("models/crop_cache")
 
@@ -61,6 +64,13 @@ def main() -> None:
     parser.add_argument(
         "--limit", type=int, default=None, help="взять первые N карточек, для проверки"
     )
+    parser.add_argument(
+        "--no-descriptors",
+        action="store_true",
+        help="не считать локальные признаки XFeat (индекс без ре-ранкинга)",
+    )
+    parser.add_argument("--rerank-max-side", type=int, default=640)
+    parser.add_argument("--rerank-points", type=int, default=2048)
     args = parser.parse_args()
 
     items = load_catalog(args.catalog)
@@ -88,6 +98,20 @@ def main() -> None:
         payloads=[{**it.payload, "image_path": str(it.image_path)} for it in items],
     )
     index.save(args.out)
+
+    # Локальные признаки карточек — тоже часть индекса. Считать их на запросе означает платить
+    # за каждого кандидата открытием файла и прогоном каскада детекторов: замер сквозного
+    # запроса показал на этом 10–15 секунд.
+    if not args.no_descriptors:
+        store = DescriptorStore(args.out / "descriptors")
+        matcher = XFeatMatcher(max_side=args.rerank_max_side, top_k=args.rerank_points)
+        for item in tqdm(items, desc="дескрипторы"):
+            if store.exists(item.item_id):
+                continue
+            image = load_image(item.image_path)
+            crop = embedder.cropper(item.image_path, image) if embedder.cropper else image
+            store.save(item.item_id, matcher.describe(crop))
+        print(f"дескрипторов: {len(store)}")
 
     (args.out / "config.json").write_text(
         json.dumps(

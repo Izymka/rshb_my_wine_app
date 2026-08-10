@@ -38,7 +38,7 @@ from .detect import BottleDetector, CachedCropper, CascadeCropper
 from .embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex, catalog_document
-from .rerank import XFeatMatcher
+from .rerank import DescriptorStore, XFeatMatcher
 
 INDEX_DIR = Path("models/index")
 DECIDER_DIR = Path("models/decider")
@@ -117,6 +117,7 @@ class WineScanner:
         threshold: float | None = None,
         device=None,
         crop_cache: Path | None = None,
+        ocr_cache: bool = False,
         embedder=None,
         index=None,
         text_index=None,
@@ -125,6 +126,10 @@ class WineScanner:
         decider=None,
     ):
         self.candidates = candidates
+        # Кэш OCR по умолчанию выключен. Он полезен при повторных прогонах по одним и тем же
+        # файлам, но замер задержки с ним показывает не работу системы, а скорость чтения
+        # json-а — именно так и родилась цифра 2 секунды, в которую мы верили.
+        self.ocr_cache = ocr_cache
         self.index = index if index is not None else VectorIndex.load(index_dir)
         self.decider = decider if decider is not None else Decider.load(decider_dir)
         self.threshold = self.decider.threshold if threshold is None else threshold
@@ -154,6 +159,16 @@ class WineScanner:
                 self.index.item_ids, [catalog_document(p) for p in self.index.payloads]
             )
         )
+        descriptor_dir = Path(index_dir) / "descriptors"
+        self.descriptors = (
+            DescriptorStore(descriptor_dir, device=self.matcher.device)
+            if descriptor_dir.exists()
+            else None
+        )
+        # Счётчик кандидатов, признаки которых пришлось считать на лету. В норме он остаётся
+        # нулём; выросший означает, что индекс и дескрипторы разошлись.
+        self.recomputed_descriptors = 0
+
         self.path_by_id = {
             item_id: payload.get("image_path")
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
@@ -186,7 +201,17 @@ class WineScanner:
         return self.cropper.crop(image)
 
     def _candidate_descriptor(self, item_id: str) -> dict | None:
-        """Локальные признаки карточки каталога. Считаются один раз и оседают в кэше матчера."""
+        """Локальные признаки карточки каталога.
+
+        Штатный путь — чтение готового файла, положенного при сборке индекса. Пересчёт на лету
+        оставлен запасным вариантом: он работает, но стоит открытия картинки и прогона каскада
+        детекторов на каждого кандидата, то есть тех самых секунд, ради которых всё и затевалось.
+        """
+        if self.descriptors is not None:
+            stored = self.descriptors.load(item_id)
+            if stored is not None:
+                return stored
+
         path = self.path_by_id.get(item_id)
         if not path:
             return None
@@ -194,6 +219,7 @@ class WineScanner:
         cached = self.matcher.cached(key)
         if cached is not None:
             return cached
+        self.recomputed_descriptors += 1
         return self.matcher.describe(self._crop(load_image(path), key), cache_key=key)
 
     def identify(self, image: Image.Image, image_key: str | None = None) -> ScanResult:
@@ -216,7 +242,7 @@ class WineScanner:
             visual = self.index.search(vector, top_k=VISUAL_CANDIDATES)
 
         with stage("ocr"):
-            lines = self.ocr.read(crop, cache_key=image_key)
+            lines = self.ocr.read(crop, use_cache=self.ocr_cache and image_key is not None)
             text = LabelOCR.joined(lines)
             confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
 

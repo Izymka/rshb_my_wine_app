@@ -22,7 +22,7 @@ from wine_scanner.decide import PairFeatures
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
-from wine_scanner.ocr import LabelOCR, TextIndex, catalog_document
+from wine_scanner.ocr import DEFAULT_MAX_SIDE, LabelOCR, TextIndex, catalog_document
 from wine_scanner.rerank import XFeatMatcher
 
 OUT_PATH = Path("eval/results/features.jsonl")
@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("--candidates", type=int, default=CANDIDATES)
     parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--ocr-max-side", type=int, default=DEFAULT_MAX_SIDE)
     args = parser.parse_args()
 
     device = pick_device()
@@ -70,10 +71,10 @@ def main() -> None:
 
     # OCR прогоняем целиком до того, как поднимется XFeat. Держать оба одновременно в одном
     # процессе оказалось нельзя: прогон намертво вставал после инициализации обоих.
-    ocr = LabelOCR()
+    ocr = LabelOCR(max_side=args.ocr_max_side or None)
     ocr_by_query: dict[str, tuple[str, int, float]] = {}
     for query in tqdm(queries, desc="OCR"):
-        lines = ocr.read(cropper(query.path, load_image(query.path)), cache_key=str(query.path))
+        lines = ocr.read(cropper(query.path, load_image(query.path)), use_cache=True)
         confidence = sum(x.confidence for x in lines) / len(lines) if lines else 0.0
         ocr_by_query[str(query.path)] = (LabelOCR.joined(lines), len(lines), confidence)
     del ocr

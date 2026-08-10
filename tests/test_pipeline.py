@@ -40,7 +40,7 @@ class FakeOCR:
     def __init__(self, lines):
         self._lines = lines
 
-    def read(self, image, cache_key=None):
+    def read(self, image, use_cache=False):
         return self._lines
 
     @staticmethod
@@ -52,7 +52,10 @@ class FakeMatcher:
     """Инлаеры задаются по item_id, картинки кандидатов не читаются."""
 
     def __init__(self, inliers_by_id):
+        import torch
+
         self.inliers_by_id = inliers_by_id
+        self.device = torch.device("cpu")
         self._cache = {}
 
     def cached(self, key):

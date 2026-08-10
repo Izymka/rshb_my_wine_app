@@ -26,7 +26,7 @@ from wine_scanner.catalog import Query, load_own, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import SearchHit, VectorIndex
-from wine_scanner.ocr import LabelOCR, TextIndex, catalog_document
+from wine_scanner.ocr import DEFAULT_MAX_SIDE, LabelOCR, TextIndex, catalog_document
 from wine_scanner.rerank import XFeatMatcher
 
 RESULTS_PATH = Path("eval/results/runs.jsonl")
@@ -112,6 +112,12 @@ def main() -> None:
     parser.add_argument(
         "--text", action="store_true", help="добавить текстовую ветку и слить её через RRF (Э7)"
     )
+    parser.add_argument(
+        "--ocr-max-side",
+        type=int,
+        default=DEFAULT_MAX_SIDE,
+        help="ужать кадр до этой стороны перед распознаванием; 0 — не ужимать вовсе (Э11)",
+    )
     parser.add_argument("--rerank", action="store_true", help="ре-ранкинг top-K по XFeat (Э6)")
     parser.add_argument("--rerank-k", type=int, default=10)
     parser.add_argument("--rerank-max-side", type=int, default=640)
@@ -178,7 +184,7 @@ def main() -> None:
         text_index = TextIndex(
             [it.item_id for it in catalog], [catalog_document(it.payload) for it in catalog]
         )
-        ocr = LabelOCR()
+        ocr = LabelOCR(max_side=args.ocr_max_side or None)
 
     # Карточка по идентификатору: после слияния веток в списке могут оказаться кандидаты,
     # которых визуальный поиск не возвращал, и им нужен payload.
@@ -226,7 +232,7 @@ def main() -> None:
         hits = index.search(vector.numpy(), top_k=RECALL_K)
 
         if text_index is not None:
-            lines = ocr.read(crop_of(query.path), cache_key=str(query.path))
+            lines = ocr.read(crop_of(query.path), use_cache=True)
             text_hits = text_index.search(LabelOCR.joined(lines), top_k=RECALL_K)
             text_ids = [h.item_id for h in text_hits]
             text_ranks.append(
