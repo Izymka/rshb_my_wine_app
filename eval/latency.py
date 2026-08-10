@@ -62,13 +62,19 @@ def main() -> None:
     parser.add_argument("--decider", type=Path, default=Path("models/decider"))
     parser.add_argument("--candidates", type=int, default=25, help="ширина окна ре-ранкинга")
     parser.add_argument("--ocr-max-side", type=int, default=None, help="0 — не ужимать вовсе")
+    parser.add_argument(
+        "--sequential", action="store_true", help="без параллельной текстовой ветки"
+    )
     args = parser.parse_args()
 
     _, queries = load_own()
     paths = [q.path for q in queries][: args.n + 1]
 
     scanner = WineScanner(
-        index_dir=args.index, decider_dir=args.decider, candidates=args.candidates
+        index_dir=args.index,
+        decider_dir=args.decider,
+        candidates=args.candidates,
+        parallel=not args.sequential,
     )
     if args.ocr_max_side is not None:
         scanner.ocr.max_side = args.ocr_max_side or None
@@ -76,7 +82,8 @@ def main() -> None:
     print(
         f"кадров: {len(paths) - 1}, каталог: {len(scanner.index.item_ids)}, "
         f"окно ре-ранкинга: {args.candidates}, OCR до стороны: {scanner.ocr.max_side}, "
-        f"дескрипторы каталога: {'есть' if scanner.descriptors else 'нет'}"
+        f"дескрипторы каталога: {'есть' if scanner.descriptors else 'нет'}, "
+        f"текстовая ветка: {'параллельно' if scanner.parallel else 'последовательно'}"
     )
 
     samples: dict[str, list[float]] = {}
@@ -96,6 +103,10 @@ def main() -> None:
                 samples.setdefault(stage, []).append(value)
 
     report(samples, wall)
+    print(
+        f"сопоставлено пар на запрос: {scanner.matched_pairs / max(len(wall), 1):.1f} "
+        f"при окне {args.candidates}"
+    )
     if scanner.recomputed_descriptors:
         print(
             f"\nвнимание: признаки {scanner.recomputed_descriptors} кандидатов считались на лету "

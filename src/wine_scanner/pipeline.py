@@ -26,6 +26,7 @@ p95 < 2 с, а оптимизировать без разбивки означа
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +119,7 @@ class WineScanner:
         device=None,
         crop_cache: Path | None = None,
         ocr_cache: bool = False,
+        parallel: bool = True,
         embedder=None,
         index=None,
         text_index=None,
@@ -130,6 +132,9 @@ class WineScanner:
         # файлам, но замер задержки с ним показывает не работу системы, а скорость чтения
         # json-а — именно так и родилась цифра 2 секунды, в которую мы верили.
         self.ocr_cache = ocr_cache
+        # Текстовая ветка в отдельном потоке. Оставлено выключаемым, чтобы замерять выигрыш
+        # и чтобы было куда отступить, если чужая библиотека окажется не потокобезопасной.
+        self.parallel = parallel
         self.index = index if index is not None else VectorIndex.load(index_dir)
         self.decider = decider if decider is not None else Decider.load(decider_dir)
         self.threshold = self.decider.threshold if threshold is None else threshold
@@ -168,6 +173,10 @@ class WineScanner:
         # Счётчик кандидатов, признаки которых пришлось считать на лету. В норме он остаётся
         # нулём; выросший означает, что индекс и дескрипторы разошлись.
         self.recomputed_descriptors = 0
+        # Сколько пар «запрос — кандидат» реально сопоставлено. В параллельном режиме их больше
+        # заявленного окна: часть кандидатов сопоставляется заранее, до того как известен
+        # итоговый порядок, и часть этой работы уходит впустую.
+        self.matched_pairs = 0
 
         self.path_by_id = {
             item_id: payload.get("image_path")
@@ -222,9 +231,44 @@ class WineScanner:
         self.recomputed_descriptors += 1
         return self.matcher.describe(self._crop(load_image(path), key), cache_key=key)
 
+    def _text_branch(self, crop: Image.Image, use_cache: bool) -> dict:
+        """Текстовая ветка целиком: распознать этикетку и найти по тексту кандидатов.
+
+        Вынесена в отдельный метод, чтобы её можно было запустить в потоке параллельно
+        с ре-ранкингом. Никакого общего состояния с визуальной веткой у неё нет.
+        """
+        timings: dict[str, float] = {}
+        started = time.perf_counter()
+        lines = self.ocr.read(crop, use_cache=use_cache)
+        text = LabelOCR.joined(lines)
+        timings["ocr"] = time.perf_counter() - started
+
+        started = time.perf_counter()
+        hits = self.text_index.search(text, top_k=TEXT_CANDIDATES) if text else []
+        timings["text_search"] = time.perf_counter() - started
+
+        confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
+        return {
+            "lines": lines,
+            "text": text,
+            "confidence": confidence,
+            "hits": hits,
+            "timings": timings,
+        }
+
+    def _match(self, query_features: dict, item_ids, found: dict) -> None:
+        """Сопоставить запрос с кандидатами, пропуская уже сопоставленных."""
+        for item_id in item_ids:
+            if item_id in found:
+                continue
+            candidate = self._candidate_descriptor(item_id)
+            found[item_id] = self.matcher.match(query_features, candidate) if candidate else None
+            self.matched_pairs += 1
+
     def identify(self, image: Image.Image, image_key: str | None = None) -> ScanResult:
         """Опознать вино по одному кадру."""
         timings: dict[str, float] = {}
+        wall_started = time.perf_counter()
 
         @contextmanager
         def stage(name: str):
@@ -241,13 +285,37 @@ class WineScanner:
         with stage("search"):
             visual = self.index.search(vector, top_k=VISUAL_CANDIDATES)
 
-        with stage("ocr"):
-            lines = self.ocr.read(crop, use_cache=self.ocr_cache and image_key is not None)
-            text = LabelOCR.joined(lines)
-            confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
+        use_cache = self.ocr_cache and image_key is not None
+        matches: dict[str, object] = {}
 
-        with stage("text_search"):
-            textual = self.text_index.search(text, top_k=TEXT_CANDIDATES) if text else []
+        # Текстовая ветка и ре-ранкинг связаны только через итоговый порядок кандидатов, а
+        # считаются оба долго. Поэтому пока читается этикетка, в главном потоке уже идёт
+        # сопоставление точек с визуальными кандидатами — их список известен сразу после
+        # поиска в индексе и от текста не зависит.
+        #
+        # Совпадает такой предварительный список с итоговым почти полностью: текстовая ветка
+        # меняет порядок, но редко приводит кандидата, которого не было в визуальных пятидесяти.
+        # Тех, кого всё же приводит, досопоставляем после слияния — их единицы.
+        if self.parallel:
+            # Заранее берём не всё окно, а его верхнюю половину. Кандидат, стоящий у визуальной
+            # ветки высоко, из итогового порядка почти никогда не выпадает, а вот нижняя часть
+            # окна после слияния с текстом перетасовывается сильно — и сопоставлять её заранее
+            # значит просто выбрасывать работу.
+            head = [h.item_id for h in visual[: max(1, self.candidates // 2)]]
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="text") as pool:
+                future = pool.submit(self._text_branch, crop, use_cache)
+                with stage("rerank"):
+                    query_features = self.matcher.describe(crop)
+                    self._match(query_features, head, matches)
+                text_result = future.result()
+        else:
+            text_result = self._text_branch(crop, use_cache)
+            with stage("rerank"):
+                query_features = self.matcher.describe(crop)
+
+        timings.update(text_result["timings"])
+        lines = text_result["lines"]
+        textual = text_result["hits"]
 
         # Слияние веток. RRF складывает позиции, а не оценки, поэтому шкалы приводить не нужно:
         # у визуальной ветки это косинус, у текстовой — смесь BM25 и fuzzy.
@@ -259,29 +327,30 @@ class WineScanner:
         txt_rank = {h.item_id: i for i, h in enumerate(textual)}
         txt_score = {h.item_id: h.score for h in textual}
 
-        with stage("rerank"):
-            query_features = self.matcher.describe(crop)
-            rows = []
-            for position, item_id in enumerate(order):
-                candidate = self._candidate_descriptor(item_id)
-                match = self.matcher.match(query_features, candidate) if candidate else None
-                rows.append(
-                    PairFeatures(
-                        item_id=item_id,
-                        vis_score=vis_score.get(item_id, 0.0),
-                        vis_rank=vis_rank.get(item_id, 999),
-                        txt_score=txt_score.get(item_id, -1.0),
-                        txt_rank=txt_rank.get(item_id, 999),
-                        rrf_rank=position,
-                        matches=match.matches if match else 0,
-                        inliers=match.inliers if match else 0,
-                        inlier_ratio=match.inlier_ratio if match else 0.0,
-                        reproj_error=match.reproj_error if match else 0.0,
-                        homography_ok=int(match.homography_ok) if match else 0,
-                        ocr_lines=len(lines),
-                        ocr_conf=confidence,
-                    )
+        started = time.perf_counter()
+        self._match(query_features, order, matches)
+        timings["rerank"] = timings.get("rerank", 0.0) + (time.perf_counter() - started)
+
+        rows = []
+        for position, item_id in enumerate(order):
+            match = matches.get(item_id)
+            rows.append(
+                PairFeatures(
+                    item_id=item_id,
+                    vis_score=vis_score.get(item_id, 0.0),
+                    vis_rank=vis_rank.get(item_id, 999),
+                    txt_score=txt_score.get(item_id, -1.0),
+                    txt_rank=txt_rank.get(item_id, 999),
+                    rrf_rank=position,
+                    matches=match.matches if match else 0,
+                    inliers=match.inliers if match else 0,
+                    inlier_ratio=match.inlier_ratio if match else 0.0,
+                    reproj_error=match.reproj_error if match else 0.0,
+                    homography_ok=int(match.homography_ok) if match else 0,
+                    ocr_lines=len(lines),
+                    ocr_conf=text_result["confidence"],
                 )
+            )
 
         with stage("decide"):
             scored = self.decider.score(rows)
@@ -296,13 +365,15 @@ class WineScanner:
             for s in scored
         ]
         best = candidates[0] if candidates else None
-        timings["total"] = sum(v for k, v in timings.items())
+        # Не сумма этапов, а настоящее время запроса: этапы теперь идут внахлёст, и их сумма
+        # больше того, что ждёт пользователь. Ровно эту величину и требует Э11.
+        timings["total"] = time.perf_counter() - wall_started
 
         return ScanResult(
             answered=bool(best and best.probability >= self.threshold),
             best=best,
             candidates=candidates,
-            text=text,
+            text=text_result["text"],
             timings=timings,
             threshold=self.threshold,
         )

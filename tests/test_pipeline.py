@@ -101,10 +101,11 @@ def build_index() -> VectorIndex:
     return index
 
 
-def build_scanner(vector, inliers, lines=(), threshold=0.5) -> WineScanner:
+def build_scanner(vector, inliers, lines=(), threshold=0.5, parallel=True) -> WineScanner:
     index = build_index()
     return WineScanner(
         index=index,
+        parallel=parallel,
         embedder=FakeEmbedder(vector),
         ocr=FakeOCR(list(lines)),
         matcher=FakeMatcher(inliers),
@@ -145,13 +146,26 @@ def test_answer_carries_card_without_service_fields():
 
 
 def test_timings_cover_every_stage():
+    """`total` — время запроса целиком, а не сумма этапов: они идут внахлёст."""
     scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={})
     timings = scanner.identify(image=None).timings
+    stages = {k: v for k, v in timings.items() if k != "total"}
 
-    assert {"crop", "embed", "search", "ocr", "text_search", "rerank", "decide"} <= set(timings)
-    assert timings["total"] == pytest.approx(
-        sum(v for k, v in timings.items() if k != "total"), rel=1e-6
-    )
+    assert {"crop", "embed", "search", "ocr", "text_search", "rerank", "decide"} <= set(stages)
+    assert max(stages.values()) <= timings["total"]
+    assert timings["total"] <= sum(stages.values()) + 0.5
+
+
+def test_parallel_and_sequential_agree():
+    """Перенос текстовой ветки в поток обязан не менять ответ, только время."""
+    kwargs = dict(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={"/нет/такого/b.jpg": 120})
+    parallel = build_scanner(**kwargs).identify(image=None)
+    sequential = build_scanner(**kwargs, parallel=False).identify(image=None)
+
+    assert [c.item_id for c in parallel.candidates] == [
+        c.item_id for c in sequential.candidates
+    ]
+    assert parallel.best.probability == pytest.approx(sequential.best.probability)
 
 
 def test_decider_rejects_reordered_features():
