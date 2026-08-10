@@ -21,10 +21,12 @@ from pathlib import Path
 
 import numpy as np
 
+from wine_scanner.burst import fuse_rrf, ranked
 from wine_scanner.catalog import Query, load_own, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
-from wine_scanner.index import VectorIndex
+from wine_scanner.index import SearchHit, VectorIndex
+from wine_scanner.ocr import LabelOCR, TextIndex, catalog_document
 from wine_scanner.rerank import XFeatMatcher
 
 RESULTS_PATH = Path("eval/results/runs.jsonl")
@@ -107,6 +109,9 @@ def main() -> None:
         "--weights", type=Path, default=Path("models/label_detector.pt"),
         help="веса дообученного детектора этикетки для --detect trained",
     )
+    parser.add_argument(
+        "--text", action="store_true", help="добавить текстовую ветку и слить её через RRF (Э7)"
+    )
     parser.add_argument("--rerank", action="store_true", help="ре-ранкинг top-K по XFeat (Э6)")
     parser.add_argument("--rerank-k", type=int, default=10)
     parser.add_argument("--rerank-max-side", type=int, default=640)
@@ -168,6 +173,20 @@ def main() -> None:
 
     query_vectors = embedder.encode_paths([q.path for q in queries], batch_size=args.batch_size)
 
+    text_index = ocr = None
+    if args.text:
+        text_index = TextIndex(
+            [it.item_id for it in catalog], [catalog_document(it.payload) for it in catalog]
+        )
+        ocr = LabelOCR()
+
+    # Карточка по идентификатору: после слияния веток в списке могут оказаться кандидаты,
+    # которых визуальный поиск не возвращал, и им нужен payload.
+    by_id = {
+        item_id: SearchHit(item_id, 0.0, payload)
+        for item_id, payload in zip(index.item_ids, index.payloads, strict=True)
+    }
+
     matcher = None
     if args.rerank:
         matcher = XFeatMatcher(
@@ -199,11 +218,25 @@ def main() -> None:
         return [item[2] for item in scored] + tail
 
     ranks: list[int] = []
+    text_ranks: list[int] = []
     by_group: dict[str, list[int]] = defaultdict(list)
     mistakes: list[tuple[int, Query, str]] = []
 
     for query, vector in zip(queries, query_vectors, strict=True):
         hits = index.search(vector.numpy(), top_k=RECALL_K)
+
+        if text_index is not None:
+            lines = ocr.read(crop_of(query.path), cache_key=str(query.path))
+            text_hits = text_index.search(LabelOCR.joined(lines), top_k=RECALL_K)
+            text_ids = [h.item_id for h in text_hits]
+            text_ranks.append(
+                text_ids.index(query.true_id) if query.true_id in text_ids else -1
+            )
+            # RRF складывает позиции, а не оценки: шкалы косинуса и текстового счёта
+            # несопоставимы, приводить их друг к другу пришлось бы подбором коэффициентов.
+            fused = fuse_rrf([[h.item_id for h in hits], text_ids])
+            hits = [by_id[item_id] for item_id in ranked(fused)][:RECALL_K]
+
         if matcher is not None:
             hits = rerank(hits, query.path)
         found_ids = [h.item_id for h in hits]
@@ -216,6 +249,14 @@ def main() -> None:
     overall = evaluate(ranks)
     groups = {g: evaluate(r) for g, r in by_group.items()}
     print_table(overall, groups)
+
+    text_only = None
+    if text_ranks:
+        text_only = evaluate(text_ranks)
+        print(
+            f"\nтекстовая ветка отдельно: top-1 {text_only['top1']:.3f}, "
+            f"top-5 {text_only['top5']:.3f}, R@50 {text_only[f'recall@{RECALL_K}']:.3f}"
+        )
 
     if args.errors and mistakes:
         # Сначала те, где правильный ответ вообще не нашёлся, потом самые дальние ранги.
@@ -235,6 +276,8 @@ def main() -> None:
         "descriptor": args.descriptor,
         "detect": args.detect,
         "fit": embedder.fit,
+        "text": args.text,
+        "text_only": text_only,
         "rerank": args.rerank,
         "rerank_k": args.rerank_k if args.rerank else None,
         "matcher": args.matcher if args.rerank else None,
