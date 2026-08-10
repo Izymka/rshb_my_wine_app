@@ -138,5 +138,14 @@ class Dinov2Embedder:
         image = load_image(path)
         if self.cropper is not None:
             image = self.cropper(path, image)
+        return self.encode_image(image)
+
+    def encode_image(self, image) -> torch.Tensor:
+        """Готовое изображение -> вектор. Обрезка сюда не входит: она уже сделана вызывающим.
+
+        Нужен пайплайну, где кадр приходит не из файла, а из запроса, и обрезанная картинка
+        дальше используется ещё дважды — для OCR и для локальных признаков. Читать и резать
+        её трижды незачем.
+        """
         tensor = build_transform(self.size, self.fit)(image)
         return self.encode_batch(tensor.unsqueeze(0))[0]

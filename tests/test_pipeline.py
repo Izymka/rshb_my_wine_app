@@ -1,0 +1,188 @@
+"""Проверка логики сборки пайплайна — без единой нейросети.
+
+Тяжёлые блоки (детектор, DINOv2, EasyOCR, XFeat) подменяются заглушками. Смысл в том, чтобы
+проверяемым оказалось ровно то, что ломается тихо: порядок кандидатов, состав признаков,
+поведение порога отказа. Ошибка в любом из этих мест не роняет процесс — она просто делает
+ответы хуже, и заметить её на глаз в выдаче почти невозможно.
+
+Что проверить так нельзя — качество распознавания. Оно меряется на своём наборе в eval/.
+"""
+
+import numpy as np
+import pytest
+
+from wine_scanner.decide import Decider, PairFeatures
+from wine_scanner.index import VectorIndex
+from wine_scanner.ocr import TextIndex, catalog_document
+from wine_scanner.pipeline import WineScanner
+from wine_scanner.rerank import MatchFeatures
+
+DIM = 8
+
+
+class FakeEmbedder:
+    """Отдаёт заранее заданный вектор. Обрезки нет — картинка идёт как есть."""
+
+    size = 224
+    fit = "pad"
+    cropper = None
+
+    def __init__(self, vector):
+        self.vector = vector
+
+    def encode_image(self, image):
+        import torch
+
+        return torch.tensor(self.vector, dtype=torch.float32)
+
+
+class FakeOCR:
+    def __init__(self, lines):
+        self._lines = lines
+
+    def read(self, image, cache_key=None):
+        return self._lines
+
+    @staticmethod
+    def joined(lines):
+        return " ".join(line.text for line in lines)
+
+
+class FakeMatcher:
+    """Инлаеры задаются по item_id, картинки кандидатов не читаются."""
+
+    def __init__(self, inliers_by_id):
+        self.inliers_by_id = inliers_by_id
+        self._cache = {}
+
+    def cached(self, key):
+        return {"id": key}
+
+    def describe(self, image, cache_key=None):
+        return {"id": cache_key}
+
+    def match(self, query, candidate):
+        inliers = self.inliers_by_id.get(candidate["id"], 0)
+        return MatchFeatures(
+            matches=max(inliers, 4),
+            inliers=inliers,
+            inlier_ratio=1.0 if inliers else 0.0,
+            reproj_error=1.0,
+            homography_ok=inliers > 4,
+        )
+
+
+class FakeBooster:
+    """Сырая оценка = доля инлаеров кандидата. Модель здесь не проверяется, проверяется обвязка."""
+
+    def predict(self, matrix):
+        matrix = np.asarray(matrix)
+        return np.clip(matrix[:, FEATURE_INDEX_INLIERS_SHARE], 1e-3, 1 - 1e-3)
+
+
+FEATURE_INDEX_INLIERS_SHARE = 14  # см. FEATURE_NAMES
+
+
+def build_index() -> VectorIndex:
+    vectors = np.eye(3, DIM, dtype="float32")
+    index = VectorIndex(DIM)
+    index.add(
+        vectors,
+        item_ids=["wine_a", "wine_b", "wine_c"],
+        payloads=[
+            {"name": "Chateau Alpha", "winery": "Alpha", "image_path": "/нет/такого/a.jpg"},
+            {"name": "Chateau Beta", "winery": "Beta", "image_path": "/нет/такого/b.jpg"},
+            {"name": "Gamma Reserve", "winery": "Gamma", "image_path": "/нет/такого/c.jpg"},
+        ],
+    )
+    return index
+
+
+def build_scanner(vector, inliers, lines=(), threshold=0.5) -> WineScanner:
+    index = build_index()
+    return WineScanner(
+        index=index,
+        embedder=FakeEmbedder(vector),
+        ocr=FakeOCR(list(lines)),
+        matcher=FakeMatcher(inliers),
+        text_index=TextIndex(index.item_ids, [catalog_document(p) for p in index.payloads]),
+        decider=Decider(FakeBooster(), calib_weight=1.0, calib_bias=0.0, threshold=threshold),
+        candidates=3,
+    )
+
+
+def test_best_candidate_wins_by_inliers():
+    """Визуально ближе wine_a, но геометрия подтверждает wine_b — верить надо геометрии."""
+    scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={"/нет/такого/b.jpg": 120})
+    result = scanner.identify(image=None)
+
+    assert result.best.item_id == "wine_b"
+    assert [c.item_id for c in result.candidates][0] == "wine_b"
+
+
+def test_refuses_when_probability_below_threshold():
+    """Ни один кандидат не подтверждён геометрией — отвечать нельзя, хотя лучший всё равно есть."""
+    scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={}, threshold=0.9)
+    result = scanner.identify(image=None)
+
+    assert result.answered is False
+    assert result.best is not None
+    assert result.to_dict()["card"] is None
+
+
+def test_answer_carries_card_without_service_fields():
+    scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={"/нет/такого/a.jpg": 200})
+    payload = scanner.identify(image=None).to_dict()
+
+    assert payload["answered"] is True
+    assert payload["item_id"] == "wine_a"
+    assert payload["card"]["name"] == "Chateau Alpha"
+    # image_path — служебное поле для ре-ранкинга, наружу оно уходить не должно.
+    assert "image_path" not in payload["card"]
+
+
+def test_timings_cover_every_stage():
+    scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={})
+    timings = scanner.identify(image=None).timings
+
+    assert {"crop", "embed", "search", "ocr", "text_search", "rerank", "decide"} <= set(timings)
+    assert timings["total"] == pytest.approx(
+        sum(v for k, v in timings.items() if k != "total"), rel=1e-6
+    )
+
+
+def test_decider_rejects_reordered_features():
+    """Перепутанный порядок колонок — самая тихая из возможных поломок, ловим её на загрузке."""
+    with pytest.raises(ValueError, match="порядок признаков"):
+        Decider(FakeBooster(), 1.0, 0.0, 0.5, feature_names=("inliers", "vis_score"))
+
+
+def test_calibration_spreads_the_scale():
+    """Калибровка по логиту обязана растягивать шкалу, а не сплющивать её у единицы."""
+    decider = Decider(FakeBooster(), calib_weight=1.0, calib_bias=0.0, threshold=0.5)
+    values = decider.calibrate(np.array([0.05, 0.5, 0.95]))
+
+    assert values[0] == pytest.approx(0.05, abs=1e-6)
+    assert values[2] == pytest.approx(0.95, abs=1e-6)
+    assert values[2] - values[0] > 0.8
+
+
+def test_pair_features_need_no_labels():
+    """На инференсе правильного ответа нет, и признаки обязаны собираться без него."""
+    row = PairFeatures(
+        item_id="wine_a",
+        vis_score=0.8,
+        vis_rank=0,
+        txt_score=-1.0,
+        txt_rank=999,
+        rrf_rank=0,
+        matches=10,
+        inliers=8,
+        inlier_ratio=0.8,
+        reproj_error=1.0,
+        homography_ok=1,
+        ocr_lines=3,
+        ocr_conf=0.7,
+    )
+    assert row.label == 0
+    assert row.true_id == ""

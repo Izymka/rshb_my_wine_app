@@ -75,6 +75,11 @@ class XFeatMatcher:
             image = image.resize((int(width * scale), int(height * scale)), Image.BICUBIC)
         return np.asarray(image)
 
+    def cached(self, cache_key: str) -> dict | None:
+        """Готовые признаки, если они уже считались. Позволяет не открывать и не резать картинку
+        кандидата ради того, чтобы затем выбросить результат."""
+        return self._cache.get(cache_key)
+
     def describe(self, image: Image.Image, cache_key: str | None = None) -> dict:
         if cache_key is not None and cache_key in self._cache:
             return self._cache[cache_key]

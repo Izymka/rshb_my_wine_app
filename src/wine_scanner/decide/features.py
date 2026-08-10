@@ -35,11 +35,14 @@ FEATURE_NAMES = (
 
 @dataclass
 class PairFeatures:
-    """Сырые признаки одной пары. Производные считаются позже, по всему набору кандидатов."""
+    """Сырые признаки одной пары. Производные считаются позже, по всему набору кандидатов.
 
-    query: str
-    true_id: str
-    group: str
+    Поля разметки (`query`, `true_id`, `group`) стоят последними и необязательны: на инференсе
+    правильного ответа не существует, а признаки собираются ровно те же. Без значений по
+    умолчанию пайплайну пришлось бы подставлять фиктивную разметку — а это верный способ
+    однажды посчитать метрику по выдуманным меткам.
+    """
+
     item_id: str
 
     vis_score: float  # косинус из индекса
@@ -57,9 +60,14 @@ class PairFeatures:
     ocr_lines: int  # сколько строк распознано на запросе
     ocr_conf: float  # средняя уверенность распознавания
 
+    query: str = ""
+    true_id: str = ""
+    group: str = ""
+
     @property
     def label(self) -> int:
-        return int(self.item_id == self.true_id)
+        """Верен ли кандидат. Осмысленно только при заполненном true_id, то есть на обучении."""
+        return int(bool(self.true_id) and self.item_id == self.true_id)
 
     def to_dict(self) -> dict:
         return asdict(self)
