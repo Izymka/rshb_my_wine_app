@@ -1,0 +1,42 @@
+# Запуск сервиса на домашней машине с картой NVIDIA.
+#
+#   docker compose up --build
+#   curl localhost:8000/health   # проверить, что блоки действительно на GPU
+#
+# Первое, что надо посмотреть в /health после переезда, — поле devices. Оно показывает, на чём
+# считается каждый блок по отдельности. XFeat и EasyOCR выбирают устройство сами, и остаться
+# на процессоре здесь легче лёгкого: сервис при этом работает, просто в двадцать раз медленнее.
+
+services:
+  scanner:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Индекс, дескрипторы каталога, детектор этикетки, решающий слой.
+      - ./models:/app/models
+      # Кэш чужих весов переживает пересборку образа.
+      - torch-cache:/opt/torch
+      - easyocr-cache:/opt/easyocr
+    environment:
+      WINE_INDEX: /app/models/index
+      WINE_DECIDER: /app/models/decider
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      # Модели поднимаются десятки секунд, и до этого сервис отвечать не обязан.
+      start_period: 180s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  torch-cache:
+  easyocr-cache:

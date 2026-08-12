@@ -86,6 +86,7 @@ def health() -> dict:
         "catalog_size": len(engine.index.item_ids),
         "threshold": engine.threshold,
         "index_config": engine.config,
+        "devices": engine.devices(),
         "decider": engine.decider.meta,
         "load_seconds": round(float(state.get("load_seconds", 0.0)), 1),
     }

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 
 OCR_CACHE = Path("models/ocr_cache")
@@ -51,9 +52,14 @@ class LabelOCR:
         min_confidence: float = 0.3,
         cache_dir: Path = OCR_CACHE,
         max_side: int | None = DEFAULT_MAX_SIDE,
+        gpu: bool | None = None,
     ):
         self.min_confidence = min_confidence
         self.max_side = max_side
+        # EasyOCR умеет только CUDA: внутри он проверяет torch.cuda и ничего не знает про MPS.
+        # На ноутбуке это значит процессор и 1.2 с на кадр, на машине с картой — порядок
+        # выигрыша, потому что распознавание здесь самый дорогой блок после ре-ранкинга.
+        self.gpu = torch.cuda.is_available() if gpu is None else gpu
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._readers: dict[str, object] = {}
@@ -95,7 +101,7 @@ class LabelOCR:
             langs = CYRILLIC_LANGS if name == "cyrillic" else LATIN_LANGS
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                self._readers[name] = easyocr.Reader(langs, gpu=False, verbose=False)
+                self._readers[name] = easyocr.Reader(langs, gpu=self.gpu, verbose=False)
         return self._readers[name]
 
     def read(self, image: Image.Image, use_cache: bool = False) -> list[TextLine]:

@@ -5,6 +5,7 @@
 см. extract_descriptor.
 """
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -56,8 +57,10 @@ class Dinov2Embedder:
         descriptor: str = "cls_patchmean",
         cropper=None,
         fit: str | None = None,
+        precision: str = "fp32",
     ):
         self.device = device or pick_device()
+        self.precision = precision
         self.size = size
         self.descriptor = descriptor
         # cropper — вызываемый объект (path, PIL.Image) -> PIL.Image, обычно detect.CachedCropper.
@@ -110,11 +113,28 @@ class Dinov2Embedder:
 
     @torch.inference_mode()
     def encode_batch(self, batch: torch.Tensor) -> torch.Tensor:
-        outputs = self.model(pixel_values=batch.to(self.device))
-        vectors = self.extract_descriptor(outputs.last_hidden_state)
+        with self._autocast():
+            outputs = self.model(pixel_values=batch.to(self.device))
+            vectors = self.extract_descriptor(outputs.last_hidden_state)
         # L2-нормализация здесь, а не в индексе: так гарантированно нормированы и каталог,
         # и запрос, потому что оба идут через этот метод.
-        return F.normalize(vectors, p=2, dim=1).float().cpu()
+        return F.normalize(vectors.float(), p=2, dim=1).cpu()
+
+    def _autocast(self):
+        """Половинная точность — по явному запросу, а не по наличию карты.
+
+        Соблазн включить fp16 автоматически на CUDA велик, и это была бы ошибка того же
+        рода, что и наши прежние замеры с прогретыми кэшами: числа изменятся, а проверять
+        их никто не станет. Эмбеддинги каталога и запроса обязаны считаться одинаково, и
+        если индекс собран в fp32, а запрос считается в fp16, расхождение будет маленьким,
+        но никем не измеренным.
+
+        Поэтому переключатель есть, умолчание — fp32, а порядок такой: на новой машине
+        собрать индекс и прогнать бенчмарк в обоих режимах, сравнить, и только потом решать.
+        """
+        if self.precision == "fp32" or self.device.type != "cuda":
+            return nullcontext()
+        return torch.autocast("cuda", dtype=torch.float16)
 
     def encode_paths(
         self, paths: list[Path], batch_size: int = 16, num_workers: int = 4, progress: bool = True

@@ -1,0 +1,12 @@
+# Данные и веса едут томом, а не в образе: вместе это десятки гигабайт.
+data/
+models/
+notebooks/
+.venv/
+.git/
+.idea/
+.pytest_cache/
+.ruff_cache/
+**/__pycache__/
+*.pyc
+eval/results/features.jsonl

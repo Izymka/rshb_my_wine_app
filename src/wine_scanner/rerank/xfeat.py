@@ -52,7 +52,6 @@ class XFeatMatcher:
         matcher: str = "lighterglue",
         min_cossim: float = 0.82,
     ):
-        self.device = device or torch.device("cpu")
         self.top_k = top_k
         self.max_side = max_side
         self.matcher = matcher
@@ -60,6 +59,18 @@ class XFeatMatcher:
         self.model = torch.hub.load(
             "verlab/accelerated_features", "XFeat", pretrained=True, top_k=top_k, trust_repo=True
         )
+
+        # XFeat выбирает устройство сам, в конструкторе: cuda, если она есть, иначе cpu.
+        # Параметра для этого у него нет, а знать его выбор обязательно — дескрипторы каталога
+        # мы читаем с диска и кладём на `self.device`. Разойдись эти два устройства, и на
+        # машине с GPU всё падало бы при первом же сопоставлении, причём далеко от причины.
+        self.device = torch.device(device) if device is not None else self.model.dev
+        if self.device != self.model.dev:
+            self.model.dev = self.device
+            self.model.net = self.model.net.to(self.device)
+            if getattr(self.model, "lighterglue", None) is not None:
+                self.model.lighterglue = self.model.lighterglue.to(self.device)
+
         self._cache: dict[str, dict] = {}
 
     def _prepare(self, image: Image.Image) -> np.ndarray:

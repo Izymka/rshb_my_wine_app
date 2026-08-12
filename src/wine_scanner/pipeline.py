@@ -120,6 +120,7 @@ class WineScanner:
         crop_cache: Path | None = None,
         ocr_cache: bool = False,
         parallel: bool = True,
+        precision: str = "fp32",
         embedder=None,
         index=None,
         text_index=None,
@@ -151,6 +152,7 @@ class WineScanner:
                 device=device,
                 cropper=self._build_cropper(weights, device, crop_cache),
                 fit=self.config.get("fit", "pad"),
+                precision=precision,
             )
         self.embedder = embedder
         self.cropper = getattr(embedder, "cropper", None)
@@ -185,6 +187,20 @@ class WineScanner:
         self.payload_by_id = dict(
             zip(self.index.item_ids, self.index.payloads, strict=True)
         )
+
+    def devices(self) -> dict[str, str]:
+        """На чём реально считается каждый блок.
+
+        Нужно не для красоты: XFeat и EasyOCR выбирают устройство сами, независимо от того,
+        что мы передали эмбеддеру, и молча остаться на процессоре здесь легче лёгкого.
+        Поле уходит в /health, чтобы после переезда это проверялось одним запросом.
+        """
+        return {
+            "embed": str(getattr(self.embedder, "device", "?")),
+            "precision": str(getattr(self.embedder, "precision", "?")),
+            "rerank": str(getattr(self.matcher, "device", "?")),
+            "ocr": "cuda" if getattr(self.ocr, "gpu", False) else "cpu",
+        }
 
     def _build_cropper(self, weights: Path, device, crop_cache: Path | None):
         """Обрезка ровно та же, которой строился индекс."""
