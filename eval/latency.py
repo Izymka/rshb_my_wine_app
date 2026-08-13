@@ -23,7 +23,7 @@ from wine_scanner.catalog import load_own
 from wine_scanner.embed import load_image
 from wine_scanner.pipeline import WineScanner
 
-STAGE_ORDER = ("crop", "embed", "search", "ocr", "text_search", "rerank", "decide")
+STAGE_ORDER = ("crop", "embed", "search", "ocr", "text_search", "rerank", "vintage", "decide")
 
 
 def percentile(values: list[float], q: float) -> float:
