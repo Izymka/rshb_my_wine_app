@@ -48,6 +48,32 @@ def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
     return grouped
 
 
+def training_rows(
+    groups: list[list[PairFeatures]], augment_unknown: bool
+) -> tuple[list, list]:
+    """Матрица и метки для обучения.
+
+    `augment_unknown` добавляет к каждому запросу его же копию без правильного ответа. Смысл
+    в том, что порог отказа обучается на данных, где отказываться не от чего: в обычной
+    выборке верный кандидат всегда присутствует, и признаки вида «здесь нет верного ответа»
+    ничего не улучшают, поэтому модель их не берёт. Замер: AUROC отказа 0.895 -> 0.945.
+    """
+    rows, labels = [], []
+    for candidates in groups:
+        derived = derive(candidates)
+        rows += matrix(derived)
+        labels += [r["label"] for r in derived]
+
+        if not augment_unknown:
+            continue
+        without_true = [c for c in candidates if not c.label]
+        if len(without_true) < len(candidates):
+            unknown = derive(without_true)
+            rows += matrix(unknown)
+            labels += [0] * len(unknown)
+    return rows, labels
+
+
 def make_model() -> LGBMClassifier:
     return LGBMClassifier(
         n_estimators=200,
@@ -125,6 +151,12 @@ def main() -> None:
         default="nofamily",
         help="как моделируется незнакомое вино: с роднёй в каталоге или без (по умолчанию)",
     )
+    parser.add_argument(
+        "--no-augment-unknown",
+        dest="augment_unknown",
+        action="store_false",
+        help="учить только на запросах, где верный ответ есть в каталоге (как было до Э8)",
+    )
     args = parser.parse_args()
 
     by_query = load_queries(args.features)
@@ -139,11 +171,9 @@ def main() -> None:
     oof_unknown = np.full((2, len(queries)), np.nan)  # 0 — с роднёй, 1 — без родни
 
     for train_idx, test_idx in splitter.split(queries, groups=wines):
-        rows, labels = [], []
-        for i in train_idx:
-            derived = derive(by_query[queries[i]])
-            rows += matrix(derived)
-            labels += [r["label"] for r in derived]
+        rows, labels = training_rows(
+            [by_query[queries[i]] for i in train_idx], args.augment_unknown
+        )
         model = make_model().fit(np.asarray(rows), np.asarray(labels))
 
         def predict(candidates: list[PairFeatures], model=model) -> np.ndarray:
@@ -228,11 +258,7 @@ def main() -> None:
             )
 
     final = make_model()
-    rows, labels = [], []
-    for query in queries:
-        derived = derive(by_query[query])
-        rows += matrix(derived)
-        labels += [r["label"] for r in derived]
+    rows, labels = training_rows([by_query[q] for q in queries], args.augment_unknown)
     final.fit(np.asarray(rows), np.asarray(labels))
 
     decider = Decider(
@@ -249,6 +275,7 @@ def main() -> None:
             "auroc_unknown": auroc,
             "scenario": args.scenario,
             "budget": args.budget,
+            "augment_unknown": args.augment_unknown,
             "coverage": picked["coverage"],
             "precision": picked["precision"],
             "false_answer_rate": picked["false_answer_rate"],

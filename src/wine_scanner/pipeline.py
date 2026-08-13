@@ -40,6 +40,7 @@ from .embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex, catalog_document
 from .rerank import DescriptorStore, XFeatMatcher
+from .vintage import Answer, VintageReader, compare, project, resolve
 
 INDEX_DIR = Path("models/index")
 DECIDER_DIR = Path("models/decider")
@@ -81,6 +82,7 @@ class ScanResult:
     timings: dict[str, float]
     threshold: float
     frames: int = 1
+    vintage: Answer | None = None
 
     def to_dict(self) -> dict:
         # При отказе поля ответа пустые, а кандидаты остаются: клиенту есть что показать
@@ -96,6 +98,18 @@ class ScanResult:
                 for c in self.candidates
             ],
             "recognized_text": self.text,
+            # Год отдаётся только вместе с карточкой: при отказе показывать нечего, и год
+            # неизвестно от какого вина будет не сведением, а поводом для путаницы.
+            # `ask` — просьба к клиенту показать вопрос о годе одним тапом.
+            "vintage": (
+                {
+                    "year": self.vintage.year,
+                    "source": self.vintage.source,
+                    "ask": self.vintage.ask,
+                }
+                if answer and self.vintage
+                else None
+            ),
             "threshold": self.threshold,
             "frames": self.frames,
             "timings_ms": {k: round(v * 1000, 1) for k, v in self.timings.items()},
@@ -159,6 +173,7 @@ class WineScanner:
 
         self.ocr = ocr if ocr is not None else LabelOCR()
         self.matcher = matcher if matcher is not None else XFeatMatcher()
+        self.vintage = VintageReader(self.ocr)
         self.text_index = (
             text_index
             if text_index is not None
@@ -187,6 +202,15 @@ class WineScanner:
         self.payload_by_id = dict(
             zip(self.index.item_ids, self.index.payloads, strict=True)
         )
+        # Где на карточке напечатан год. Считается при сборке индекса тем же распознавателем,
+        # что и всё остальное, — на запросе это лишний вызов OCR по каждому кандидату.
+        # Индекс, собранный до Э8, поля не содержит: тогда год читается только из общего
+        # текста этикетки, а увеличение по гомографии просто не включается.
+        self.year_boxes = {
+            item_id: tuple(payload["vintage_box"])
+            for item_id, payload in self.payload_by_id.items()
+            if payload.get("vintage_box")
+        }
 
     def devices(self) -> dict[str, str]:
         """На чём реально считается каждый блок.
@@ -281,6 +305,34 @@ class WineScanner:
             found[item_id] = self.matcher.match(query_features, candidate) if candidate else None
             self.matched_pairs += 1
 
+    def _read_vintage(self, crop: Image.Image, lines, order, matches):
+        """Год урожая на кадре: сначала даром, потом за деньги.
+
+        Общий текст этикетки уже прочитан текстовой веткой, поэтому первая попытка бесплатна
+        и покрывает две трети кадров. Второй заход — вырезать участок по геометрии лидера
+        и перечитать его крупно — стоит ещё одного вызова распознавания, поэтому делается
+        только там, где иначе года не будет вовсе.
+
+        Геометрия берётся у лидера по инлаерам, а не у первого после слияния веток: гомографию
+        мы применяем к пикселям, и здесь важнее всего, чтобы она была точной, а не чтобы
+        кандидат нравился остальным признакам.
+        """
+        reading = self.vintage.from_lines(lines)
+        if reading:
+            return reading
+
+        ranked_by_geometry = [item_id for item_id in order if matches.get(item_id)]
+        if not ranked_by_geometry:
+            return reading
+
+        leader = max(ranked_by_geometry, key=lambda item_id: matches[item_id].inliers)
+        box = self.year_boxes.get(leader)
+        if box is None:
+            return reading
+
+        projected = project(box, matches[leader])
+        return self.vintage.zoom(crop, projected) if projected else reading
+
     def identify(self, image: Image.Image, image_key: str | None = None) -> ScanResult:
         """Опознать вино по одному кадру."""
         timings: dict[str, float] = {}
@@ -347,6 +399,9 @@ class WineScanner:
         self._match(query_features, order, matches)
         timings["rerank"] = timings.get("rerank", 0.0) + (time.perf_counter() - started)
 
+        with stage("vintage"):
+            reading = self._read_vintage(crop, lines, order, matches)
+
         rows = []
         for position, item_id in enumerate(order):
             match = matches.get(item_id)
@@ -365,6 +420,8 @@ class WineScanner:
                     homography_ok=int(match.homography_ok) if match else 0,
                     ocr_lines=len(lines),
                     ocr_conf=text_result["confidence"],
+                    vintage_known=int(bool(reading)),
+                    vintage_match=compare(reading.year, self.payload_by_id.get(item_id, {})),
                 )
             )
 
@@ -392,6 +449,7 @@ class WineScanner:
             text=text_result["text"],
             timings=timings,
             threshold=self.threshold,
+            vintage=resolve(reading, best.payload) if best else None,
         )
 
     def identify_path(self, path: str | Path) -> ScanResult:

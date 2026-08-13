@@ -24,6 +24,17 @@ from wine_scanner.embed import Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import DEFAULT_MAX_SIDE, LabelOCR, TextIndex, catalog_document
 from wine_scanner.rerank import XFeatMatcher
+from wine_scanner.vintage import (
+    Reading,
+    VintageReader,
+    YearRegion,
+    catalog_years,
+    combine,
+    compare,
+    from_text,
+    project,
+    reference_region,
+)
 
 OUT_PATH = Path("eval/results/features.jsonl")
 CROP_CACHE = Path("models/crop_cache")
@@ -69,17 +80,39 @@ def main() -> None:
     )
     path_by_id = dict(zip(index.item_ids, [p["image_path"] for p in index.payloads], strict=True))
 
-    # OCR прогоняем целиком до того, как поднимется XFeat. Держать оба одновременно в одном
-    # процессе оказалось нельзя: прогон намертво вставал после инициализации обоих.
+    # OCR прогоняется целиком заранее — он дешевле в одном заходе и результат кладётся в кэш.
+    # Раньше здесь стояло ещё и `del ocr`: считалось, что распознавание и XFeat не уживаются
+    # в одном процессе. Настоящей причиной зависаний были четыре копии OpenMP, и она устранена
+    # в wine_scanner/__init__.py — сквозной пайплайн держит оба блока одновременно и даже
+    # в разных потоках. Поэтому распознаватель остаётся живым: он понадобится после
+    # ре-ранкинга, чтобы прочитать увеличенный участок с годом.
     ocr = LabelOCR(max_side=args.ocr_max_side or None)
     ocr_by_query: dict[str, tuple[str, int, float]] = {}
     for query in tqdm(queries, desc="OCR"):
         lines = ocr.read(cropper(query.path, load_image(query.path)), use_cache=True)
         confidence = sum(x.confidence for x in lines) / len(lines) if lines else 0.0
         ocr_by_query[str(query.path)] = (LabelOCR.joined(lines), len(lines), confidence)
-    del ocr
 
     matcher = XFeatMatcher(max_side=640, top_k=2048)
+    reader = VintageReader(ocr)
+    payload_by_id = dict(zip(index.item_ids, index.payloads, strict=True))
+    regions: dict[str, YearRegion | None] = {}
+
+    def region_for(item_id: str) -> YearRegion | None:
+        """Где на карточке каталога напечатан год. Считается лениво и один раз.
+
+        Лениво — потому что нужен только у того кандидата, чьей геометрией мы пользуемся,
+        а карточек в каталоге тысяча. В сервисе эта величина считается при сборке индекса,
+        здесь же прогон разовый и кэша OCR достаточно.
+        """
+        if item_id not in regions:
+            path = Path(path_by_id[item_id])
+            crop = cropper(path, load_image(path))
+            lines = ocr.read(crop, use_cache=True)
+            regions[item_id] = reference_region(
+                lines, catalog_years(payload_by_id.get(item_id, {}))
+            )
+        return regions[item_id]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -102,13 +135,32 @@ def main() -> None:
             query_crop = cropper(query.path, load_image(query.path))
             query_features = matcher.describe(query_crop, cache_key=str(query.path))
 
-            for rrf_position, item_id in enumerate(order):
+            matches = {}
+            for item_id in order:
                 candidate_path = Path(path_by_id[item_id])
                 candidate = matcher.describe(
                     cropper(candidate_path, load_image(candidate_path)),
                     cache_key=str(candidate_path),
                 )
-                match = matcher.match(query_features, candidate)
+                matches[item_id] = matcher.match(query_features, candidate)
+
+            # Год урожая. Сначала общий текст этикетки — он уже прочитан и ничего не стоит.
+            # Если года в нём нет, вырезаем участок по геометрии лучшего кандидата: где год
+            # напечатан у него, там же он и у нас. Кандидат берётся именно тот, которого выбрал
+            # бы сервис, а не правильный ответ — иначе замер показал бы недостижимое.
+            vintage_text = from_text(text)
+            vintage_zoom = Reading()
+            leader = max(order, key=lambda item: matches[item].inliers, default=None)
+            if not vintage_text and leader is not None:
+                region = region_for(leader)
+                if region is not None:
+                    box = project(region.box, matches[leader])
+                    if box is not None:
+                        vintage_zoom = reader.zoom(query_crop, box)
+            vintage = combine(vintage_text, vintage_zoom)
+
+            for rrf_position, item_id in enumerate(order):
+                match = matches[item_id]
 
                 row = PairFeatures(
                     query=str(query.path),
@@ -127,6 +179,13 @@ def main() -> None:
                     homography_ok=int(match.homography_ok),
                     ocr_lines=n_lines,
                     ocr_conf=confidence,
+                    vintage_known=int(bool(vintage)),
+                    vintage_match=compare(vintage.year, payload_by_id.get(item_id, {})),
+                    vintage_year=vintage.year or 0,
+                    vintage_source=vintage.source,
+                    vintage_text=vintage_text.year or 0,
+                    vintage_zoom=vintage_zoom.year or 0,
+                    vintage_ref=leader if leader and vintage_zoom else "",
                 )
                 fh.write(json.dumps(row.to_dict(), ensure_ascii=False) + "\n")
                 written += 1

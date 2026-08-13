@@ -18,7 +18,9 @@ from wine_scanner.catalog import CatalogItem, load_own, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
+from wine_scanner.ocr import LabelOCR
 from wine_scanner.rerank import DescriptorStore, XFeatMatcher
+from wine_scanner.vintage import catalog_years, reference_region
 
 CROP_CACHE = Path("models/crop_cache")
 
@@ -50,6 +52,29 @@ def build_cropper(detect: str | None, weights: Path, device) -> object | None:
     return CachedCropper(detector, CROP_CACHE)
 
 
+def year_boxes(items: list[CatalogItem], cropper) -> dict[str, tuple]:
+    """Найти на каждой карточке участок с годом.
+
+    Считается здесь, а не на запросе, по той же причине, что и дескрипторы XFeat: это свойство
+    каталога, а не снимка. На запросе это был бы лишний вызов распознавания по каждому
+    кандидату — те самые секунды, ради которых переписывался весь Э11.
+
+    Год находится не у всех карточек, и это нормально: у вина без винтажа его на этикетке нет,
+    а у части снимков он не читается. Такие карточки просто не получают поля, и увеличение
+    по ним не работает — год для них берётся из общего текста этикетки или не берётся вовсе.
+    """
+    ocr = LabelOCR()
+    found: dict[str, tuple] = {}
+    for item in tqdm(items, desc="год на карточках"):
+        image = load_image(item.image_path)
+        crop = cropper(item.image_path, image) if cropper else image
+        region = reference_region(ocr.read(crop, use_cache=True), catalog_years(item.payload))
+        if region is not None:
+            found[item.item_id] = region.box
+    print(f"карточек с найденным годом: {len(found)} из {len(items)}")
+    return found
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=Path("models/index"))
@@ -68,6 +93,11 @@ def main() -> None:
         "--no-descriptors",
         action="store_true",
         help="не считать локальные признаки XFeat (индекс без ре-ранкинга)",
+    )
+    parser.add_argument(
+        "--no-vintage-boxes",
+        action="store_true",
+        help="не искать год на карточках (сборка быстрее, увеличение по гомографии отключено)",
     )
     parser.add_argument("--rerank-max-side", type=int, default=640)
     parser.add_argument("--rerank-points", type=int, default=2048)
@@ -89,13 +119,23 @@ def main() -> None:
 
     vectors = embedder.encode_paths([it.image_path for it in items], batch_size=args.batch_size)
 
+    boxes = year_boxes(items, embedder.cropper) if not args.no_vintage_boxes else {}
+
     index = VectorIndex(embedder.dim)
     index.add(
         vectors.numpy(),
         item_ids=[it.item_id for it in items],
         # image_path нужен не для показа, а для ре-ранкинга: XFeat сравнивает запрос с самой
         # картинкой кандидата, поэтому путь обязан пережить сборку индекса.
-        payloads=[{**it.payload, "image_path": str(it.image_path)} for it in items],
+        # vintage_box — то же самое для Э8: где на карточке напечатан год.
+        payloads=[
+            {
+                **it.payload,
+                "image_path": str(it.image_path),
+                **({"vintage_box": list(boxes[it.item_id])} if it.item_id in boxes else {}),
+            }
+            for it in items
+        ],
     )
     index.save(args.out)
 

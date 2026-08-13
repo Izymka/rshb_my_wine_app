@@ -11,9 +11,9 @@
 import numpy as np
 import pytest
 
-from wine_scanner.decide import Decider, PairFeatures
+from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures
 from wine_scanner.index import VectorIndex
-from wine_scanner.ocr import TextIndex, catalog_document
+from wine_scanner.ocr import TextIndex, TextLine, catalog_document
 from wine_scanner.pipeline import WineScanner
 from wine_scanner.rerank import MatchFeatures
 
@@ -83,17 +83,25 @@ class FakeBooster:
         return np.clip(matrix[:, FEATURE_INDEX_INLIERS_SHARE], 1e-3, 1 - 1e-3)
 
 
-FEATURE_INDEX_INLIERS_SHARE = 14  # см. FEATURE_NAMES
+# Номер колонки спрашиваем у самого списка признаков. Раньше здесь стояло число, и стоило
+# добавить признак в середину, как фиктивный бустер начинал читать чужую колонку — три теста
+# падали с сообщением про не то вино, ни словом не намекая на причину.
+FEATURE_INDEX_INLIERS_SHARE = FEATURE_NAMES.index("inliers_share")
 
 
-def build_index() -> VectorIndex:
+def build_index(extra: dict | None = None) -> VectorIndex:
     vectors = np.eye(3, DIM, dtype="float32")
     index = VectorIndex(DIM)
     index.add(
         vectors,
         item_ids=["wine_a", "wine_b", "wine_c"],
         payloads=[
-            {"name": "Chateau Alpha", "winery": "Alpha", "image_path": "/нет/такого/a.jpg"},
+            {
+                "name": "Chateau Alpha",
+                "winery": "Alpha",
+                "image_path": "/нет/такого/a.jpg",
+                **(extra or {}),
+            },
             {"name": "Chateau Beta", "winery": "Beta", "image_path": "/нет/такого/b.jpg"},
             {"name": "Gamma Reserve", "winery": "Gamma", "image_path": "/нет/такого/c.jpg"},
         ],
@@ -101,8 +109,10 @@ def build_index() -> VectorIndex:
     return index
 
 
-def build_scanner(vector, inliers, lines=(), threshold=0.5, parallel=True) -> WineScanner:
-    index = build_index()
+def build_scanner(
+    vector, inliers, lines=(), threshold=0.5, parallel=True, extra=None
+) -> WineScanner:
+    index = build_index(extra)
     return WineScanner(
         index=index,
         parallel=parallel,
@@ -143,6 +153,43 @@ def test_answer_carries_card_without_service_fields():
     assert payload["card"]["name"] == "Chateau Alpha"
     # image_path — служебное поле для ре-ранкинга, наружу оно уходить не должно.
     assert "image_path" not in payload["card"]
+
+
+def test_vintage_of_a_single_bottle_comes_from_the_card():
+    """Карточка описывает конкретную бутылку — год берём из неё, а не с фотографии."""
+    scanner = build_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/a.jpg": 200},
+        extra={"vintage": 2022},
+    )
+    payload = scanner.identify(image=None).to_dict()
+
+    assert payload["vintage"] == {"year": 2022, "source": "catalog", "ask": False}
+
+
+def test_vintage_of_a_line_card_is_read_from_the_label():
+    """Карточка на линейку год не называет: выбрать из списка может только этикетка."""
+    line = TextLine("CHATEAU ALPHA 2019 BORDEAUX", 0.9, "latin")
+    scanner = build_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/a.jpg": 200},
+        lines=[line],
+        extra={"vintages": "[2020, 2019, 2018]"},
+    )
+    payload = scanner.identify(image=None).to_dict()
+
+    assert payload["vintage"] == {"year": 2019, "source": "text", "ask": False}
+
+
+def test_vintage_is_not_reported_when_the_answer_is_refused():
+    """При отказе карточки нет, и год показывать не от чего: он относился бы к чужому вину."""
+    scanner = build_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={}, threshold=0.9, extra={"vintage": 2022}
+    )
+    payload = scanner.identify(image=None).to_dict()
+
+    assert payload["answered"] is False
+    assert payload["vintage"] is None
 
 
 def test_timings_cover_every_stage():

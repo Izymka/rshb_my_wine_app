@@ -38,12 +38,28 @@ LATIN_LANGS = ["fr", "en"]
 # текста мелкая сетка даже мешает — на 640 группа blur читается лучше, чем на полном размере.
 DEFAULT_MAX_SIDE = 640
 
+# Версия формата кэша. Меняется, когда в TextLine появляется поле: старые записи его не
+# содержат, и без версии они бы молча подсовывали строки без координат, а блок винтажа
+# просто никогда бы не срабатывал — при полностью зелёных тестах.
+CACHE_VERSION = 2
+
 
 @dataclass
 class TextLine:
     text: str
     confidence: float
     source: str  # какой читатель дал строку
+    # Прямоугольник строки в долях кадра: (x0, y0, x1, y1), начало координат — левый верхний
+    # угол. Доли, а не пиксели, потому что кадр по пути ужимается: до OCR — до max_side,
+    # до XFeat — до своего предела. Абсолютные координаты пришлось бы пересчитывать при каждой
+    # передаче между блоками, и однажды кто-нибудь забыл бы.
+    box: tuple[float, float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        # Из json бокс приходит списком — приводим к кортежу, чтобы строка из кэша и строка,
+        # посчитанная только что, вели себя одинаково.
+        if self.box is not None:
+            self.box = tuple(float(v) for v in self.box)  # type: ignore[assignment]
 
 
 class LabelOCR:
@@ -90,7 +106,9 @@ class LabelOCR:
         миллисекунды против секунд распознавания.
         """
         digest = hashlib.sha1(image.tobytes())
-        digest.update(f"{image.size}:{self.min_confidence}:{self.max_side}".encode())
+        digest.update(
+            f"{image.size}:{self.min_confidence}:{self.max_side}:v{CACHE_VERSION}".encode()
+        )
         return self.cache_dir / f"{digest.hexdigest()}.json"
 
     def _reader(self, name: str):
@@ -118,11 +136,14 @@ class LabelOCR:
             return [TextLine(**line) for line in data]
 
         array = np.asarray(image)
+        width, height = image.size
         lines: list[TextLine] = []
         for name in ("cyrillic", "latin"):
-            for _, text, confidence in self._reader(name).readtext(array):
+            for box, text, confidence in self._reader(name).readtext(array):
                 if confidence >= self.min_confidence and text.strip():
-                    lines.append(TextLine(text.strip(), float(confidence), name))
+                    lines.append(
+                        TextLine(text.strip(), float(confidence), name, _rect(box, width, height))
+                    )
 
         if cached is not None:
             cached.write_text(
@@ -131,6 +152,41 @@ class LabelOCR:
             )
         return lines
 
+    def read_digits(self, image: Image.Image, min_confidence: float = 0.1) -> str:
+        """Прочитать на маленьком участке только цифры.
+
+        Отличий от `read` три, и все ради Э8. Читатель один: цифры одинаковы во всех
+        алфавитах, второй проход был бы платой ни за что. Распознавателю запрещено всё, кроме
+        цифр, — иначе в «2021» он норовит увидеть слово, а нам нужно число. И порог уверенности
+        ниже: на четырёх знаках без словарного контекста распознаватель уверен в себе слабее,
+        а от мусора нас всё равно защищает проверка правдоподобия года.
+
+        Кэша здесь нет: участок вырезан по геометрии конкретной пары и второй раз не повторится.
+        """
+        result = self._reader("latin").readtext(
+            np.asarray(image), allowlist="0123456789", detail=1
+        )
+        return " ".join(
+            text.strip() for _, text, confidence in result if confidence >= min_confidence
+        )
+
     @staticmethod
     def joined(lines: list[TextLine]) -> str:
         return " ".join(line.text for line in lines)
+
+
+def _rect(box, width: int, height: int) -> tuple[float, float, float, float]:
+    """Четырёхугольник EasyOCR -> охватывающий прямоугольник в долях кадра.
+
+    EasyOCR отдаёт четыре угла, потому что строка может идти под наклоном. Наклон нам не
+    нужен: участок всё равно вырезается с запасом, а прямоугольник переносится через
+    гомографию четырьмя углами так же, как любой другой.
+    """
+    xs = [float(point[0]) / width for point in box]
+    ys = [float(point[1]) / height for point in box]
+    return (
+        max(0.0, min(xs)),
+        max(0.0, min(ys)),
+        min(1.0, max(xs)),
+        min(1.0, max(ys)),
+    )

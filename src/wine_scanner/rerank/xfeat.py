@@ -34,6 +34,15 @@ class MatchFeatures:
     reproj_error: float  # средняя ошибка репроекции по инлаерам, пиксели
     homography_ok: bool  # не выродилась ли найденная геометрия
 
+    # Сама матрица перехода от кадра кандидата к кадру запроса, в координатах уменьшенных
+    # изображений (см. _prepare). В признаки решающего слоя не идёт — она нужна Э8: зная,
+    # где год напечатан на эталоне, по ней находим тот же участок на нашей фотографии.
+    homography: np.ndarray | None = None
+    # Размеры кадров, в которых посчитана матрица. Без них она бесполезна: координаты в неё
+    # входят не в долях, а в пикселях уменьшенных копий.
+    query_size: tuple[int, int] | None = None
+    candidate_size: tuple[int, int] | None = None
+
     @property
     def score(self) -> float:
         """Насколько уверенно пара подтверждена геометрией."""
@@ -41,6 +50,9 @@ class MatchFeatures:
 
 
 EMPTY = MatchFeatures(0, 0, 0.0, 0.0, False)
+
+# Поля, которые не являются признаками: это геометрия для Э8, а не числа для LightGBM.
+GEOMETRY_FIELDS = ("homography", "query_size", "candidate_size")
 
 
 class XFeatMatcher:
@@ -152,6 +164,11 @@ class XFeatMatcher:
             inlier_ratio=inliers / n_matches,
             reproj_error=error,
             homography_ok=_homography_sane(homography),
+            homography=homography,
+            # Размеры отдаются только вместе с матрицей: порознь они бессмысленны, а из
+            # ранних выходов выше возвращать нечего — гомографии там нет.
+            query_size=tuple(query.get("image_size", ())) or None,
+            candidate_size=tuple(candidate.get("image_size", ())) or None,
         )
 
 
@@ -168,7 +185,9 @@ def _homography_sane(homography: np.ndarray) -> bool:
 
 
 def features_to_dict(features: MatchFeatures) -> dict:
-    return asdict(features)
+    """Только числовые признаки. Геометрия отбрасывается: матрица не сериализуется в json
+    и в решающем слое ей делать нечего."""
+    return {k: v for k, v in asdict(features).items() if k not in GEOMETRY_FIELDS}
 
 
 def image_key(path: Path) -> str:

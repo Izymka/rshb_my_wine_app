@@ -84,7 +84,36 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--features", type=Path, default=FEATURES_PATH)
     parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument(
+        "--without",
+        default="",
+        help="обнулить признаки через запятую: ablation на одних и тех же строках",
+    )
+    parser.add_argument("--out", type=Path, default=RESULTS_PATH)
+    parser.add_argument(
+        "--no-augment-unknown",
+        dest="augment_unknown",
+        action="store_false",
+        help="учить только на запросах, где верный ответ есть в каталоге (как было до Э8)",
+    )
     args = parser.parse_args()
+
+    # Ablation делаем обнулением колонки, а не пересбором файла. Строки остаются те же самые,
+    # значит разница в метриках — это вклад признака, а не случайность другого прогона.
+    # Постоянная колонка для дерева равносильна отсутствующей: расщепить по ней нечего.
+    dropped = [name.strip() for name in args.without.split(",") if name.strip()]
+    unknown = set(dropped) - set(FEATURE_NAMES)
+    if unknown:
+        raise SystemExit(f"нет таких признаков: {sorted(unknown)}")
+    blanked = [FEATURE_NAMES.index(name) for name in dropped]
+    if blanked:
+        print(f"обнулены признаки: {', '.join(dropped)}")
+
+    def design(rows: list[dict]) -> np.ndarray:
+        x = np.asarray(matrix(rows), dtype=float)
+        if blanked:
+            x[:, blanked] = 0.0
+        return x
 
     by_query = load_queries(args.features)
     queries = sorted(by_query)
@@ -109,15 +138,31 @@ def main() -> None:
         rows, labels = [], []
         for i in train_idx:
             derived = derive(by_query[queries[i]])
-            rows += matrix(derived)
+            rows += design(derived).tolist()
             labels += [r["label"] for r in derived]
+
+            # Тот же запрос, но правильный ответ выброшен: все кандидаты ложные.
+            #
+            # Без этих строк модель ни разу за обучение не видит ситуации, ради которой
+            # заведён порог отказа. Ей показывают только запросы, где верный ответ есть,
+            # и лучший способ угадать его — геометрия. Признаки, которые говорят «здесь
+            # вообще нет верного ответа» (чужой год, слабый отрыв), при таком обучении
+            # не получают повода стать полезными: на обучающей выборке они ничего не
+            # улучшают, потому что улучшать там нечего.
+            if not args.augment_unknown:
+                continue
+            without_true = [c for c in by_query[queries[i]] if not c.label]
+            if len(without_true) < len(by_query[queries[i]]):
+                unknown_rows = derive(without_true)
+                rows += design(unknown_rows).tolist()
+                labels += [0] * len(unknown_rows)
         model = train_model(np.asarray(rows), np.asarray(labels))
         importance += model.feature_importances_
 
         for i in test_idx:
             candidates = by_query[queries[i]]
             derived = derive(candidates)
-            probs = model.predict_proba(np.asarray(matrix(derived)))[:, 1]
+            probs = model.predict_proba(design(derived))[:, 1]
             best = int(np.argmax(probs))
             oof_best_prob[i] = probs[best]
             oof_best_correct[i] = candidates[best].item_id == candidates[best].true_id
@@ -128,7 +173,7 @@ def main() -> None:
             without_true = [c for c in candidates if not c.label]
             if without_true:
                 unknown = derive(without_true)
-                oof_unknown_prob[i] = model.predict_proba(np.asarray(matrix(unknown)))[:, 1].max()
+                oof_unknown_prob[i] = model.predict_proba(design(unknown))[:, 1].max()
 
             # Второй сценарий: нет не только самого вина, но и его родни — других вин того же
             # производителя. В нашем наборе 11 вин из 17 имеют почти близнеца, и это делает
@@ -139,9 +184,7 @@ def main() -> None:
             without_family = [c for c in candidates if family_key(c.item_id) != family]
             if without_family:
                 unknown = derive(without_family)
-                oof_unknown_nofamily[i] = model.predict_proba(
-                    np.asarray(matrix(unknown))
-                )[:, 1].max()
+                oof_unknown_nofamily[i] = model.predict_proba(design(unknown))[:, 1].max()
 
     print(f"\ntop-1 сейчас (RRF без обучения): {baseline_correct.mean():.3f}")
     print(f"top-1 с решающим слоем:          {oof_best_correct.mean():.3f}")
@@ -203,7 +246,7 @@ def main() -> None:
     for i in order[:8]:
         print(f"  {FEATURE_NAMES[i]:<16}{importance[i] / args.folds:>7.0f}")
 
-    RESULTS_PATH.write_text(
+    args.out.write_text(
         json.dumps(
             {
                 "baseline_top1": float(baseline_correct.mean()),
