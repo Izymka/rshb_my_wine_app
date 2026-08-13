@@ -24,6 +24,7 @@ p95 < 2 с, а оптимизировать без разбивки означа
 разных пространств, а выглядеть это будет просто как «плохо ищет».
 """
 
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +51,38 @@ VISUAL_CANDIDATES = 50
 TEXT_CANDIDATES = 50
 RERANK_CANDIDATES = 25
 
+# Сколько кандидатов уходит клиенту. Решающий слой оценивает все 25, но интерфейсу нужны
+# первые несколько — на экране «возможно, одно из этих» больше и не поместится. Разница не
+# косметическая: карточка весит сотни байт, и полные 25 штук это десятки килобайт на каждый
+# ответ, которые едут по мобильной сети ради строк, недоступных пользователю.
+REPORTED_CANDIDATES = 5
+
+# Поля payload, которые нужны пайплайну, но не клиенту: путь к картинке каталога для
+# ре-ранкинга и координаты года на карточке для Э8. В карточке вина им делать нечего.
+SERVICE_FIELDS = frozenset({"image_path", "vintage_box"})
+
+
+def digest(paths: list[Path]) -> str | None:
+    """Короткий отпечаток набора файлов — им версионируются артефакты.
+
+    Считается по содержимому, а не по времени правки: пересборка индекса из тех же данных
+    обязана дать ту же версию, иначе поле бесполезно ровно там, где нужно, — при разборе
+    «почему на прошлой неделе отвечало иначе».
+
+    Читается всё целиком, но происходит это один раз на старте сервиса, рядом с загрузкой
+    моделей, которая занимает десятки секунд. `None` означает, что файлов нет: так бывает
+    в тестах, где блоки подменены заглушками и артефактов на диске не существует вовсе.
+    """
+    hasher = hashlib.sha1()
+    found = False
+    for path in paths:
+        if not path.exists():
+            continue
+        hasher.update(path.name.encode())
+        hasher.update(path.read_bytes())
+        found = True
+    return hasher.hexdigest()[:12] if found else None
+
 
 @dataclass
 class Candidate:
@@ -63,7 +96,7 @@ class Candidate:
     @property
     def card(self) -> dict:
         """Карточка для показа: всё, кроме служебных полей."""
-        return {k: v for k, v in self.payload.items() if k != "image_path"}
+        return {k: v for k, v in self.payload.items() if k not in SERVICE_FIELDS}
 
 
 @dataclass
@@ -93,9 +126,11 @@ class ScanResult:
             "probability": self.best.probability if self.best else 0.0,
             "item_id": answer.item_id if answer else None,
             "card": answer.card if answer else None,
+            # Наружу уходит верхушка списка, а не всё окно ре-ранкинга: см. REPORTED_CANDIDATES.
+            # В самом ScanResult кандидаты остаются все — на них считаются метрики.
             "candidates": [
                 {"item_id": c.item_id, "probability": c.probability, "card": c.card}
-                for c in self.candidates
+                for c in self.candidates[:REPORTED_CANDIDATES]
             ],
             "recognized_text": self.text,
             # Год отдаётся только вместе с карточкой: при отказе показывать нечего, и год
@@ -158,6 +193,17 @@ class WineScanner:
         self.config = (
             json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
         )
+
+        # Версия артефактов уходит в каждый ответ. Индекс и решающий слой пересобираются, и без
+        # этого поля ответы, полученные на разных версиях, в логах клиента неразличимы: жалоба
+        # «оно показало не то» приходит через неделю, когда на диске давно лежит другой индекс.
+        index_dir, decider_dir = Path(index_dir), Path(decider_dir)
+        self.version = {
+            "index": digest(
+                [index_dir / "vectors.faiss", index_dir / "meta.json", config_path]
+            ),
+            "decider": digest([decider_dir / "model.txt", decider_dir / "meta.json"]),
+        }
 
         if embedder is None:
             device = device or pick_device()

@@ -14,7 +14,7 @@ import pytest
 from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import TextIndex, TextLine, catalog_document
-from wine_scanner.pipeline import WineScanner
+from wine_scanner.pipeline import REPORTED_CANDIDATES, Candidate, ScanResult, WineScanner
 from wine_scanner.rerank import MatchFeatures
 
 DIM = 8
@@ -145,14 +145,43 @@ def test_refuses_when_probability_below_threshold():
 
 
 def test_answer_carries_card_without_service_fields():
-    scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={"/нет/такого/a.jpg": 200})
+    scanner = build_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/a.jpg": 200},
+        extra={"vintage_box": [0.1, 0.2, 0.3, 0.4]},
+    )
     payload = scanner.identify(image=None).to_dict()
 
     assert payload["answered"] is True
     assert payload["item_id"] == "wine_a"
     assert payload["card"]["name"] == "Chateau Alpha"
-    # image_path — служебное поле для ре-ранкинга, наружу оно уходить не должно.
+    # Служебные поля: путь к картинке нужен ре-ранкингу, координаты года — блоку винтажа.
+    # Наружу не уходит ни то, ни другое, и в списке кандидатов тоже.
     assert "image_path" not in payload["card"]
+    assert "vintage_box" not in payload["card"]
+    assert all("vintage_box" not in c["card"] for c in payload["candidates"])
+
+
+def test_only_the_top_of_the_list_goes_out():
+    """Решающий слой оценивает всё окно, клиенту уходит верхушка."""
+    candidates = [
+        Candidate(item_id=f"wine_{i}", probability=1.0 - i / 100, payload={"name": f"Вино {i}"})
+        for i in range(REPORTED_CANDIDATES + 3)
+    ]
+    result = ScanResult(
+        answered=True,
+        best=candidates[0],
+        candidates=candidates,
+        text="",
+        timings={"total": 0.1},
+        threshold=0.5,
+    )
+    payload = result.to_dict()
+
+    assert len(payload["candidates"]) == REPORTED_CANDIDATES
+    # Обрезается только выдача: метрики считаются по полному списку.
+    assert len(result.candidates) == REPORTED_CANDIDATES + 3
+    assert payload["candidates"][0]["item_id"] == "wine_0"
 
 
 def test_vintage_of_a_single_bottle_comes_from_the_card():
