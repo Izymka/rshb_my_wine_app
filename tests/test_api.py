@@ -26,12 +26,16 @@ def frame(color: str = "white") -> bytes:
     return buffer.getvalue()
 
 
-def answer(frames: int = 1) -> ScanResult:
-    best = Candidate(item_id="wine_a", probability=0.9, payload={"name": "Chateau Alpha"})
+def answer(frames: int = 1, answered: bool = True) -> ScanResult:
+    best = Candidate(
+        item_id="wine_a", probability=0.9 if answered else 0.4,
+        payload={"name": "Chateau Alpha", "winery": "Alpha"},
+    )
+    second = Candidate(item_id="wine_b", probability=0.3, payload={"name": "Chateau Beta"})
     return ScanResult(
-        answered=True,
+        answered=answered,
         best=best,
-        candidates=[best],
+        candidates=[best, second],
         text="CHATEAU ALPHA",
         timings={"total": 0.5},
         threshold=0.73,
@@ -44,10 +48,11 @@ class FakeScanner:
 
     def __init__(self):
         self.calls: list[str] = []
+        self.answered = True
 
     def identify(self, image, image_key=None) -> ScanResult:
         self.calls.append("single")
-        return answer()
+        return answer(answered=self.answered)
 
     def identify_burst(self, images) -> ScanResult:
         self.calls.append("burst")
@@ -131,5 +136,37 @@ def test_request_id_survives_an_error(client):
 
 def test_broken_file_is_a_client_error(client):
     response = client.post("/scan", files={"files": ("кадр.png", b"not an image", "image/png")})
+
+    assert response.status_code == 400
+
+
+def test_eval_endpoint_returns_a_flat_slug(client):
+    """Скрипт организаторов читает из ответа одно поле — slug — и ждёт там строку."""
+    response = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slug"] == "wine_a"
+    assert body["found"] is True
+    assert client.engine.calls == ["single"]
+
+
+def test_eval_endpoint_refuses_honestly_with_similar_wines(client):
+    """Незнакомое вино: slug строго null (скрипт запишет отказ), рядом — похожие, по ТЗ п. 5."""
+    client.engine.answered = False
+    response = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+
+    body = response.json()
+    assert body["slug"] is None
+    assert body["found"] is False
+    assert [c["slug"] for c in body["similar"]] == ["wine_a", "wine_b"]
+    assert body["similar"][0]["winery"] == "Alpha"
+
+
+def test_eval_endpoint_rejects_a_broken_file(client):
+    """Не-200 скрипт сам превращает в null; главное — не отвечать 200 без slug."""
+    response = client.post(
+        "/v1/eval/predict", files={"image": ("q.png", b"not an image", "image/png")}
+    )
 
     assert response.status_code == 400

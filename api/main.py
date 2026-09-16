@@ -26,7 +26,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 
-from wine_scanner.pipeline import WineScanner
+from wine_scanner.pipeline import REPORTED_CANDIDATES, ScanResult, WineScanner
 
 # Телефон отдаёт HEIC, и без этой строки сервис будет падать ровно на тех снимках,
 # которые пользователь делает чаще всего.
@@ -173,3 +173,55 @@ async def scan(files: Annotated[list[UploadFile], File()], request: Request) -> 
         result.timings["total"] * 1000,
     )
     return {"request_id": number, "version": engine.version, **result.to_dict()}
+
+
+def eval_answer(result: ScanResult) -> dict:
+    """Ответ в формате скрипта оценки кейсодержателя.
+
+    Скрипт читает из объекта одно поле — `slug` — и ждёт строку. Ниже порога отдаём `null`
+    и рядом похожие вина: ТЗ (п. 5) требует на незнакомое вино честно сказать «не найдено»
+    и предложить максимально похожие, а не назвать чужое. Ключ каталога платформы — slug,
+    поэтому item_id здесь и есть slug.
+    """
+    if result.answered and result.best:
+        return {
+            "slug": result.best.item_id,
+            "found": True,
+            "probability": result.best.probability,
+        }
+    return {
+        "slug": None,
+        "found": False,
+        "similar": [
+            {
+                "slug": c.item_id,
+                "name": c.payload.get("name"),
+                "winery": c.payload.get("winery"),
+                "probability": c.probability,
+            }
+            for c in result.candidates[:REPORTED_CANDIDATES]
+        ],
+    }
+
+
+@app.post("/v1/eval/predict")
+async def predict(image: Annotated[UploadFile, File()], request: Request) -> dict:
+    """Один кадр — один slug. Endpoint для participant_test.sh организаторов.
+
+    Тот же пайплайн, что и в /scan, отличается только форма ответа: скрипт шлёт одно
+    multipart-поле `image` и разбирает плоский объект. Своей логики здесь нет намеренно —
+    иначе цифры контрольного прогона перестанут описывать то, что видит пользователь.
+    """
+    number = request.state.request_id
+    images = await collect([image])
+    engine = scanner()
+    result = engine.identify(images[0])
+    log.info(
+        "%s eval ответ=%s slug=%s p=%.3f %.0f мс",
+        number,
+        "да" if result.answered else "отказ",
+        result.best.item_id if result.best else "-",
+        result.best.probability if result.best else 0.0,
+        result.timings["total"] * 1000,
+    )
+    return eval_answer(result)

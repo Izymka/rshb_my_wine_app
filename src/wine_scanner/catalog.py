@@ -1,11 +1,14 @@
 """Загрузка каталога вин.
 
-Пока источник один — открытый X-Wines, на нём обкатываем пайплайн. Датасет платформы придёт
-позже и подключится сюда же отдельной функцией: всё, что от каталога нужно остальному коду, —
-это список CatalogItem. Так поздний датасет не потребует переписывать индекс, поиск и метрики.
+Источников три: открытый X-Wines (на нём обкатывался пайплайн), свой тестовый набор и каталог
+платформы «Своё Вино», выданный на хакатоне. Всё, что от каталога нужно остальному коду, —
+это список CatalogItem, поэтому каждый источник подключается своей функцией, а индекс, поиск
+и метрики про разницу между ними не знают.
 """
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,3 +104,154 @@ def load_own(root: Path = OWN_ROOT) -> tuple[list[CatalogItem], list[Query]]:
             queries.append(Query(path=path, true_id=folder.name, group=path.stem.split("_")[0]))
 
     return catalog, queries
+
+
+# ---------------------------------------------------------------------------------------------
+# Каталог платформы «Своё Вино».
+#
+# Организаторы выдали два не связанных между собой артефакта: CSV-дамп карточек, где у каждой
+# записано человеческое имя фото («Поместье Голубицкое Рислинг.webp»), и папку uploads Strapi,
+# где тот же файл лежит как Pomeste_Golubiczkoe_Risling_02c2e84311.webp. Ключа между ними нет,
+# поэтому связь приходится восстанавливать по имени: Strapi транслитерирует и добавляет хэш.
+# Всё, что здесь ниже, — про это восстановление и про то, как собранный каталог отдаётся
+# остальному коду в виде тех же CatalogItem, что и X-Wines со своим набором.
+# ---------------------------------------------------------------------------------------------
+
+PLATFORM_ROOT = Path("data/catalog")
+PLATFORM_DUMP = Path("data/strapi_output0709.csv")
+UPLOADS_ROOT = Path("data/uploads")
+EVAL_ROOT = Path("data/eval")
+
+# Колонки дампа -> имена, которыми пользуется остальной код. Порядок сохранён.
+DUMP_COLUMNS = {
+    "Название вина": "name",
+    "Категория": "category",
+    "Цвет": "color",
+    "Регион": "region",
+    "Сорт винограда": "grapes",
+    "Описание": "description",
+    "Винодельня": "winery",
+    "Slug": "slug",
+    "Название фото": "photo_name",
+}
+
+# Таблица транслитерации Strapi, восстановленная по парам «имя в дампе — файл в uploads».
+# Не ГОСТ и не ISO 9: ц -> cz, но х -> h, а не x. Подобрана так, чтобы сходились все примеры,
+# которые удалось проверить руками; на дампе от 07.09 даёт 2096 совпадений из 2103.
+_STRAPI_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo", "ж": "zh",
+    "з": "z", "и": "i", "й": "j", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "cz",
+    "ч": "ch", "ш": "sh", "щ": "shh", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya",
+}  # fmt: skip
+
+# Файлы uploads: Strapi хранит оригинал как <имя>_<10 hex>.<ext>, а рядом кладёт уменьшенные
+# копии с префиксом размера. Нам нужны только оригиналы.
+_STRAPI_FILE = re.compile(r"^(?P<stem>.+)_(?P<hash>[0-9a-f]{10})\.(?P<ext>[A-Za-z0-9]+)$")
+_STRAPI_SIZE_PREFIX = re.compile(r"^(large|medium|small|thumbnail)_")
+
+
+def strapi_key(name: str) -> str:
+    """Свести имя файла к ключу, одинаковому для дампа и для uploads.
+
+    Транслитерируем кириллицу, выбрасываем всё, кроме латиницы и цифр, приводим к нижнему
+    регистру. Расширение и хэш вызывающая сторона отрезает сама: у дампа расширение своё
+    (там почти всегда .webp), у uploads — своё, и они не обязаны совпадать.
+    """
+    text = unicodedata.normalize("NFKC", name)
+    text = "".join(_STRAPI_TRANSLIT.get(ch.lower(), ch) for ch in text)
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def index_uploads(root: Path = UPLOADS_ROOT) -> dict[str, list[Path]]:
+    """Оригиналы uploads, сгруппированные по ключу strapi_key.
+
+    Один ключ может дать несколько файлов: одно и то же имя загружали в Strapi не раз, и каждая
+    загрузка получила свой хэш. Разбирать, какой из них привязан к карточке, — дело вызывающего.
+    """
+    groups: dict[str, list[Path]] = {}
+    for path in sorted(root.iterdir()):
+        if not path.is_file() or _STRAPI_SIZE_PREFIX.match(path.name):
+            continue
+        match = _STRAPI_FILE.match(path.name)
+        if match is None:
+            continue
+        groups.setdefault(strapi_key(match.group("stem")), []).append(path)
+    return groups
+
+
+def load_platform_dump(path: Path = PLATFORM_DUMP) -> pd.DataFrame:
+    """Дамп каталога как таблица: одна строка на slug.
+
+    В выгрузке каждая строка встречается дважды — это артефакт экспорта, а не два вина, поэтому
+    точные дубли снимаются молча. Дубли по slug с разным содержимым были бы уже ошибкой данных,
+    и их мы не скрываем: assert ниже упадёт с внятным сообщением.
+    """
+    frame = pd.read_csv(path).rename(columns=DUMP_COLUMNS).drop_duplicates()
+    duplicated = frame["slug"].duplicated(keep=False)
+    if duplicated.any():
+        raise ValueError(
+            f"slug повторяется с разным содержимым: {sorted(frame.loc[duplicated, 'slug'])[:5]}"
+        )
+    frame["name"] = frame["name"].str.strip()
+    frame["winery"] = frame["winery"].str.strip()
+    return frame.reset_index(drop=True)
+
+
+_YEAR_IN_TEXT = re.compile(r"(?<!\d)(20[0-3]\d)(?!\d)")
+
+
+def vintage_from_name(name: str, slug: str) -> int | None:
+    """Год урожая, если он записан в названии или в slug.
+
+    Ничего умнее регулярного выражения здесь не нужно: у платформы год либо стоит в названии
+    («Алиготе Баррель, 2024»), либо замыкает slug (aligote-barrel-2024), либо его нет вовсе.
+    """
+    for text in (name, slug):
+        match = _YEAR_IN_TEXT.search(text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
+    """Каталог платформы из data/catalog, собранного scripts/build_catalog.py.
+
+    Карточка без картинки в каталог не попадает: искать её нечем, а держать в индексе
+    пустую строку хуже, чем честно не знать вино. Сколько таких — печатается, чтобы
+    пропажа не прошла незамеченной.
+    """
+    table = pd.read_csv(root / "catalog.csv", dtype={"vintage": "Int64"})
+    items: list[CatalogItem] = []
+    skipped = 0
+    for row in table.itertuples(index=False):
+        image_path = root / "images" / f"{row.slug}.png"
+        if not image_path.exists():
+            skipped += 1
+            continue
+        payload = {
+            "name": row.name,
+            "category": row.category,
+            "color": row.color,
+            "region": row.region,
+            "grapes": row.grapes if isinstance(row.grapes, str) else "",
+            "description": row.description,
+            "winery": row.winery,
+            "slug": row.slug,
+            "vintage": int(row.vintage) if pd.notna(row.vintage) else None,
+        }
+        items.append(CatalogItem(item_id=row.slug, image_path=image_path, payload=payload))
+    if skipped:
+        print(f"карточек без картинки пропущено: {skipped}")
+    return items
+
+
+def load_eval_queries(root: Path = EVAL_ROOT) -> list[Path]:
+    """Кадры публичного набора организаторов в порядке queries.tsv.
+
+    Правильных ответов у нас нет — ключ остаётся у кейсодержателя, — поэтому это просто пути,
+    а не Query с true_id.
+    """
+    manifest = pd.read_csv(root / "queries.tsv", sep="\t")
+    return [root / "queries" / name for name in manifest["image_path"]]

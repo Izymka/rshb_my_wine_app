@@ -1,6 +1,6 @@
 """Прогнать каталог через DINOv2 и сложить векторы в FAISS.
 
-    uv run python scripts/build_index.py --catalog own+xwines --detect cascade --fit pad
+    uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad
 
 Индекс, который поднимает сервис, обязан быть построен ровно той же конфигурацией, на которой
 мерились метрики: та же обрезка, тот же способ приведения к квадрату, та же модель. Расхождение
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from wine_scanner.catalog import CatalogItem, load_own, load_xwines
+from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
@@ -26,8 +26,15 @@ CROP_CACHE = Path("models/crop_cache")
 
 
 def load_catalog(name: str) -> list[CatalogItem]:
-    """Собрать каталог. own — свои вина, xwines — открытый набор как отвлекающие карточки."""
+    """Собрать каталог.
+
+    platform — каталог «Своего Вина» из data/catalog (это боевой вариант), own — свои вина,
+    xwines — открытый набор как отвлекающие карточки. Первый со вторыми не смешивается:
+    у платформы ключ slug, и подмешивать к нему чужие карточки незачем — у неё свои близнецы.
+    """
     items: list[CatalogItem] = []
+    if name == "platform":
+        return load_platform()
     if "own" in name:
         items += load_own()[0]
     if "xwines" in name:
@@ -78,7 +85,9 @@ def year_boxes(items: list[CatalogItem], cropper) -> dict[str, tuple]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=Path("models/index"))
-    parser.add_argument("--catalog", default="own+xwines", choices=["own", "xwines", "own+xwines"])
+    parser.add_argument(
+        "--catalog", default="platform", choices=["platform", "own", "xwines", "own+xwines"]
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(

@@ -55,6 +55,10 @@ EMPTY = MatchFeatures(0, 0, 0.0, 0.0, False)
 GEOMETRY_FIELDS = ("homography", "query_size", "candidate_size")
 
 
+# Минимальная сторона входа XFeat: его сеть работает на сетке 32 px.
+MIN_SIDE = 32
+
+
 class XFeatMatcher:
     def __init__(
         self,
@@ -96,6 +100,17 @@ class XFeatMatcher:
         scale = self.max_side / max(width, height)
         if scale < 1:
             image = image.resize((int(width * scale), int(height * scale)), Image.BICUBIC)
+        # XFeat округляет стороны вниз до кратных 32 и делит на результат: кроп уже 32 px
+        # роняет его нулём. Такой кроп — почти всегда ошибка детектора (на каталоге платформы
+        # он однажды выбрал полоску 28×107 на бутылке 294×1000), но падать сборке из-за него
+        # нельзя; растягиваем до минимума, точек на нём всё равно не будет.
+        width, height = image.size
+        if min(width, height) < MIN_SIDE:
+            scale = MIN_SIDE / min(width, height)
+            image = image.resize(
+                (max(MIN_SIDE, round(width * scale)), max(MIN_SIDE, round(height * scale))),
+                Image.BICUBIC,
+            )
         return np.asarray(image)
 
     def cached(self, cache_key: str) -> dict | None:
