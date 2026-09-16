@@ -34,9 +34,23 @@ FEATURES_PATH = Path("eval/results/features.jsonl")
 OUT_DIR = Path("models/decider")
 
 
+FAMILIES: dict[str, str] = {}
+UNKNOWN_PREFIX = "unknown:"
+
+
 def family_key(item_id: str) -> str:
-    """Грубая группировка по производителю: первые два слова идентификатора."""
-    return "_".join(item_id.split("_")[:2])
+    """Группировка по производителю.
+
+    Для каталога платформы — винодельня из таблицы (`--family-map`), у slug'ов другого
+    признака родства нет. Для своего набора и X-Wines — первые два слова идентификатора,
+    как и раньше.
+    """
+    return FAMILIES.get(item_id) or "_".join(item_id.split("_")[:2])
+
+
+def is_unknown(true_id: str) -> bool:
+    """Живой незнакомый запрос: вина нет в каталоге, ни один кандидат не верен."""
+    return true_id.startswith(UNKNOWN_PREFIX)
 
 
 def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
@@ -48,9 +62,7 @@ def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
     return grouped
 
 
-def training_rows(
-    groups: list[list[PairFeatures]], augment_unknown: bool
-) -> tuple[list, list]:
+def training_rows(groups: list[list[PairFeatures]], augment_unknown: bool) -> tuple[list, list]:
     """Матрица и метки для обучения.
 
     `augment_unknown` добавляет к каждому запросу его же копию без правильного ответа. Смысл
@@ -147,9 +159,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--scenario",
-        choices=["family", "nofamily"],
+        choices=["family", "nofamily", "real"],
         default="nofamily",
-        help="как моделируется незнакомое вино: с роднёй в каталоге или без (по умолчанию)",
+        help="как моделируется незнакомое вино: с роднёй в каталоге, без (по умолчанию) "
+        "или по живым незнакомым запросам из признаков (true_id = unknown:...)",
+    )
+    parser.add_argument(
+        "--family-map",
+        type=Path,
+        default=None,
+        help="csv со столбцами slug и winery — родня по винодельне (каталог платформы)",
     )
     parser.add_argument(
         "--no-augment-unknown",
@@ -159,11 +178,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.family_map is not None:
+        import pandas as pd
+
+        table = pd.read_csv(args.family_map)
+        FAMILIES.update(dict(zip(table["slug"], table["winery"], strict=True)))
+
     by_query = load_queries(args.features)
     queries = sorted(by_query)
     wines = [by_query[q][0].true_id for q in queries]
+    groups_of = {q: by_query[q][0].group for q in queries}
+    known = np.array([not is_unknown(w) for w in wines])
     pairs = sum(map(len, by_query.values()))
-    print(f"запросов: {len(queries)}, вин: {len(set(wines))}, пар: {pairs}")
+    print(
+        f"запросов: {len(queries)} (знакомых {int(known.sum())}, живых незнакомых "
+        f"{int((~known).sum())}), вин: {len(set(wines))}, пар: {pairs}"
+    )
 
     splitter = GroupKFold(n_splits=args.folds)
     oof_raw = np.zeros(len(queries))
@@ -185,6 +215,9 @@ def main() -> None:
             best = int(np.argmax(probs))
             oof_raw[i] = probs[best]
             oof_correct[i] = bool(candidates[best].label)
+            if not known[i]:
+                # Живой незнакомец: его лучший кандидат — то, что сервис ответил бы мимо.
+                continue
 
             # Незнакомое вино моделируем удалением правильного ответа из кандидатов: для
             # решающего слоя это в точности ситуация «вина нет в каталоге».
@@ -204,39 +237,52 @@ def main() -> None:
     # оценки, а не она сама (иначе верх шкалы схлопывается, см. Decider.calibrate).
     # Регуляризация выключена большим C: штраф за величину коэффициента здесь ничему не мешает
     # переобучаться, зато прижимает наклон к нулю и сплющивает ту же шкалу ещё раз.
+    # Живые незнакомцы участвуют в калибровке как отрицательные примеры: их лучший кандидат
+    # неверен по построению, и это ровно тот случай, который калибровка должна прижать к нулю.
     calibrator = LogisticRegression(C=1e6).fit(
         logit(oof_raw).reshape(-1, 1), oof_correct.astype(int)
     )
     weight = float(calibrator.coef_[0][0])
     bias = float(calibrator.intercept_[0])
 
-    scenario_index = 0 if args.scenario == "family" else 1
-    unknown = oof_unknown[scenario_index]
-    unknown = unknown[~np.isnan(unknown)]
+    # Сценарии незнакомого вина: два смоделированных (как раньше) и, если в признаках есть
+    # живые незнакомые запросы, третий — по ним. Он единственный, где незнакомец настоящий:
+    # чужая бутылка, снятая телефоном, а не каталог с выброшенной строкой.
+    scenarios = {
+        "family": oof_unknown[0][~np.isnan(oof_unknown[0])],
+        "nofamily": oof_unknown[1][~np.isnan(oof_unknown[1])],
+    }
+    if (~known).any():
+        scenarios["real"] = oof_raw[~known]
+    elif args.scenario == "real":
+        raise SystemExit("в признаках нет живых незнакомых запросов (true_id = unknown:...)")
 
     auroc = {
         name: float(
             roc_auc_score(
-                np.r_[np.ones(len(queries)), np.zeros(len(row[~np.isnan(row)]))],
-                np.r_[oof_raw, row[~np.isnan(row)]],
+                np.r_[np.ones(int(known.sum())), np.zeros(len(row))], np.r_[oof_raw[known], row]
             )
         )
-        for name, row in zip(("family", "nofamily"), oof_unknown, strict=True)
+        for name, row in scenarios.items()
     }
 
     # Порог считаем той же формулой, которой его потом применит сервис: пустышка без бустера
     # умеет калибровать, а больше здесь ничего и не нужно.
     probe = Decider(booster=None, calib_weight=weight, calib_bias=bias, threshold=0.0)
-    calibrated_known = probe.calibrate(oof_raw)
+    calibrated_known = probe.calibrate(oof_raw[known])
+    known_correct = oof_correct[known]
 
-    print(f"\ntop-1 (out-of-fold):      {oof_correct.mean():.3f}")
-    print(f"AUROC отказа, с роднёй:   {auroc['family']:.3f}")
-    print(f"AUROC отказа, без родни:  {auroc['nofamily']:.3f}")
+    print(f"\ntop-1 (out-of-fold), знакомые: {known_correct.mean():.3f}")
+    for group in sorted(set(groups_of.values())):
+        mask = known & np.array([groups_of[q] == group for q in queries])
+        if mask.any():
+            print(f"  {group:12s} {oof_correct[mask].mean():.3f}  (запросов {int(mask.sum())})")
+    for name, value in auroc.items():
+        print(f"AUROC отказа, {name:9s} {value:.3f}")
 
     picked = None
-    for name, row in zip(("family", "nofamily"), oof_unknown, strict=True):
-        row = row[~np.isnan(row)]
-        current = pick_threshold(calibrated_known, oof_correct, probe.calibrate(row), args.budget)
+    for name, row in scenarios.items():
+        current = pick_threshold(calibrated_known, known_correct, probe.calibrate(row), args.budget)
         if name == args.scenario:
             picked = current
         print(f"\nсценарий «{name}», бюджет ошибок на незнакомых {args.budget:.2f}:")
@@ -270,8 +316,10 @@ def main() -> None:
         meta={
             "trained_on": str(args.features),
             "queries": len(queries),
+            "unknown_queries": int((~known).sum()),
             "wines": len(set(wines)),
-            "oof_top1": float(oof_correct.mean()),
+            "oof_top1": float(known_correct.mean()),
+            "family_map": str(args.family_map) if args.family_map else None,
             "auroc_unknown": auroc,
             "scenario": args.scenario,
             "budget": args.budget,
