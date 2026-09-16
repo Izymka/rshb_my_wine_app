@@ -1,17 +1,21 @@
 """Собрать каталог платформы из дампа Strapi: таблица карточек плюс эталон на каждый slug.
 
-    uv run python scripts/build_catalog.py --resolve-via-site
+    uv run python scripts/build_catalog.py
 
 Организаторы выдали CSV с карточками и папку uploads со всеми медиа сайта — 15 тысяч файлов,
 из которых нам нужны две тысячи эталонов бутылок. Ключа между ними нет: в дампе записано
 человеческое имя фото, в uploads лежит транслитерированное имя с хэшем. Скрипт восстанавливает
-связь в три шага и складывает результат в data/catalog/, откуда его читает load_platform.
+связь в два шага и складывает результат в data/catalog/, откуда его читает load_platform.
 
-1. Транслитерация по таблице Strapi (`wine_scanner.catalog.strapi_key`) — закрывает почти всё.
-2. Если под одно имя загружали несколько файлов, сравниваем байты: одинаковые — всё равно какой.
-3. Остаток — разные файлы под одним именем и имена, которых в uploads нет, — разрешается через
-   страницу вина на vino-svoe.ru: её og:image называет файл точно. Это единственное место,
-   где скрипт ходит в сеть, и оно включается флагом.
+1. Sitemap сайта (подсказка организаторов): wines-sitemap.xml — image-sitemap, в нём у каждого
+   опубликованного вина точное имя файла эталона. Один запрос закрывает 2037 slug из 2103.
+   Ответ кэшируется в data/catalog/wines-sitemap.xml; без сети берётся кэш, без кэша — шаг 2.
+2. Транслитерация по таблице Strapi (`wine_scanner.catalog.strapi_key`) — для вин, которых на
+   сайте нет (не опубликованы). Если под одно имя загружали несколько файлов, сравниваем байты:
+   одинаковые — всё равно какой, разные — берём первый и записываем в unresolved.csv.
+
+Файла из sitemap может не оказаться в uploads (дамп старше сайта) — тогда он качается с сайта
+в оригинальном размере. Это единственный случай, когда скрипт ходит в сеть дальше sitemap.
 
 Эталоны — вырезанные бутылки на прозрачном фоне. PIL при convert("RGB") делает прозрачное
 чёрным, и весь каталог превратился бы в бутылки на чёрном, чего на живых фото не бывает.
@@ -20,11 +24,9 @@
 
 import argparse
 import hashlib
-import json
 import re
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -41,33 +43,21 @@ from wine_scanner.catalog import (
     vintage_from_name,
 )
 
-SITE_PAGE = "https://vino-svoe.ru/wines/{slug}"
+SITEMAP = "https://vino-svoe.ru/wines-sitemap.xml"
 # Нулевые размеры — «не уменьшать»: отдаёт оригинал, проверено на нескольких карточках.
 SITE_ORIGINAL = "https://api.vino-svoe.ru/v1/img/str-api/0/0/resize/uploads/{file}"
 USER_AGENT = "Mozilla/5.0 (wine-scanner catalog builder)"
-OG_IMAGE = re.compile(r'property="og:image" content="([^"]+)"')
+SITEMAP_ENTRY = re.compile(
+    r"<url><loc>https://vino-svoe\.ru/wines/(?P<slug>[^<]+)</loc>"
+    r"(?:<lastmod>(?P<lastmod>[^<]*)</lastmod>)?.*?<image:loc>[^<]*/uploads/(?P<file>[^<]+)</image:loc>",
+    re.S,
+)
 
 BACKGROUND = (255, 255, 255)
 
 
 def digest(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
-
-
-def match_by_name(dump: pd.DataFrame, uploads: dict[str, list[Path]]) -> pd.DataFrame:
-    """Шаги 1 и 2: сопоставить по имени, неоднозначности снять сравнением байтов."""
-    rows = []
-    for row in dump.itertuples(index=False):
-        candidates = uploads.get(strapi_key(Path(row.photo_name).stem), [])
-        if len(candidates) == 1:
-            rows.append((row.slug, "exact", candidates[0]))
-        elif candidates and len({digest(p) for p in candidates}) == 1:
-            rows.append((row.slug, "bytes", candidates[0]))
-        elif candidates:
-            rows.append((row.slug, "ambiguous", candidates[0]))
-        else:
-            rows.append((row.slug, "missing", None))
-    return pd.DataFrame(rows, columns=["slug", "match", "source_file"])
 
 
 def fetch(url: str, timeout: float = 20.0, retries: int = 1) -> bytes | None:
@@ -83,54 +73,66 @@ def fetch(url: str, timeout: float = 20.0, retries: int = 1) -> bytes | None:
     return None
 
 
-def site_file_name(slug: str) -> str | None:
-    """Имя Strapi-файла эталона со страницы вина, или None, если страницы нет."""
-    html = fetch(SITE_PAGE.format(slug=slug))
-    if not html:
-        return None
-    found = OG_IMAGE.search(html.decode("utf-8", "ignore"))
-    return found.group(1).rsplit("/", 1)[-1] if found else None
+def load_sitemap(cache_path: Path, refresh: bool) -> pd.DataFrame:
+    """Опубликованные вина сайта: slug, файл эталона, дата правки.
 
-
-def resolve_via_site(
-    matches: pd.DataFrame, uploads_root: Path, downloads: Path, cache_path: Path
-) -> pd.DataFrame:
-    """Шаг 3: спросить сайт про всё, что не сошлось по имени.
-
-    Ответы кэшируются в json рядом с каталогом: повторный запуск скрипта не должен снова
-    ходить в сеть ради тех же пятидесяти slug.
+    Свежий sitemap качается, если кэша нет или попросили обновить; иначе читается кэш — сборка
+    каталога не должна зависеть от сети. Пустая таблица означает «sitemap недоступен», и тогда
+    всё сопоставление идёт по транслитерации.
     """
-    cache: dict[str, str | None] = (
-        json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-    )
-    todo = [s for s in matches.loc[matches["match"].isin(["ambiguous", "missing"]), "slug"]]
-    pending = [s for s in todo if s not in cache]
-    if pending:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            names = tqdm(pool.map(site_file_name, pending), total=len(pending), desc="сайт")
-            for slug, name in zip(pending, names, strict=True):
-                cache[slug] = name
-                time.sleep(0.3)
-        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+    if refresh or not cache_path.exists():
+        payload = fetch(SITEMAP)
+        if payload:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(payload)
+    if not cache_path.exists():
+        return pd.DataFrame(columns=["slug", "lastmod", "file"])
+    xml = cache_path.read_text(encoding="utf-8")
+    rows = [(m["slug"], m["lastmod"] or "", m["file"]) for m in SITEMAP_ENTRY.finditer(xml)]
+    return pd.DataFrame(rows, columns=["slug", "lastmod", "file"])
 
-    matches = matches.set_index("slug")
-    downloads.mkdir(parents=True, exist_ok=True)
-    for slug in todo:
-        name = cache.get(slug)
-        if not name:
+
+def match_by_sitemap(
+    dump: pd.DataFrame, sitemap: pd.DataFrame, uploads_root: Path, downloads: Path
+) -> pd.DataFrame:
+    """Шаг 1: точное имя файла из sitemap; нет в uploads — скачать с сайта."""
+    by_slug = dict(zip(sitemap["slug"], sitemap["file"], strict=True))
+    rows = []
+    for slug in dump["slug"]:
+        name = by_slug.get(slug)
+        if name is None:
+            rows.append((slug, None, None))
             continue
         local = uploads_root / name
         if local.exists():
-            matches.loc[slug, ["match", "source_file"]] = ["site", local]
+            rows.append((slug, "sitemap", local))
             continue
         target = downloads / name
         if not target.exists():
             payload = fetch(SITE_ORIGINAL.format(file=name))
             if not payload:
+                rows.append((slug, None, None))
                 continue
+            downloads.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
-        matches.loc[slug, ["match", "source_file"]] = ["site-download", target]
-    return matches.reset_index()
+        rows.append((slug, "sitemap-download", target))
+    return pd.DataFrame(rows, columns=["slug", "match", "source_file"])
+
+
+def match_by_name(dump: pd.DataFrame, uploads: dict[str, list[Path]]) -> pd.DataFrame:
+    """Шаг 2: сопоставить по имени, неоднозначности снять сравнением байтов."""
+    rows = []
+    for row in dump.itertuples(index=False):
+        candidates = uploads.get(strapi_key(Path(row.photo_name).stem), [])
+        if len(candidates) == 1:
+            rows.append((row.slug, "exact", candidates[0]))
+        elif candidates and len({digest(p) for p in candidates}) == 1:
+            rows.append((row.slug, "bytes", candidates[0]))
+        elif candidates:
+            rows.append((row.slug, "ambiguous", candidates[0]))
+        else:
+            rows.append((row.slug, "missing", None))
+    return pd.DataFrame(rows, columns=["slug", "match", "source_file"])
 
 
 def flatten(source: Path, target: Path) -> tuple[int, int, str]:
@@ -155,9 +157,10 @@ def main() -> None:
     parser.add_argument("--uploads", type=Path, default=UPLOADS_ROOT)
     parser.add_argument("--out", type=Path, default=PLATFORM_ROOT)
     parser.add_argument(
-        "--resolve-via-site",
-        action="store_true",
-        help="спросить vino-svoe.ru про slug, не сошедшиеся по имени",
+        "--refresh-sitemap", action="store_true", help="скачать sitemap заново, а не брать кэш"
+    )
+    parser.add_argument(
+        "--no-sitemap", action="store_true", help="только транслитерация, без sitemap и сети"
     )
     parser.add_argument("--force", action="store_true", help="пересохранить уже готовые картинки")
     args = parser.parse_args()
@@ -166,16 +169,23 @@ def main() -> None:
     uploads = index_uploads(args.uploads)
     print(f"карточек в дампе: {len(dump)}, оригиналов в uploads: {sum(map(len, uploads.values()))}")
 
-    matches = match_by_name(dump, uploads)
-    print("по имени:", matches["match"].value_counts().to_dict())
-
-    if args.resolve_via_site:
-        matches = resolve_via_site(
-            matches, args.uploads, args.out / "downloaded", args.out / "site_resolved.json"
-        )
-        print("после сайта:", matches["match"].value_counts().to_dict())
+    by_name = match_by_name(dump, uploads)
+    if args.no_sitemap:
+        matches = by_name
+        sitemap = pd.DataFrame(columns=["slug", "lastmod", "file"])
+    else:
+        sitemap = load_sitemap(args.out / "wines-sitemap.xml", args.refresh_sitemap)
+        print(f"вин в sitemap: {len(sitemap)}")
+        by_sitemap = match_by_sitemap(dump, sitemap, args.uploads, args.out / "downloaded")
+        # Sitemap — первичный источник, транслитерация закрывает то, чего на сайте нет.
+        matches = by_sitemap.where(by_sitemap["match"].notna(), by_name)
+        new_on_site = sorted(set(sitemap["slug"]) - set(dump["slug"]))
+        if new_on_site:
+            print(f"на сайте есть, в дампе нет ({len(new_on_site)}): {', '.join(new_on_site)}")
+    print("сопоставление:", matches["match"].value_counts().to_dict())
 
     table = dump.merge(matches, on="slug", validate="one_to_one")
+    table["on_site"] = table["slug"].isin(sitemap["slug"])
     table["vintage"] = [
         vintage_from_name(n, s) for n, s in zip(table["name"], table["slug"], strict=True)
     ]
