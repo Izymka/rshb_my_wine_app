@@ -37,7 +37,7 @@ from PIL import Image
 from .burst import fuse_rrf, ranked, sharpness
 from .decide import Decider, PairFeatures
 from .detect import BottleDetector, CachedCropper, CascadeCropper
-from .embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
+from .embed import DEFAULT_MODEL, Dinov2Embedder, Whitening, load_image, pick_device
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex, catalog_document
 from .rerank import DescriptorStore, XFeatMatcher
@@ -194,13 +194,21 @@ class WineScanner:
             json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
         )
 
+        # Whitening (Э5) лежит рядом с индексом и применяется на лету: индекс хранит сырые
+        # векторы, а здесь они отбеливаются вместе с каждым запросом. Так преобразование
+        # переподбирается за секунды, а не за полтора часа пересборки каталога.
+        whitening_path = Path(index_dir) / "whitening.npz"
+        self.whitening = Whitening.load(whitening_path) if whitening_path.exists() else None
+        if self.whitening is not None:
+            self.index = self._whitened(self.index, self.whitening)
+
         # Версия артефактов уходит в каждый ответ. Индекс и решающий слой пересобираются, и без
         # этого поля ответы, полученные на разных версиях, в логах клиента неразличимы: жалоба
         # «оно показало не то» приходит через неделю, когда на диске давно лежит другой индекс.
         index_dir, decider_dir = Path(index_dir), Path(decider_dir)
         self.version = {
             "index": digest(
-                [index_dir / "vectors.faiss", index_dir / "meta.json", config_path]
+                [index_dir / "vectors.faiss", index_dir / "meta.json", config_path, whitening_path]
             ),
             "decider": digest([decider_dir / "model.txt", decider_dir / "meta.json"]),
         }
@@ -257,6 +265,14 @@ class WineScanner:
             for item_id, payload in self.payload_by_id.items()
             if payload.get("vintage_box")
         }
+
+    @staticmethod
+    def _whitened(index: VectorIndex, whitening: Whitening) -> VectorIndex:
+        """Тот же индекс с отбелёнными векторами; ключи и карточки не меняются."""
+        raw = index.index.reconstruct_n(0, index.index.ntotal)
+        result = VectorIndex(whitening.dim)
+        result.add(whitening.apply(raw), item_ids=index.item_ids, payloads=index.payloads)
+        return result
 
     def devices(self) -> dict[str, str]:
         """На чём реально считается каждый блок.
@@ -395,6 +411,8 @@ class WineScanner:
 
         with stage("embed"):
             vector = self.embedder.encode_image(crop).numpy()
+            if self.whitening is not None:
+                vector = self.whitening.apply(vector)[0]
 
         with stage("search"):
             visual = self.index.search(vector, top_k=VISUAL_CANDIDATES)
