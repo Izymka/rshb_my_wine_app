@@ -38,13 +38,15 @@ FAMILIES: dict[str, str] = {}
 UNKNOWN_PREFIX = "unknown:"
 
 
-def family_key(item_id: str) -> str:
+def family_key(item_id: str, row: PairFeatures | None = None) -> str:
     """Группировка по производителю.
 
-    Для каталога платформы — винодельня из таблицы (`--family-map`), у slug'ов другого
-    признака родства нет. Для своего набора и X-Wines — первые два слова идентификатора,
-    как и раньше.
+    Для каталога платформы винодельня едет в самой строке признаков (`family`, с версии 2)
+    или берётся из таблицы (`--family-map`). Для своего набора и X-Wines — первые два слова
+    идентификатора, как и раньше.
     """
+    if row is not None and row.family:
+        return row.family
     return FAMILIES.get(item_id) or "_".join(item_id.split("_")[:2])
 
 
@@ -62,7 +64,9 @@ def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
     return grouped
 
 
-def training_rows(groups: list[list[PairFeatures]], augment_unknown: bool) -> tuple[list, list]:
+def training_rows(
+    groups: list[list[PairFeatures]], augment_unknown: bool, live_weight: float = 1.0
+) -> tuple[list, list, list]:
     """Матрица и метки для обучения.
 
     `augment_unknown` добавляет к каждому запросу его же копию без правильного ответа. Смысл
@@ -70,11 +74,15 @@ def training_rows(groups: list[list[PairFeatures]], augment_unknown: bool) -> tu
     выборке верный кандидат всегда присутствует, и признаки вида «здесь нет верного ответа»
     ничего не улучшают, поэтому модель их не берёт. Замер: AUROC отказа 0.895 -> 0.945.
     """
-    rows, labels = [], []
+    rows, labels, weights = [], [], []
     for candidates in groups:
+        # Живые кадры весят больше псевдофото: их в разы меньше, а описывают они именно то,
+        # что придёт в сервис, — телефонную съёмку с полки, а не вырезку на размытом фоне.
+        weight = live_weight if candidates[0].group.startswith("live-") else 1.0
         derived = derive(candidates)
         rows += matrix(derived)
         labels += [r["label"] for r in derived]
+        weights += [weight] * len(derived)
 
         if not augment_unknown:
             continue
@@ -83,7 +91,8 @@ def training_rows(groups: list[list[PairFeatures]], augment_unknown: bool) -> tu
             unknown = derive(without_true)
             rows += matrix(unknown)
             labels += [0] * len(unknown)
-    return rows, labels
+            weights += [weight] * len(unknown)
+    return rows, labels, weights
 
 
 def make_model() -> LGBMClassifier:
@@ -92,7 +101,8 @@ def make_model() -> LGBMClassifier:
         learning_rate=0.05,
         num_leaves=15,
         min_child_samples=20,
-        # Положительных примеров в 25 раз меньше — по одному верному кандидату на запрос.
+        # Положительных примеров на порядки меньше — по одному верному кандидату на запрос
+        # при длинном списке в сотню с лишним строк.
         class_weight="balanced",
         verbose=-1,
     )
@@ -171,6 +181,18 @@ def main() -> None:
         help="csv со столбцами slug и winery — родня по винодельне (каталог платформы)",
     )
     parser.add_argument(
+        "--only-groups",
+        default=None,
+        help="учить только на запросах, чья группа начинается с одного из префиксов (через запятую), "
+        "например live- — без псевдофото",
+    )
+    parser.add_argument(
+        "--live-weight",
+        type=float,
+        default=3.0,
+        help="вес живых кадров (group live-*) относительно псевдофото при обучении",
+    )
+    parser.add_argument(
         "--no-augment-unknown",
         dest="augment_unknown",
         action="store_false",
@@ -185,6 +207,9 @@ def main() -> None:
         FAMILIES.update(dict(zip(table["slug"], table["winery"], strict=True)))
 
     by_query = load_queries(args.features)
+    if args.only_groups:
+        prefixes = tuple(args.only_groups.split(","))
+        by_query = {q: rows for q, rows in by_query.items() if rows[0].group.startswith(prefixes)}
     queries = sorted(by_query)
     wines = [by_query[q][0].true_id for q in queries]
     groups_of = {q: by_query[q][0].group for q in queries}
@@ -201,10 +226,10 @@ def main() -> None:
     oof_unknown = np.full((2, len(queries)), np.nan)  # 0 — с роднёй, 1 — без родни
 
     for train_idx, test_idx in splitter.split(queries, groups=wines):
-        rows, labels = training_rows(
-            [by_query[queries[i]] for i in train_idx], args.augment_unknown
+        rows, labels, weights = training_rows(
+            [by_query[queries[i]] for i in train_idx], args.augment_unknown, args.live_weight
         )
-        model = make_model().fit(np.asarray(rows), np.asarray(labels))
+        model = make_model().fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
 
         def predict(candidates: list[PairFeatures], model=model) -> np.ndarray:
             return model.predict_proba(np.asarray(matrix(derive(candidates))))[:, 1]
@@ -225,8 +250,9 @@ def main() -> None:
             if without_true:
                 oof_unknown[0, i] = predict(without_true).max()
 
-            family = family_key(candidates[0].true_id)
-            without_family = [c for c in candidates if family_key(c.item_id) != family]
+            true_row = next((c for c in candidates if c.label), None)
+            family = family_key(candidates[0].true_id, true_row)
+            without_family = [c for c in candidates if family_key(c.item_id, c) != family]
             if without_family:
                 oof_unknown[1, i] = predict(without_family).max()
 
@@ -304,8 +330,10 @@ def main() -> None:
             )
 
     final = make_model()
-    rows, labels = training_rows([by_query[q] for q in queries], args.augment_unknown)
-    final.fit(np.asarray(rows), np.asarray(labels))
+    rows, labels, weights = training_rows(
+        [by_query[q] for q in queries], args.augment_unknown, args.live_weight
+    )
+    final.fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
 
     decider = Decider(
         booster=final.booster_,
@@ -324,6 +352,8 @@ def main() -> None:
             "scenario": args.scenario,
             "budget": args.budget,
             "augment_unknown": args.augment_unknown,
+            "live_weight": args.live_weight,
+            "only_groups": args.only_groups,
             "coverage": picked["coverage"],
             "precision": picked["precision"],
             "false_answer_rate": picked["false_answer_rate"],

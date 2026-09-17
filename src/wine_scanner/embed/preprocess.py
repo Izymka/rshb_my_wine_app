@@ -43,7 +43,12 @@ class PadToSquare:
         return canvas
 
 
-def build_transform(size: int = DEFAULT_SIZE, fit: str = "center_crop") -> transforms.Compose:
+def build_transform(
+    size: int = DEFAULT_SIZE,
+    fit: str = "center_crop",
+    mean: tuple[float, float, float] = IMAGENET_MEAN,
+    std: tuple[float, float, float] = IMAGENET_STD,
+) -> transforms.Compose:
     """Привести изображение к квадрату size x size и нормализовать.
 
     Режим `fit` подбирается под то, что подаётся на вход, и это не мелочь — на нём мы уже
@@ -85,7 +90,7 @@ def build_transform(size: int = DEFAULT_SIZE, fit: str = "center_crop") -> trans
         [
             *head,
             transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            transforms.Normalize(mean=mean, std=std),
         ]
     )
 

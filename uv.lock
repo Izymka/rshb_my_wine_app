@@ -3127,6 +3127,7 @@ ocr = [
     { name = "easyocr" },
     { name = "rank-bm25" },
     { name = "rapidfuzz" },
+    { name = "scikit-learn" },
 ]
 rerank = [
     { name = "kornia" },
@@ -3157,6 +3158,7 @@ requires-dist = [
     { name = "rank-bm25", marker = "extra == 'ocr'", specifier = ">=0.2.2" },
     { name = "rapidfuzz", marker = "extra == 'ocr'", specifier = ">=3.9" },
     { name = "scikit-learn", marker = "extra == 'decide'", specifier = ">=1.5" },
+    { name = "scikit-learn", marker = "extra == 'ocr'", specifier = ">=1.5" },
     { name = "torch", specifier = ">=2.4" },
     { name = "torchvision", specifier = ">=0.19" },
     { name = "tqdm", specifier = ">=4.66" },

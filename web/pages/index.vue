@@ -1,0 +1,83 @@
+<script setup lang="ts">
+// Экран 1 (камера) и экран 2 (ожидание) из DESIGN.md. Камера — системная: <input capture>
+// открывает её на телефоне без разрешений и без своего видоискателя, а на компьютере
+// превращается в выбор файла. После ответа — переход на карточку или отказ.
+const { preview, error, busy, elapsedMs, scan, cancel, reset } = useScan();
+const router = useRouter();
+const cameraInput = ref<HTMLInputElement>();
+const galleryInput = ref<HTMLInputElement>();
+const slow = ref(false);
+let slowTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function onFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  slow.value = false;
+  slowTimer = setTimeout(() => (slow.value = true), 3000);
+  const ok = await scan(file);
+  if (slowTimer) clearTimeout(slowTimer);
+  if (ok) router.push("/result");
+}
+
+function retry() {
+  reset();
+}
+
+onMounted(reset);
+</script>
+
+<template>
+  <div class="page">
+    <header class="topbar">
+      <img src="/icon.png" alt="" />
+      <div>
+        <div class="brand">Своё Вино</div>
+        <div class="sub">сканер этикеток российских вин</div>
+      </div>
+    </header>
+
+    <div class="viewfinder">
+      <img v-if="preview" :src="preview" alt="снятый кадр" :class="{ pulse: busy }" />
+      <div v-else class="placeholder">
+        <div class="glyph">🍷</div>
+        <div>Наведите камеру на этикетку</div>
+        <div class="small muted" style="margin-top: 6px">Бутылка — главная в кадре, этикетка целиком</div>
+      </div>
+      <div class="frame"><i /></div>
+      <div v-if="busy" class="hint row" style="justify-content: center">
+        <span class="spinner" style="width: 18px; height: 18px; border-width: 2px" />
+        <span>{{ slow ? "Ещё ищем — сравниваем с каталогом…" : "Ищем в каталоге…" }}</span>
+      </div>
+    </div>
+
+    <div v-if="error" class="error">
+      <template v-if="error === 'unreadable'">Файл не похож на фотографию. Попробуйте снять ещё раз.</template>
+      <template v-else-if="error === 'network'">Нет связи с сервисом. Проверьте сеть и повторите.</template>
+      <template v-else-if="error === 'starting'">Сервис ещё запускается — подождите полминуты.</template>
+      <template v-else>Сервис временно недоступен. Попробуйте чуть позже.</template>
+    </div>
+
+    <template v-if="!busy">
+      <button class="btn btn-primary" @click="cameraInput?.click()">
+        <span>📷</span> Сканировать этикетку
+      </button>
+      <button class="btn btn-secondary" @click="galleryInput?.click()">Выбрать из галереи</button>
+      <input ref="cameraInput" type="file" accept="image/*" capture="environment" hidden @change="onFile" />
+      <input ref="galleryInput" type="file" accept="image/*,.heic" hidden @change="onFile" />
+    </template>
+    <button v-else class="btn btn-ghost" @click="cancel">Отменить</button>
+
+    <p v-if="error" class="small muted" style="text-align: center; margin: 0">
+      <a href="#" @click.prevent="retry">Скрыть сообщение</a>
+    </p>
+
+    <div class="card cream small">
+      <b>Как снимать.</b> Возьмите бутылку в руки, чтобы она была одна и крупно; блики и наклон
+      не мешают. Если система не уверена — она честно скажет «не узнали» и покажет похожие.
+    </div>
+
+    <div class="footer">каталог платформы «Своё Вино» · {{ elapsedMs ? `последний ответ ${elapsedMs} мс` : "" }}</div>
+  </div>
+</template>

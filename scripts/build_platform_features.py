@@ -24,10 +24,10 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from wine_scanner.catalog import EVAL_ROOT, OWN_ROOT, load_own
+from wine_scanner.catalog import EVAL_ROOT, LIVE_MANIFEST, OWN_ROOT, load_live, load_own
 from wine_scanner.decide import PairFeatures
 from wine_scanner.embed import load_image
-from wine_scanner.pipeline import WineScanner
+from wine_scanner.pipeline import RetrievalOnlyDecider, WineScanner
 
 OUT_PATH = Path("eval/results/features_platform.jsonl")
 SYNTHETIC_MANIFEST = Path("data/synthetic/manifest.csv")
@@ -47,12 +47,22 @@ EVAL_TRUTH = {
 
 
 def collect_queries(
-    synthetic: Path, own_root: Path, eval_root: Path, sources: set[str]
+    synthetic: Path,
+    own_root: Path,
+    eval_root: Path,
+    sources: set[str],
+    live_manifest: Path = LIVE_MANIFEST,
 ) -> list[dict]:
     rows: list[dict] = []
     if "synthetic" in sources and synthetic.exists():
         for r in pd.read_csv(synthetic).itertuples(index=False):
             rows.append({"path": r.path, "true_id": r.true_id, "group": r.group})
+    # Живые кадры вин платформы (data/live): известные — позитивы, незнакомые — негативы.
+    # Свой набор и eval в манифесте тоже есть, поэтому при source=live они не дублируются.
+    if "live" in sources and live_manifest.exists():
+        for q in load_live(live_manifest):
+            rows.append({"path": str(q.path), "true_id": q.true_id, "group": f"live-{q.group}"})
+        sources = sources - {"own", "eval"}
     _, own_queries = load_own(own_root) if "own" in sources else (None, [])
     for q in own_queries:
         wine = q.path.parent.name
@@ -72,14 +82,24 @@ def collect_queries(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", type=Path, default=Path("models/index_platform"))
-    parser.add_argument("--decider", type=Path, default=Path("models/decider"))
+    parser.add_argument(
+        "--decider",
+        default="none",
+        help="папка решающего слоя или `none`: оценки в файл не пишутся, нужен только порядок",
+    )
     parser.add_argument("--out", type=Path, default=OUT_PATH)
     parser.add_argument("--synthetic", type=Path, default=SYNTHETIC_MANIFEST)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--sources",
-        default="synthetic,own,eval",
-        help="какие источники запросов брать, через запятую",
+        default="synthetic,live",
+        help="какие источники запросов брать, через запятую: synthetic, live (манифест "
+        "data/live, включает own и eval), own, eval",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="дописать в существующий файл только те запросы, которых в нём ещё нет",
     )
     parser.add_argument(
         "--keep-from",
@@ -97,12 +117,22 @@ def main() -> None:
     print(f"запросов: {len(queries)}, из них незнакомых: {unknown}")
 
     # Решающий слой здесь нужен только чтобы пайплайн собрался: его оценки не пишутся,
-    # в файл идут сырые признаки пар.
-    scanner = WineScanner(index_dir=args.index, decider_dir=args.decider, ocr_cache=True)
+    # в файл идут сырые признаки пар. По умолчанию — заглушка, чтобы признаки новой версии
+    # можно было собрать, когда обученной модели под них ещё нет. Защита выключена: она
+    # правит вероятность, а не признаки, и в обучении ей делать нечего.
+    decider = RetrievalOnlyDecider() if args.decider == "none" else None
+    scanner = WineScanner(
+        index_dir=args.index,
+        decider_dir=Path(args.decider if decider is None else "models/_none"),
+        decider=decider,
+        ocr_cache=True,
+        crop_cache=Path("models/crop_cache"),
+        guard="off",
+    )
 
     kept: list[str] = []
     if args.keep_from is not None and args.keep_from.exists():
-        prefixes = {"synthetic": "synthetic", "own": "own-", "eval": "eval"}
+        prefixes = {"synthetic": "synthetic", "own": "own-", "eval": "eval", "live": "live-"}
         skip = tuple(prefixes[s] for s in sources)
         for line in args.keep_from.read_text(encoding="utf-8").splitlines():
             if not json.loads(line)["group"].startswith(skip):
@@ -110,8 +140,14 @@ def main() -> None:
         print(f"перенесено пар из {args.keep_from}: {len(kept)}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    done: set[str] = set()
+    if args.resume and args.out.exists():
+        for line in args.out.read_text(encoding="utf-8").splitlines():
+            done.add(json.loads(line)["query"])
+        queries = [q for q in queries if q["path"] not in done]
+        print(f"уже посчитано запросов: {len(done)}, осталось: {len(queries)}")
     written = 0
-    with args.out.open("w", encoding="utf-8") as fh:
+    with args.out.open("a" if args.resume else "w", encoding="utf-8") as fh:
         for line in kept:
             fh.write(line + "\n")
         for query in tqdm(queries, desc="признаки"):

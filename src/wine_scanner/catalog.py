@@ -32,11 +32,29 @@ class CatalogItem:
 
 @dataclass
 class Query:
-    """Живое фото: путь, правильный ответ и группа сложности."""
+    """Живое фото: путь, правильный ответ и группа сложности.
+
+    `wine_id` — человеческое имя вина (папка), по нему бенчмарк группирует кадры; у своего
+    набора оно совпадает с `true_id`. `source` — откуда кадр: own / live / eval. `note` —
+    что на кадре трудного, если это видно глазами (blur, far, partial, соседи).
+    """
 
     path: Path
     true_id: str
     group: str
+    wine_id: str = ""
+    source: str = "own"
+    note: str = ""
+
+    @property
+    def known(self) -> bool:
+        """Есть ли верный ответ в каталоге. Незнакомцы размечены `unknown:<имя>`."""
+        return not self.true_id.startswith(UNKNOWN_PREFIX)
+
+
+# Метка запроса, у которого верного ответа в каталоге нет. На таких кадрах проверяется отказ;
+# соглашение общее для build_platform_features.py, train_decider.py и бенчмарка платформы.
+UNKNOWN_PREFIX = "unknown:"
 
 
 def load_xwines(root: Path = XWINES_ROOT) -> list[CatalogItem]:
@@ -101,7 +119,14 @@ def load_own(root: Path = OWN_ROOT) -> tuple[list[CatalogItem], list[Query]]:
         for path in images:
             if path in catalog_images:
                 continue
-            queries.append(Query(path=path, true_id=folder.name, group=path.stem.split("_")[0]))
+            queries.append(
+                Query(
+                    path=path,
+                    true_id=folder.name,
+                    group=path.stem.split("_")[0],
+                    wine_id=folder.name,
+                )
+            )
 
     return catalog, queries
 
@@ -245,6 +270,48 @@ def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
     if skipped:
         print(f"карточек без картинки пропущено: {skipped}")
     return items
+
+
+LIVE_MANIFEST = Path("data/live/manifest.csv")
+
+
+def load_live(manifest: Path = LIVE_MANIFEST, include_multi: bool = False) -> list[Query]:
+    """Живые кадры вин платформы по манифесту `scripts/import_live_photos.py`.
+
+    В отличие от `load_own`, эталона рядом с кадрами нет и не нужно: он уже в каталоге
+    платформы под `true_slug`. Пустой `true_slug` — вина в каталоге нет, `true_id` получает
+    метку `unknown:<wine_id>`. Кадры с несколькими бутылками (`group == multi`) по умолчанию
+    не берутся: что на них считать верным ответом, зависит от того, какую бутылку выберет
+    детектор. Отсутствующие файлы — ошибка со списком, а не молчаливый пропуск: пропавший
+    кадр меняет метрику, и лучше узнать об этом сразу.
+    """
+    table = pd.read_csv(manifest, dtype=str, keep_default_na=False)
+    queries: list[Query] = []
+    missing: list[str] = []
+    for row in table.itertuples(index=False):
+        if row.group == "multi" and not include_multi:
+            continue
+        path = Path(row.path)
+        if not path.exists():
+            missing.append(str(path))
+            continue
+        queries.append(
+            Query(
+                path=path,
+                true_id=row.true_slug or f"{UNKNOWN_PREFIX}{row.wine_id}",
+                group=row.group,
+                wine_id=row.wine_id,
+                source=row.source,
+                note=row.note,
+            )
+        )
+    if missing:
+        raise FileNotFoundError(
+            f"в манифесте {manifest} нет на диске {len(missing)} кадров: "
+            + ", ".join(missing[:5])
+            + (" …" if len(missing) > 5 else "")
+        )
+    return queries
 
 
 def load_eval_queries(root: Path = EVAL_ROOT) -> list[Path]:

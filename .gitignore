@@ -14,3 +14,11 @@ data/*
 models/
 *.faiss
 *.npy
+/.env
+
+# Ключи внешних сервисов — только локально.
+.env
+
+# Признаки решающего слоя на каталоге платформы — десятки мегабайт, пересобираются скриптом.
+eval/results/features_platform*.jsonl
+eval/results/frames/

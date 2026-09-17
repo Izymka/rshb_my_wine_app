@@ -5,6 +5,7 @@
 убедиться, что она работает, — проверить её на примерах здесь.
 """
 
+import pytest
 from rapidfuzz import fuzz
 
 from wine_scanner.ocr import normalize, tokens, variants
@@ -43,3 +44,42 @@ def test_different_wines_stay_apart():
 
 def test_tokens_drop_single_characters():
     assert tokens("A Château 12 % vol") == ["chateau", "12", "vol"]
+
+
+# --- Сворачивание fold(): фонетика и псевдонимы ------------------------------------------
+
+from wine_scanner.ocr import fold, fold_tokens  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("label", "catalog"),
+    [
+        ("Château Tamagne", "Шато Тамань"),
+        ("Fanagoria", "Фанагория"),
+        ("Abrau-Durso", "Абрау-Дюрсо"),
+        ("Myskhako", "Мысхако"),
+        ("Cabernet Sauvignon", "Каберне Совиньон"),
+        ("Pinot Noir", "Пино Нуар"),
+        ("Chardonnay", "Шардоне"),
+        ("Massandra", "Массандра"),
+        ("Rouge", "Красное"),
+        ("Rosé Brut", "Розовое брют"),
+        ("Semi-Sweet White", "Полусладкое белое"),
+        ("Golubitskoe Estate", "Поместье Голубицкое"),
+        ("Portwein", "Портвейн"),
+        ("Zweigelt", "Цвайгельт"),
+    ],
+)
+def test_fold_joins_label_and_catalog_spellings(label, catalog):
+    assert fold(label) == fold(catalog)
+
+
+def test_fold_keeps_different_wineries_apart():
+    assert fold("Массандра") != fold("Мысхако")
+    # «Новый Свет» не должен превращаться в сладкое: sweet и svet после схлопывания совпадают,
+    # поэтому «sweet» в псевдонимах нет намеренно.
+    assert "sladkoe" not in fold("Новый Свет")
+
+
+def test_fold_tokens_drop_single_letters():
+    assert fold_tokens("A Chateau 12 % vol") == ["shato", "12", "vol"]

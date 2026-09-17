@@ -1,8 +1,19 @@
 """Дообучение детектора этикетки на один класс.
 
     uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels"
+    uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels" \
+        --own data/live_labels --init models/label_detector.pt --own-repeat 20 --epochs 4 \
+        --device cuda --out models/label_detector_v2.pt
+    uv run python scripts/train_label_detector.py --data ... --own data/live_labels \
+        --init models/label_detector.pt --eval-only   # измерить текущий детектор на своих кадрах
 
 Ждёт экспорт в формате COCO: подпапки train/ и valid/, в каждой картинки и _annotations.coco.json.
+
+Своя разметка (`--own`) — одна папка с кадрами и `_annotations.coco.json` (экспорт makesense.ai
+или Roboflow), делится на train/valid по кадрам 80/20 с фиксированным зерном и в обучении
+повторяется `--own-repeat` раз: своих кадров сотня против пяти тысяч чужих, и без повторов
+детектор их не заметит. Валидация печатается отдельно по чужим и по своим кадрам — интересует
+второе. `--init` — старт с уже дообученных весов, а не с COCO: так эпох нужно меньше.
 
 Дообучаем только голову классификатора поверх COCO-весов: бэкбон уже умеет находить объекты,
 доучиваем «что считать целью». Поэтому хватает тысяч кадров, а не сотен тысяч, и одной
@@ -14,7 +25,7 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from torchvision.ops import box_iou
 from tqdm import tqdm
 
@@ -52,6 +63,26 @@ def evaluate(model, loader, device) -> dict:
     }
 
 
+def report(title: str, metrics: dict) -> None:
+    print(
+        f"{title}: IoU {metrics['mean_iou']:.3f}, IoU>=0.75 {metrics['iou@0.75']:.3f}, "
+        f"найдено {metrics['detection_rate']:.3f}"
+    )
+
+
+def split_own(root: Path, valid_share: float, seed: int = 0):
+    """Своя разметка одной папкой -> два датасета с непересекающимися кадрами."""
+    import random
+
+    full = CocoDetectionDataset(root)
+    ids = list(full.ids)
+    random.Random(seed).shuffle(ids)
+    n_valid = max(1, int(len(ids) * valid_share)) if len(ids) > 4 else 0
+    valid, train = CocoDetectionDataset(root), CocoDetectionDataset(root)
+    valid.ids, train.ids = ids[:n_valid], ids[n_valid:]
+    return train, valid
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
@@ -73,6 +104,13 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--limit", type=int, default=None, help="взять N кадров, для проверки кода")
+    parser.add_argument("--own", type=Path, default=None, help="своя разметка COCO (одна папка)")
+    parser.add_argument(
+        "--own-repeat", type=int, default=20, help="во сколько раз повторить свои кадры"
+    )
+    parser.add_argument("--own-valid-share", type=float, default=0.2)
+    parser.add_argument("--init", type=Path, default=None, help="стартовые веса (свой чекпойнт)")
+    parser.add_argument("--eval-only", action="store_true", help="только измерить, не учить")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -81,21 +119,47 @@ def main() -> None:
     if args.limit:
         train_set.ids = train_set.ids[: args.limit]
         valid_set.ids = valid_set.ids[: max(8, args.limit // 8)]
+
+    own_train = own_valid = None
+    if args.own is not None:
+        own_train, own_valid = split_own(args.own, args.own_valid_share)
+        print(f"своя разметка: train {len(own_train)}, valid {len(own_valid)}")
     print(f"train: {len(train_set)}, valid: {len(valid_set)}, устройство: {device}")
 
     # num_workers=0: на macOS дочерние процессы плохо уживаются с MPS.
+    train_source = train_set
+    if own_train is not None and len(own_train):
+        train_source = ConcatDataset([train_set] + [own_train] * max(1, args.own_repeat))
     train_loader = DataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=0
+        train_source, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=0
     )
     valid_loader = DataLoader(
         valid_set, batch_size=args.batch_size, shuffle=False, collate_fn=collate, num_workers=0
     )
+    own_loader = (
+        DataLoader(own_valid, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+        if own_valid is not None and len(own_valid)
+        else None
+    )
 
+    if args.init is not None:
+        checkpoint = torch.load(args.init, map_location="cpu")
+        args.backbone = checkpoint["backbone"]
+        args.min_size = args.min_size or checkpoint.get("min_size")
     model = build_label_detector(
         args.backbone,
         trainable_backbone_layers=args.trainable_layers,
         min_size=args.min_size,
     ).to(device)
+    if args.init is not None:
+        model.load_state_dict(checkpoint["state_dict"])
+        print(f"старт с весов {args.init}")
+
+    if args.eval_only:
+        report("чужая валидация", evaluate(model, valid_loader, device))
+        if own_loader is not None:
+            report("свои кадры", evaluate(model, own_loader, device))
+        return
 
     # Горизонтальное отражение здесь не используем: на этикетке текст, зеркальных этикеток
     # в природе не бывает, и такая аугментация только уводит модель от реальности.
@@ -129,6 +193,12 @@ def main() -> None:
             f"IoU {metrics['mean_iou']:.3f}, IoU>=0.75 {metrics['iou@0.75']:.3f}, "
             f"найдено {metrics['detection_rate']:.3f}, {time.time() - started:.0f} с"
         )
+        # Отбор чекпойнта — по своим кадрам, если они есть: чужая валидация уже хороша,
+        # а чиним мы обрезку на своих.
+        if own_loader is not None:
+            own_metrics = evaluate(model, own_loader, device)
+            report("  свои кадры", own_metrics)
+            metrics = own_metrics
 
         if metrics["mean_iou"] > best_iou:
             best_iou = metrics["mean_iou"]

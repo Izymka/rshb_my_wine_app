@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .features import FEATURE_NAMES, PairFeatures, derive, matrix
+from .features import FEATURE_NAMES, FEATURE_VERSION, PairFeatures, derive, matrix
 
 DEFAULT_DIR = Path("models/decider")
 
@@ -75,8 +75,18 @@ class Decider:
         if self.feature_names != FEATURE_NAMES:
             raise ValueError(
                 "порядок признаков в сохранённой модели не совпадает с кодом: "
-                f"{self.feature_names} против {FEATURE_NAMES}. Модель надо переобучить — "
+                f"{self.feature_names} против {FEATURE_NAMES}. Модель надо переобучить "
+                "(scripts/build_platform_features.py, затем scripts/train_decider.py) — "
                 "иначе бустер получит колонки не на своих местах и молча начнёт врать."
+            )
+        # Свежесобранная модель — текущей версии; из файла версия приходит явно. Старые файлы
+        # без поля отсекает проверка списка признаков выше.
+        version = self.meta.setdefault("feature_version", FEATURE_VERSION)
+        if version != FEATURE_VERSION:
+            raise ValueError(
+                f"решающий слой обучен на признаках версии {version}, код ждёт "
+                f"{FEATURE_VERSION}. Переобучить: scripts/build_platform_features.py, "
+                "затем scripts/train_decider.py."
             )
 
     def calibrate(self, raw: np.ndarray) -> np.ndarray:
@@ -116,7 +126,8 @@ class Decider:
                     "calib_bias": self.calib_bias,
                     "threshold": self.threshold,
                     "feature_names": list(self.feature_names),
-                    **self.meta,
+                    "feature_version": FEATURE_VERSION,
+                    **{k: v for k, v in self.meta.items() if k != "feature_version"},
                 },
                 ensure_ascii=False,
                 indent=2,

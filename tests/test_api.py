@@ -40,11 +40,14 @@ def answer(frames: int = 1, answered: bool = True) -> ScanResult:
         timings={"total": 0.5},
         threshold=0.73,
         frames=frames,
+        confidence={"top1": best.probability, "top5": 1.0, "margin": best.probability - 0.3},
+        guard=None if answered else "twin",
     )
 
 
 class FakeScanner:
     version = VERSION
+    path_by_id = {"wine_a": "/нет/такого/a.png"}
 
     def __init__(self):
         self.calls: list[str] = []
@@ -170,3 +173,53 @@ def test_eval_endpoint_rejects_a_broken_file(client):
     )
 
     assert response.status_code == 400
+
+
+def test_scan_carries_confidence_and_guard(client):
+    """Уверенность для топ-1 и топ-5 — метрика из ТЗ п. 3; сработавшая защита — видна."""
+    body = client.post("/scan", files={"files": ("кадр.png", frame(), "image/png")}).json()
+    assert body["confidence"]["top1"] == pytest.approx(0.9)
+    assert body["confidence"]["top5"] == 1.0
+    assert body["guard"] is None
+
+
+def test_eval_endpoint_carries_confidence_beside_slug(client):
+    body = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")}).json()
+    assert body["slug"] == "wine_a"
+    assert body["confidence"]["top1"] == pytest.approx(0.9)
+
+
+def test_eval_endpoint_can_be_told_to_always_answer(client, monkeypatch):
+    """WINE_EVAL_REFUSE=0: ниже порога всё равно отдаём лучшего — на случай, если null в ключе
+    не засчитывается никогда. found при этом честно false."""
+    client.engine.answered = False
+    monkeypatch.setattr(main, "EVAL_REFUSE", False)
+    body = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")}).json()
+    assert body["slug"] == "wine_a"
+    assert body["found"] is False
+    assert body["guard"] == "twin"
+
+
+def test_catalog_image_404_for_unknown_slug(client):
+    assert client.get("/catalog/image/nope").status_code == 404
+    # Есть slug, но файла на диске нет — тоже 404, а не 500.
+    assert client.get("/catalog/image/wine_a").status_code == 404
+
+
+def test_sommelier_is_404_when_not_configured(client, monkeypatch):
+    monkeypatch.setitem(main.state, "sommelier", None)
+    response = client.post("/sommelier", json={"item_id": "wine_a", "question": "к чему подать?"})
+    assert response.status_code == 404
+
+
+def test_sommelier_answers_from_card(client, monkeypatch):
+    class FakeSommelier:
+        def ask(self, card, question, history=None):
+            return f"К {card['name']} — сыр. Вопрос был: {question}"
+
+    client.engine.payload_by_id = {"wine_a": {"name": "Chateau Alpha", "image_path": "/x"}}
+    monkeypatch.setitem(main.state, "sommelier", FakeSommelier())
+    response = client.post("/sommelier", json={"item_id": "wine_a", "question": "к чему подать?"})
+    assert response.status_code == 200
+    assert response.json()["answer"].startswith("К Chateau Alpha")
+    assert client.post("/sommelier", json={"item_id": "nope", "question": "?"}).status_code == 404

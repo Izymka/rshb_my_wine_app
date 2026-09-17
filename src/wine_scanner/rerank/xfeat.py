@@ -138,7 +138,14 @@ class XFeatMatcher:
         Он из того же репозитория, что XFeat, и под той же лицензией Apache 2.0.
         """
         if self.matcher == "lighterglue":
-            idx = self.model.match_lighterglue(query, candidate)
+            try:
+                idx = self.model.match_lighterglue(query, candidate)
+            except IndexError:
+                # LighterGlue по пути отбрасывает неуверенные точки и на редких парах приходит
+                # к пустой матрице оценок — kornia падает редукцией по пустой оси. Для нас это
+                # просто пара без совпадений.
+                empty = np.zeros((0, 2), dtype=np.float32)
+                return empty, empty
             return idx[0].astype(np.float32), idx[1].astype(np.float32)
 
         idx_q, idx_c = self.model.match(
@@ -151,6 +158,10 @@ class XFeatMatcher:
 
     def match(self, query: dict, candidate: dict) -> MatchFeatures:
         """Сопоставить два набора точек и проверить их геометрией."""
+        # Пустой набор точек (крошечный или однотонный кроп) роняет LighterGlue внутри kornia
+        # ошибкой редукции по пустой оси. Сопоставлять здесь нечего — пара без совпадений.
+        if len(query.get("keypoints", ())) < 2 or len(candidate.get("keypoints", ())) < 2:
+            return MatchFeatures(0, 0, 0.0, 0.0, False)
         points_q, points_c = self._correspondences(query, candidate)
         n_matches = len(points_q)
         if n_matches < MIN_POINTS_FOR_HOMOGRAPHY:

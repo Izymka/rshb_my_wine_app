@@ -279,3 +279,174 @@ def test_pair_features_need_no_labels():
     )
     assert row.label == 0
     assert row.true_id == ""
+
+
+# --- Длинный список, окно, защита от близнеца, уверенность (каталог платформы, 16.09) ------
+
+
+def build_family_index() -> VectorIndex:
+    """Шесть карточек: четыре Массандры на одном шаблоне, одна чужая, одна одиночка."""
+    payloads = [
+        ("krasnyy", "Портвейн красный Алушта", "Массандра", "Красное"),
+        ("belyy", "Портвейн белый Алушта", "Массандра", "Белое"),
+        ("krymskiy", "Портвейн белый крымский", "Массандра", "Белое"),
+        ("muskatel", "Мускатель белый", "Массандра", "Белое"),
+        ("taman", "Шато Тамань Руж", "Кубань-Вино", "Красное"),
+        ("lone", "Гравити", "Alma Valley", "Белое"),
+    ]
+    vectors = np.eye(len(payloads), DIM, dtype="float32")
+    index = VectorIndex(DIM)
+    index.add(
+        vectors,
+        item_ids=[p[0] for p in payloads],
+        payloads=[
+            {"name": n, "winery": w, "category": c, "image_path": f"/нет/такого/{i}.jpg"}
+            for i, n, w, c in payloads
+        ],
+    )
+    return index
+
+
+def build_family_scanner(vector, inliers, lines=(), threshold=0.5, **kwargs) -> WineScanner:
+    index = build_family_index()
+    return WineScanner(
+        index=index,
+        embedder=FakeEmbedder(vector),
+        ocr=FakeOCR(list(lines)),
+        matcher=FakeMatcher(inliers),
+        text_index=TextIndex.from_payloads(index.item_ids, index.payloads),
+        decider=Decider(FakeBooster(), calib_weight=1.0, calib_bias=0.0, threshold=threshold),
+        **kwargs,
+    )
+
+
+def label(*texts: str) -> list[TextLine]:
+    return [TextLine(t, 0.9, "cyrillic") for t in texts]
+
+
+def test_long_list_is_wider_than_window_and_outsiders_get_no_geometry():
+    """Кандидаты за окном получают текстовые сигналы, но не инлаеры — даже если фейковый
+    матчер их бы дал."""
+    scanner = build_family_scanner(
+        vector=[0.5, 0.4, 0.3, 0.2, 1.0, 0.1, 0, 0],  # taman первый, lone последний
+        inliers={"/нет/такого/lone.jpg": 500},
+        candidates=2,
+        visual_candidates=6,
+        family_expansion=False,
+    )
+    result = scanner.identify(image=None, trace=True)
+
+    assert len(result.trace["long_list"]) > 2
+    assert len(result.trace["window"]) == 2
+    lone = next(c for c in result.candidates if c.item_id == "lone")
+    assert lone.features["in_window"] == 0
+    assert lone.features["inliers"] == 0
+
+
+def test_text_confirmed_sibling_enters_the_window():
+    """Визуально последний, но этикетка называет его различающие слова — геометрию получает."""
+    scanner = build_family_scanner(
+        vector=[0, 0, 0, 0, 0, 1, 0, 0],  # ближе всего lone, Массандры в хвосте
+        inliers={"/нет/такого/krymskiy.jpg": 90},
+        lines=label("МАССАНДРА", "ПОРТВЕЙН БЕЛЫЙ КРЫМСКИЙ", "КРЫМ"),
+        candidates=1,
+        visual_candidates=6,
+        text_candidates=6,
+    )
+    result = scanner.identify(image=None, trace=True)
+
+    assert "krymskiy" in result.trace["window"]
+    krymskiy = next(c for c in result.candidates if c.item_id == "krymskiy")
+    assert krymskiy.features["in_window"] == 1
+    assert krymskiy.features["disc_hit"] == 1.0
+    assert result.best.item_id == "krymskiy"
+
+
+def test_family_expansion_adds_siblings_of_visual_leader():
+    scanner = build_family_scanner(
+        vector=[0, 0, 0, 1, 0, 0, 0, 0],  # ближе всего muskatel
+        inliers={},
+        candidates=1,
+        visual_candidates=1,
+        text_candidates=1,
+    )
+    with_family = scanner.identify(image=None, trace=True)
+    assert set(with_family.trace["family_added"]) == {"krasnyy", "belyy", "krymskiy"}
+
+    scanner.family_expansion = False
+    without = scanner.identify(image=None, trace=True)
+    assert without.trace["family_added"] == []
+    assert len(without.trace["long_list"]) == 1
+
+
+def test_twin_guard_refuses_rose_label_on_red_card():
+    """Розовый Алушта: геометрия и слова за красный сиблинг, цвет — против."""
+    lines = label("МАССАНДРА", "ПОРТВЕЙН РОЗОВЫЙ АЛУШТА", "ГОД УРОЖАЯ 2023")
+    kwargs = dict(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/krasnyy.jpg": 150},
+        lines=lines,
+        visual_candidates=6,
+    )
+    guarded = build_family_scanner(**kwargs).identify(image=None)
+    # Текст может переставить сиблинга наверх («белый Алушта» подтверждён не хуже), но
+    # цвет противоречит любому из них — итог в любом случае отказ с пометкой twin.
+    assert guarded.best.item_id in {"krasnyy", "belyy"}
+    assert guarded.answered is False
+    assert guarded.guard and "twin" in guarded.guard
+    assert "twin" in guarded.to_dict()["guard"]
+
+    unguarded = build_family_scanner(**kwargs, guard="off", sibling=False).identify(image=None)
+    assert unguarded.answered is True
+    assert unguarded.guard is None
+
+
+def test_twin_guard_stays_quiet_when_label_confirms_the_card():
+    lines = label("МАССАНДРА", "ПОРТВЕЙН КРАСНЫЙ АЛУШТА", "ГОД УРОЖАЯ 2024")
+    result = build_family_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/krasnyy.jpg": 150},
+        lines=lines,
+        visual_candidates=6,
+    ).identify(image=None)
+    assert result.answered is True
+    assert result.guard is None
+    assert result.best.features["color_match"] == 1
+
+
+def test_twin_guard_needs_readable_label():
+    """Одна строка OCR — правилу нечем судить, ответ остаётся за моделью."""
+    result = build_family_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/krasnyy.jpg": 150},
+        lines=label("РОЗОВЫЙ"),
+        visual_candidates=6,
+    ).identify(image=None)
+    assert result.answered is True
+    assert result.guard is None
+
+
+def test_confidence_block_is_consistent():
+    result = build_family_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={"/нет/такого/krasnyy.jpg": 150, "/нет/такого/belyy.jpg": 30},
+        visual_candidates=6,
+    ).identify(image=None)
+    confidence = result.confidence
+    probabilities = [c.probability for c in result.candidates]
+
+    assert confidence["top1"] == pytest.approx(probabilities[0])
+    assert 0 < confidence["top5"] <= 1
+    assert confidence["margin"] == pytest.approx(probabilities[0] - probabilities[1])
+    assert result.to_dict()["confidence"] == confidence
+
+
+def test_family_key_travels_with_features():
+    result = build_family_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={}, visual_candidates=6
+    ).identify(image=None)
+    rows = {c.item_id: c.features for c in result.candidates}
+    assert rows["krasnyy"]["family"] == "Массандра"
+    assert rows["taman"]["family"] == "Кубань-Вино"
+    # disc_contra у красного — лучший disc_hit среди других Массандр; без OCR он нулевой.
+    assert rows["krasnyy"]["disc_contra"] == 0.0

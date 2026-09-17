@@ -12,6 +12,7 @@ EasyOCR не умеет держать кириллицу и французск�
 
 import hashlib
 import json
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,14 @@ DEFAULT_MAX_SIDE = 640
 # просто никогда бы не срабатывал — при полностью зелёных тестах.
 CACHE_VERSION = 2
 
+# Читатели. `easyocr` — локальный, работает всегда; `yandex` — облачный Yandex Vision
+# (ocr/yandex.py), при любой ошибке откатывается на EasyOCR. Выбор — переменной окружения
+# WINE_OCR, чтобы сервис и бенчмарк переключались без правки кода.
+BACKENDS = ("easyocr", "yandex")
+DEFAULT_BACKEND = os.environ.get("WINE_OCR", "easyocr")
+# Облаку платим за запрос, а не за пиксели, и читает оно мелкий текст лучше на большем кадре.
+CLOUD_MAX_SIDE = 1024
+
 
 @dataclass
 class TextLine:
@@ -69,9 +78,22 @@ class LabelOCR:
         cache_dir: Path = OCR_CACHE,
         max_side: int | None = DEFAULT_MAX_SIDE,
         gpu: bool | None = None,
+        backend: str | None = None,
+        cloud=None,
     ):
         self.min_confidence = min_confidence
         self.max_side = max_side
+        self.backend = backend or DEFAULT_BACKEND
+        if self.backend not in BACKENDS:
+            raise ValueError(f"неизвестный OCR-бэкенд {self.backend!r}, знаю {BACKENDS}")
+        # Облачный клиент можно подменить (тесты, другой провайдер): нужен только .read(image).
+        self.cloud = cloud
+        if self.cloud is None and self.backend == "yandex":
+            from .yandex import YandexOCR
+
+            self.cloud = YandexOCR()
+        # Сколько раз облако не ответило и кадр дочитал EasyOCR. Уходит в /health.
+        self.fallbacks = 0
         # EasyOCR умеет только CUDA: внутри он проверяет torch.cuda и ничего не знает про MPS.
         # На ноутбуке это значит процессор и 1.2 с на кадр, на машине с картой — порядок
         # выигрыша, потому что распознавание здесь самый дорогой блок после ре-ранкинга.
@@ -87,11 +109,18 @@ class LabelOCR:
         строки к своей высоте. Зато время растёт линейно по площади, а это самая дорогая
         часть всего пайплайна.
         """
-        if self.max_side is None or max(image.size) <= self.max_side:
+        side = self.effective_max_side()
+        if side is None or max(image.size) <= side:
             return image
         scaled = image.copy()
-        scaled.thumbnail((self.max_side, self.max_side), Image.BICUBIC)
+        scaled.thumbnail((side, side), Image.BICUBIC)
         return scaled
+
+    def effective_max_side(self) -> int | None:
+        """До какой стороны ужимается кадр: у облака порог выше, чем у EasyOCR."""
+        if self.max_side is None:
+            return None
+        return max(self.max_side, CLOUD_MAX_SIDE) if self.backend != "easyocr" else self.max_side
 
     def _cache_path(self, image: Image.Image) -> Path:
         """Ключ кэша считается по самим пикселям, а не по имени файла.
@@ -107,8 +136,12 @@ class LabelOCR:
         """
         digest = hashlib.sha1(image.tobytes())
         digest.update(
-            f"{image.size}:{self.min_confidence}:{self.max_side}:v{CACHE_VERSION}".encode()
+            f"{image.size}:{self.min_confidence}:{self.effective_max_side()}:v{CACHE_VERSION}".encode()
         )
+        # Имя бэкенда попадает в ключ только у не-EasyOCR: иначе обесценился бы кэш на сотни
+        # запросов, накопленный до появления облака, — а он и есть то, чем живёт сборка признаков.
+        if self.backend != "easyocr":
+            digest.update(f":{self.backend}".encode())
         return self.cache_dir / f"{digest.hexdigest()}.json"
 
     def _reader(self, name: str):
@@ -135,6 +168,27 @@ class LabelOCR:
             data = json.loads(cached.read_text(encoding="utf-8"))
             return [TextLine(**line) for line in data]
 
+        lines = self._read_backend(image)
+
+        if cached is not None:
+            cached.write_text(
+                json.dumps([line.__dict__ for line in lines], ensure_ascii=False),
+                encoding="utf-8",
+            )
+        return lines
+
+    def _read_backend(self, image: Image.Image) -> list[TextLine]:
+        if self.backend == "easyocr" or self.cloud is None:
+            return self._read_easyocr(image)
+        from .yandex import OCRBackendError
+
+        try:
+            return self.cloud.read(image)
+        except OCRBackendError:
+            self.fallbacks += 1
+            return self._read_easyocr(image)
+
+    def _read_easyocr(self, image: Image.Image) -> list[TextLine]:
         array = np.asarray(image)
         width, height = image.size
         lines: list[TextLine] = []
@@ -144,12 +198,6 @@ class LabelOCR:
                     lines.append(
                         TextLine(text.strip(), float(confidence), name, _rect(box, width, height))
                     )
-
-        if cached is not None:
-            cached.write_text(
-                json.dumps([line.__dict__ for line in lines], ensure_ascii=False),
-                encoding="utf-8",
-            )
         return lines
 
     def read_digits(self, image: Image.Image, min_confidence: float = 0.1) -> str:
@@ -162,6 +210,7 @@ class LabelOCR:
         а от мусора нас всё равно защищает проверка правдоподобия года.
 
         Кэша здесь нет: участок вырезан по геометрии конкретной пары и второй раз не повторится.
+        Читает всегда EasyOCR, независимо от бэкенда: облаку не объяснить «только цифры».
         """
         result = self._reader("latin").readtext(
             np.asarray(image), allowlist="0123456789", detail=1

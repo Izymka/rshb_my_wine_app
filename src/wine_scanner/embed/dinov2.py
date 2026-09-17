@@ -30,9 +30,11 @@ def pick_device() -> torch.device:
 class _ImageDataset(Dataset):
     """Нужен только чтобы DataLoader читал и декодировал файлы в несколько процессов."""
 
-    def __init__(self, paths: list[Path], size: int, cropper=None, fit: str = "center_crop"):
+    def __init__(
+        self, paths: list[Path], size: int, cropper=None, fit: str = "center_crop", transform=None
+    ):
         self.paths = paths
-        self.transform = build_transform(size, fit)
+        self.transform = transform or build_transform(size, fit)
         self.cropper = cropper
 
     def __len__(self) -> int:
@@ -144,7 +146,7 @@ class Dinov2Embedder:
             # После первого прогона кроп берётся из кэша, и медленно уже не будет.
             num_workers = 0
         loader = DataLoader(
-            _ImageDataset(paths, self.size, self.cropper, self.fit),
+            _ImageDataset(paths, self.size, self.cropper, self.fit, self.transform()),
             batch_size=batch_size,
             num_workers=num_workers,
             shuffle=False,  # порядок обязан совпадать с порядком paths
@@ -167,5 +169,9 @@ class Dinov2Embedder:
         дальше используется ещё дважды — для OCR и для локальных признаков. Читать и резать
         её трижды незачем.
         """
-        tensor = build_transform(self.size, self.fit)(image)
+        tensor = self.transform()(image)
         return self.encode_batch(tensor.unsqueeze(0))[0]
+
+    def transform(self):
+        """Препроцессинг модели: размер, режим приведения к квадрату, нормализация."""
+        return build_transform(self.size, self.fit)

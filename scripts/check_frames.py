@@ -94,13 +94,34 @@ def main() -> None:
     parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
     parser.add_argument("--sheet", type=Path, default=None, help="куда сохранить лист кропов")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--live",
+        type=Path,
+        default=None,
+        help="манифест живых кадров (data/live/manifest.csv) вместо своего набора; "
+        "эталон берётся из каталога платформы по true_slug",
+    )
+    parser.add_argument("--catalog-images", type=Path, default=Path("data/catalog/images"))
     args = parser.parse_args()
 
     device = pick_device()
     cropper = build_cropper(device, args.weights)
     embedder = Dinov2Embedder(device=device, cropper=cropper, fit="pad")
 
-    catalog, queries = load_own()
+    if args.live:
+        # Живые кадры платформы: эталон — вырезка каталога; у незнакомцев эталона нет, для них
+        # проверяются только физические свойства кадра.
+        from wine_scanner.catalog import CatalogItem, load_live
+
+        queries = [q for q in load_live(args.live, include_multi=True) if q.source == "live"]
+        slugs = sorted({q.true_id for q in queries if q.known})
+        catalog = [
+            CatalogItem(slug, args.catalog_images / f"{slug}.png", {})
+            for slug in slugs
+            if (args.catalog_images / f"{slug}.png").exists()
+        ]
+    else:
+        catalog, queries = load_own()
     if args.wine:
         catalog = [it for it in catalog if it.item_id == args.wine]
         queries = [q for q in queries if q.true_id == args.wine]
@@ -119,9 +140,13 @@ def main() -> None:
 
     rows = [(it.image_path, it.item_id, "catalog", None) for it in catalog]
     rows += [
-        (q.path, q.true_id, q.group, float(vector @ reference[q.true_id]))
+        (
+            q.path,
+            q.wine_id or q.true_id,
+            q.group,
+            float(vector @ reference[q.true_id]) if q.true_id in reference else None,
+        )
         for q, vector in zip(queries, query_vectors, strict=True)
-        if q.true_id in reference
     ]
 
     tiles, problems = [], 0
@@ -132,7 +157,9 @@ def main() -> None:
         side = min(crop.size)
         sharp = sharpness(crop)
         fill = (crop.width * crop.height) / (full.width * full.height)
-        notes = check(group, side, sharp, fill, cos)
+        # Косинус к студийной вырезке платформы лежит около 0.4 и у верных кадров — порог
+        # «чужая бутылка» снят с телефонных эталонов и здесь не судит, только печатается.
+        notes = check(group, side, sharp, fill, None if args.live else cos)
 
         if item_id != current:
             print(f"\n{item_id}")

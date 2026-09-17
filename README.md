@@ -1,0 +1,132 @@
+# Сканер российских вин для платформы «Своё Вино»
+
+Фотография этикетки → карточка вина из каталога платформы, калиброванная уверенность, честный
+отказ с похожими и аналогами, если вина в каталоге нет. Хакатон РСХБ, сентябрь 2026.
+
+Как это устроено в двух словах: задача решается как поиск по картинке, а не как классификация.
+Визуальная ветка находит **семью** вина (линейку, винодельню), текстовая — **конкретную
+карточку внутри семьи**: близнецы одной серии различаются словами «красное / белое / брют /
+полусладкое», а не рисунком этикетки. Подробно — в [ARCHITECTURE.md](ARCHITECTURE.md),
+контракт API — в [API.md](API.md).
+
+## Быстрый старт
+
+### Docker (машина с NVIDIA)
+
+```bash
+cp .env.example .env          # ключи облачного OCR и LLM, если используются; без них тоже работает
+docker compose up --build     # сервис на :8080, интерфейс на :3000
+curl -s localhost:8080/health | jq .devices   # все блоки должны быть на cuda
+```
+
+В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
+
+### Локально (uv, Python 3.12)
+
+```bash
+uv sync --extra api --extra rerank --extra ocr --extra decide
+WINE_INDEX=models/index_platform WINE_DECIDER=models/decider_platform \
+  uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
+cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
+```
+
+Первый запрос после старта сервис делает сам (прогрев), поэтому поднимается он около минуты;
+`/health` показывает `load_seconds` и `warmup_seconds`.
+
+### Скрипт оценки
+
+```bash
+cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
+  --endpoint http://127.0.0.1:8080/v1/eval/predict --output /tmp/predictions.jsonl
+```
+
+Ручка отвечает `{"slug": ...}` либо `{"slug": null, "similar": [...]}` на незнакомое вино.
+Переключатель `WINE_EVAL_REFUSE=0` заставляет и ниже порога отдавать лучшего кандидата.
+
+## Переменные окружения
+
+| Переменная | Значение по умолчанию | Смысл |
+|---|---|---|
+| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform`) |
+| `WINE_OCR` | `easyocr` | `yandex` — Yandex Vision OCR с откатом на EasyOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
+| `WINE_VLM` | `0` | `1` — VLM-судья на спорных случаях; `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY` (любой OpenAI-совместимый чат) |
+| `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `openai`, — | Провайдер судьи и откат (`openai` / `gigachat`). GigaChat на картинки этикеток отвечает отказом — для судьи не годится |
+| `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`gigachat` работает без VPN; `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |
+| `GIGACHAT_CREDENTIALS`, `GIGACHAT_MODEL` | —, `GigaChat-2-Pro` | Ключ авторизации GigaChat; `GIGACHAT_CA_BUNDLE` — сертификат Минцифры для проверки TLS |
+| `WINE_GUARD` | `twin` | Защита от близнеца: `twin` / `strict` / `off` |
+| `WINE_RERANK_CANDIDATES` | `25` | Окно ре-ранкинга локальными признаками; на видеокарте 50 |
+| `WINE_VISUAL_CANDIDATES`, `WINE_TEXT_CANDIDATES` | `100`, `50` | Ширина визуальной и текстовой веток |
+| `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
+| `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
+| `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес сервиса для интерфейса |
+
+Без единого внешнего ключа сервис полностью работоспособен: EasyOCR локально, судья и
+сомелье выключены.
+
+## Сборка артефактов
+
+Каталог платформы (дамп CSV + медиа) → индекс → whitening → признаки → решающий слой:
+
+```bash
+uv run python scripts/build_catalog.py                      # data/catalog/: catalog.csv + images/<slug>.png
+uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad \
+  --model google/siglip2-so400m-patch16-384 --out models/index_platform      # ~20 мин на ноутбуке
+uv run python scripts/fit_whitening.py --index models/index_platform --dim 256
+uv run python scripts/synthesize_queries.py --n 300         # псевдофото из вырезок каталога
+uv run python scripts/import_live_photos.py                  # живые кадры -> data/live/manifest.csv
+uv run python scripts/build_platform_features.py --sources synthetic,live
+uv run python scripts/train_decider.py --features eval/results/features_platform.jsonl \
+  --scenario real --live-weight 30 --out models/decider_platform
+```
+
+Веса детектора этикетки (`models/label_detector.pt`) обучаются `scripts/train_label_detector.py`.
+
+## Как измеряется
+
+`eval/platform_benchmark.py` гоняет тот же `WineScanner`, что стоит за API, по живым кадрам
+(`data/live/manifest.csv`) и раскладывает путь ответа по ступеням: визуальный ранг верной
+карточки, текстовый ранг, попала ли в окно ре-ранкинга, итоговый top-1, исход (верно /
+близнец / чужое / отказ), ложные приёмы на незнакомых винах. Каждый прогон дописывается в
+`eval/results/platform_runs.jsonl` — это и есть таблица абляций.
+
+```bash
+uv run python eval/platform_benchmark.py --tag <метка>
+uv run python eval/platform_benchmark.py --decider none --text-scorer bm25 --tag ablation-bm25
+uv run python eval/latency.py --n 20          # разбивка задержки по блокам без кэшей
+uv run python -m pytest tests/                # 130+ тестов без единой модели
+```
+
+Цифры на живых кадрах каталога платформы (16–17.09.2026, 24 известных кадра, 152 незнакомых)
+— в [ARCHITECTURE.md](ARCHITECTURE.md), раздел «Что измерено».
+
+## Структура
+
+```
+api/            FastAPI: /scan, /v1/eval/predict, /health, /catalog/image/{slug}, /sommelier
+web/            Nuxt 3, mobile-first интерфейс в стилистике портала
+src/wine_scanner/
+  detect/       детекция бутылки и этикетки (каскад Faster R-CNN)
+  embed/        SigLIP 2 / DINOv2 (фабрика по config.json) + whitening
+  index/        FAISS
+  ocr/          EasyOCR / Yandex Vision, сворачивание алфавитов, n-граммный текстовый индекс, атрибуты
+  rerank/       XFeat + LighterGlue + RANSAC
+  vintage/      год урожая
+  decide/       LightGBM, калибровка, защита от близнеца, VLM-судья
+  analogues.py  аналоги из других виноделен
+  sommelier.py  цифровой сомелье
+  pipeline.py   сквозной WineScanner — единственная точка входа
+scripts/        сборка каталога, индекса, признаков, обучение
+eval/           бенчмарки и результаты
+data/           каталог, живые кадры, публичные кадры организаторов (в git не входит)
+```
+
+## Ограничения
+
+- Эталоны платформы — студийные вырезки, часто 140–300 px шириной; визуальная ветка находит
+  семью, а внутри семьи ответ держится на тексте. Кадр без читаемой этикетки (сильный смаз,
+  этикетка сбоку) с большой вероятностью уйдёт в отказ.
+- 55 карточек каталога делят одну и ту же картинку с другой карточкой; их различает только
+  текст, а если он совпадает — различить нельзя в принципе.
+- Латентность на ноутбуке без видеокарты 6–9 с; на RTX 4060 Ti ожидаемо до 2 с (замер — в
+  ARCHITECTURE.md после переезда).

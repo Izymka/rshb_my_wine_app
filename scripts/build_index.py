@@ -10,13 +10,14 @@
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 from tqdm import tqdm
 
 from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
 from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
-from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
+from wine_scanner.embed import DEFAULT_MODEL, build_embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import LabelOCR
 from wine_scanner.rerank import DescriptorStore, XFeatMatcher
@@ -70,7 +71,9 @@ def year_boxes(items: list[CatalogItem], cropper) -> dict[str, tuple]:
     а у части снимков он не читается. Такие карточки просто не получают поля, и увеличение
     по ним не работает — год для них берётся из общего текста этикетки или не берётся вовсе.
     """
-    ocr = LabelOCR()
+    # Боксы года на карточках каталога не должны зависеть от WINE_OCR: облако их не считает
+    # так же, и индекс перестал бы воспроизводиться. Каталог читает всегда EasyOCR.
+    ocr = LabelOCR(backend="easyocr")
     found: dict[str, tuple] = {}
     for item in tqdm(items, desc="год на карточках"):
         image = load_image(item.image_path)
@@ -108,6 +111,12 @@ def main() -> None:
         action="store_true",
         help="не искать год на карточках (сборка быстрее, увеличение по гомографии отключено)",
     )
+    parser.add_argument(
+        "--reuse-from",
+        type=Path,
+        default=None,
+        help="взять дескрипторы XFeat и боксы года из уже собранного индекса (другой эмбеддер)",
+    )
     parser.add_argument("--rerank-max-side", type=int, default=640)
     parser.add_argument("--rerank-points", type=int, default=2048)
     args = parser.parse_args()
@@ -118,7 +127,7 @@ def main() -> None:
     print(f"карточек в каталоге: {len(items)}")
 
     device = pick_device()
-    embedder = Dinov2Embedder(
+    embedder = build_embedder(
         model_name=args.model,
         device=device,
         cropper=build_cropper(args.detect, args.weights, device),
@@ -128,7 +137,30 @@ def main() -> None:
 
     vectors = embedder.encode_paths([it.image_path for it in items], batch_size=args.batch_size)
 
-    boxes = year_boxes(items, embedder.cropper) if not args.no_vintage_boxes else {}
+    # Дескрипторы XFeat и боксы года от эмбеддера не зависят: при сборке индекса другой
+    # моделью их можно взять из уже собранного — это полтора часа против минут.
+    reused_boxes: dict[str, tuple] = {}
+    if args.reuse_from is not None:
+        old_meta = json.loads((args.reuse_from / "meta.json").read_text(encoding="utf-8"))
+        for item_id, payload in zip(old_meta["item_ids"], old_meta["payloads"], strict=True):
+            if payload.get("vintage_box"):
+                reused_boxes[item_id] = tuple(payload["vintage_box"])
+        old_descriptors = args.reuse_from / "descriptors"
+        if old_descriptors.exists() and not args.no_descriptors:
+            target = args.out / "descriptors"
+            if not target.exists():
+                args.out.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(old_descriptors, target)
+            print(
+                f"дескрипторы и боксы года взяты из {args.reuse_from}: боксов {len(reused_boxes)}"
+            )
+
+    if args.no_vintage_boxes:
+        boxes = {}
+    elif reused_boxes:
+        boxes = reused_boxes
+    else:
+        boxes = year_boxes(items, embedder.cropper)
 
     index = VectorIndex(embedder.dim)
     index.add(
@@ -171,6 +203,9 @@ def main() -> None:
                 "weights": str(args.weights),
                 "catalog": args.catalog,
                 "items": len(items),
+                "size": embedder.size,
+                "descriptor": embedder.descriptor,
+                "dim": embedder.dim,
             },
             ensure_ascii=False,
             indent=2,

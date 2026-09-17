@@ -6,9 +6,17 @@ eval/: бенчмарки собирали те же блоки заново, к
 
 Порядок блоков ровно тот, что закреплён замерами (см. CLAUDE.md и PLAN.md):
 
-    кадр -> каскадная обрезка -> DINOv2 -> FAISS (50 кандидатов)
-                              \\-> OCR -> BM25 + fuzzy (50 кандидатов)
-         слияние RRF -> 25 кандидатов -> XFeat + RANSAC -> LightGBM -> вероятность -> ответ
+    кадр -> каскадная обрезка -> DINOv2 (+whitening) -> FAISS (100 кандидатов)
+                              \\-> OCR -> n-граммы + покрытие слов (50 кандидатов)
+         слияние RRF + родня по винодельне -> длинный список (текстовые сигналы всем)
+         -> окно 25 + подтверждённые текстом сиблинги -> XFeat + RANSAC
+         -> LightGBM -> защита от близнеца -> вероятность -> ответ
+
+Длинный список и окно — два яруса кандидатов (16.09.2026, каталог платформы). Близнецы
+внутри линейки различимы словами, а не картинкой, и слова считаются дёшево: поэтому
+текстовые сигналы получают все кандидаты длинного списка, включая родню по винодельне
+верхних визуальных и текстовых совпадений. Дорогое сопоставление локальными признаками
+достаётся только окну — верхушке слитого порядка плюс тем, кого текст подтвердил отдельно.
 
 Три вещи, о которых стоит помнить, читая код.
 
@@ -26,6 +34,7 @@ p95 < 2 с, а оптимизировать без разбивки означа
 
 import hashlib
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -34,12 +43,16 @@ from pathlib import Path
 
 from PIL import Image
 
+from .analogues import Analogues
 from .burst import fuse_rrf, ranked, sharpness
-from .decide import Decider, PairFeatures
+from .decide import Decider, PairFeatures, Scored, derive
+from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
+from .decide.guard import SIBLING_ENABLED, sibling_swap, twin_guard
+from .decide.judge import VlmJudge
 from .detect import BottleDetector, CachedCropper, CascadeCropper
-from .embed import DEFAULT_MODEL, Dinov2Embedder, Whitening, load_image, pick_device
+from .embed import DEFAULT_MODEL, Whitening, build_embedder, load_image, pick_device
 from .index import VectorIndex
-from .ocr import LabelOCR, TextIndex, catalog_document
+from .ocr import LabelOCR, TextIndex
 from .rerank import DescriptorStore, XFeatMatcher
 from .vintage import Answer, VintageReader, compare, project, resolve
 
@@ -47,9 +60,21 @@ INDEX_DIR = Path("models/index")
 DECIDER_DIR = Path("models/decider")
 LABEL_WEIGHTS = Path("models/label_detector.pt")
 
-VISUAL_CANDIDATES = 50
-TEXT_CANDIDATES = 50
-RERANK_CANDIDATES = 25
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, default))
+
+
+VISUAL_CANDIDATES = _env_int("WINE_VISUAL_CANDIDATES", 100)
+TEXT_CANDIDATES = _env_int("WINE_TEXT_CANDIDATES", 50)
+RERANK_CANDIDATES = _env_int("WINE_RERANK_CANDIDATES", 25)
+# Расширение по винодельне: у скольких лидеров каждой ветки берём семью и сколько карточек
+# семьи добавляем. 15 — больше, чем у типичной линейки, и меньше, чем у Фанагории целиком.
+FAMILY_SEEDS = 3
+FAMILY_CAP = _env_int("WINE_FAMILY_CAP", 15)
+# Кандидат вне окна, у которого этикетка подтвердила хотя бы половину различающих слов,
+# попадает в окно: текстом подтверждённый сиблинг обязан получить геометрию.
+DISC_WINDOW_MIN = 0.5
+GUARD_EPS = 1e-3
 
 # Сколько кандидатов уходит клиенту. Решающий слой оценивает все 25, но интерфейсу нужны
 # первые несколько — на экране «возможно, одно из этих» больше и не поместится. Разница не
@@ -116,6 +141,22 @@ class ScanResult:
     threshold: float
     frames: int = 1
     vintage: Answer | None = None
+    # Сработавшая защита («twin») или None. Отдельным полем, а не в вероятности: клиент и
+    # бенчмарк должны видеть, что отказ пришёл от правила, а не от модели.
+    guard: str | None = None
+    # Что сказал VLM-судья, если его звали.
+    judge: dict | None = None
+    # Аналоги лучшего кандидата из других виноделен (analogues.py) — функция после поиска.
+    analogues: list[dict] | None = None
+    # Уверенность для API: калиброванная вероятность лучшего (`top1`), доля массы первых пяти
+    # среди всех кандидатов (`top5`) и отрыв от второго (`margin`). ТЗ просит метрику для
+    # топ-1 и топ-5 — это она.
+    confidence: dict | None = None
+    # Внутренности запроса для бенчмарка: вектор, полные списки обеих веток, окно, инлаеры.
+    # Заполняется только по просьбе (`identify(..., trace=True)`) и наружу через to_dict
+    # не уходит: сервису это лишние килобайты, а измерителю — единственный способ узнать,
+    # на каком месте стояла верная карточка, не пересобирая пайплайн заново.
+    trace: dict | None = None
 
     def to_dict(self) -> dict:
         # При отказе поля ответа пустые, а кандидаты остаются: клиенту есть что показать
@@ -146,9 +187,55 @@ class ScanResult:
                 else None
             ),
             "threshold": self.threshold,
+            "confidence": self.confidence,
+            "guard": self.guard,
+            "judge": self.judge,
+            "analogues": self.analogues,
             "frames": self.frames,
             "timings_ms": {k: round(v * 1000, 1) for k, v in self.timings.items()},
         }
+
+
+class RetrievalOnlyDecider:
+    """Заглушка решающего слоя: порядок слияния веток и ничего больше.
+
+    Нужна в двух местах. Сборка признаков: пока список признаков меняется, обученной модели
+    под него ещё нет, а пайплайн должен собраться. Бенчмарк: сколько даёт сам решающий слой
+    поверх простого слияния. Вероятность — 1/(1 + ранг), порог — половина, то есть «отвечаем
+    всегда первым».
+    """
+
+    threshold = 0.5
+    meta: dict = {"stub": "retrieval-only"}
+
+    def score(self, rows: list[PairFeatures]) -> list[Scored]:
+        derived = derive(rows)
+        scored = [
+            Scored(row.item_id, 1.0 / (1.0 + row.rrf_rank), -float(row.rrf_rank), features)
+            for row, features in zip(rows, derived, strict=True)
+        ]
+        scored.sort(key=lambda s: s.raw, reverse=True)
+        return scored
+
+
+def confidence_of(candidates: list[Candidate]) -> dict | None:
+    """Уверенность для API из калиброванных вероятностей кандидатов.
+
+    `top1` — вероятность лучшего как есть. `top5` — доля массы первых пяти среди всех: если
+    у лидера 0.9, а у остальных по 0.01, пятёрка забирает почти всё; если вероятности размазаны
+    по линейке, пятёрка получает меньше, и это честный сигнал, что выбирать надо из списка.
+    Калибровка точна только для победителя (см. decide/model.py), поэтому `top5` — оценка,
+    а не вероятность в строгом смысле. `margin` — отрыв от второго.
+    """
+    if not candidates:
+        return None
+    probabilities = [c.probability for c in candidates]
+    total = sum(probabilities) or 1.0
+    return {
+        "top1": probabilities[0],
+        "top5": sum(probabilities[:5]) / total,
+        "margin": probabilities[0] - (probabilities[1] if len(probabilities) > 1 else 0.0),
+    }
 
 
 class WineScanner:
@@ -176,8 +263,28 @@ class WineScanner:
         ocr=None,
         matcher=None,
         decider=None,
+        visual_candidates: int = VISUAL_CANDIDATES,
+        text_candidates: int = TEXT_CANDIDATES,
+        family_expansion: bool | None = None,
+        window_extra: int | None = None,
+        guard: str = DEFAULT_GUARD,
+        sibling: bool = SIBLING_ENABLED,
+        judge=None,
     ):
         self.candidates = candidates
+        self.visual_candidates = visual_candidates
+        self.text_candidates = text_candidates
+        self.family_expansion = (
+            bool(int(os.environ.get("WINE_FAMILY", "1"))) if family_expansion is None else family_expansion
+        )
+        # Сколько текстом подтверждённых кандидатов можно добавить в окно сверх основного:
+        # ограничение нужно, чтобы длинная линейка не удвоила стоимость ре-ранкинга.
+        self.window_extra = candidates if window_extra is None else window_extra
+        self.guard = guard
+        # Выбор внутри семьи по тексту (decide/guard.py, sibling_swap).
+        self.sibling = sibling
+        # Судья создаётся из окружения только по явному WINE_VLM=1; переданный объект — как есть.
+        self.judge = judge if judge is not None else VlmJudge.from_env()
         # Кэш OCR по умолчанию выключен. Он полезен при повторных прогонах по одним и тем же
         # файлам, но замер задержки с ним показывает не работу системы, а скорость чтения
         # json-а — именно так и родилась цифра 2 секунды, в которую мы верили.
@@ -215,12 +322,14 @@ class WineScanner:
 
         if embedder is None:
             device = device or pick_device()
-            embedder = Dinov2Embedder(
+            embedder = build_embedder(
                 model_name=self.config.get("model", DEFAULT_MODEL),
                 device=device,
                 cropper=self._build_cropper(weights, device, crop_cache),
                 fit=self.config.get("fit", "pad"),
                 precision=precision,
+                size=self.config.get("size"),
+                descriptor=self.config.get("descriptor"),
             )
         self.embedder = embedder
         self.cropper = getattr(embedder, "cropper", None)
@@ -231,10 +340,9 @@ class WineScanner:
         self.text_index = (
             text_index
             if text_index is not None
-            else TextIndex(
-                self.index.item_ids, [catalog_document(p) for p in self.index.payloads]
-            )
+            else TextIndex.from_payloads(self.index.item_ids, self.index.payloads)
         )
+        self.analogues = Analogues(self.index.item_ids, self.index.payloads)
         descriptor_dir = Path(index_dir) / "descriptors"
         self.descriptors = (
             DescriptorStore(descriptor_dir, device=self.matcher.device)
@@ -285,7 +393,12 @@ class WineScanner:
             "embed": str(getattr(self.embedder, "device", "?")),
             "precision": str(getattr(self.embedder, "precision", "?")),
             "rerank": str(getattr(self.matcher, "device", "?")),
-            "ocr": "cuda" if getattr(self.ocr, "gpu", False) else "cpu",
+            "ocr": (
+                getattr(self.ocr, "backend", "easyocr")
+                if getattr(self.ocr, "backend", "easyocr") != "easyocr"
+                else ("cuda" if getattr(self.ocr, "gpu", False) else "cpu")
+            ),
+            "ocr_fallbacks": str(getattr(self.ocr, "fallbacks", 0)),
         }
 
     def _build_cropper(self, weights: Path, device, crop_cache: Path | None):
@@ -346,7 +459,16 @@ class WineScanner:
         timings["ocr"] = time.perf_counter() - started
 
         started = time.perf_counter()
-        hits = self.text_index.search(text, top_k=TEXT_CANDIDATES) if text else []
+        scores = None
+        hits = []
+        query_tokens: list[str] = []
+        if text:
+            query_tokens = self.text_index.query_tokens(text)
+            if query_tokens:
+                # Оценки всего каталога считаются один раз: по ним и список кандидатов,
+                # и порядок родни при расширении по винодельне.
+                scores = self.text_index.score_all(text)
+                hits = self.text_index.search(text, top_k=self.text_candidates, scores=scores)
         timings["text_search"] = time.perf_counter() - started
 
         confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
@@ -355,8 +477,45 @@ class WineScanner:
             "text": text,
             "confidence": confidence,
             "hits": hits,
+            "scores": scores,
+            "tokens": query_tokens,
+            "attrs": self.text_index.query_attributes(query_tokens),
             "timings": timings,
         }
+
+    def _long_list(self, visual, textual, scores) -> tuple[list[str], list[str]]:
+        """Слияние веток плюс родня по винодельне. Возвращает (список, добавленные роднёй).
+
+        Родня добавляется в хвост: у неё нет позиции ни в одной ветке, и ставить её выше
+        честно найденных кандидатов не за что. Своё место она получит по текстовым сигналам.
+        """
+        visual_ids = [h.item_id for h in visual]
+        textual_ids = [h.item_id for h in textual]
+        base = ranked(fuse_rrf([visual_ids, textual_ids]))
+        added: list[str] = []
+        if self.family_expansion:
+            seen = set(base)
+            families: list[str] = []
+            for item_id in visual_ids[:FAMILY_SEEDS] + textual_ids[:FAMILY_SEEDS]:
+                family = self.text_index.family_of.get(item_id, "")
+                if family and family not in families:
+                    families.append(family)
+            for family in families:
+                for item_id in self.text_index.family_rank(family, scores, seen, FAMILY_CAP):
+                    added.append(item_id)
+                    seen.add(item_id)
+        return base + added, added
+
+    def _window(self, long_list: list[str], signals: dict[str, dict]) -> list[str]:
+        """Кому достаётся геометрия: верхушка слитого порядка и подтверждённые текстом."""
+        window = long_list[: self.candidates]
+        extra = [
+            item_id
+            for item_id in long_list[self.candidates :]
+            if signals[item_id]["disc_hit"] >= DISC_WINDOW_MIN
+        ]
+        extra.sort(key=lambda item_id: -signals[item_id]["disc_hit"])
+        return window + extra[: self.window_extra]
 
     def _match(self, query_features: dict, item_ids, found: dict) -> None:
         """Сопоставить запрос с кандидатами, пропуская уже сопоставленных."""
@@ -395,8 +554,10 @@ class WineScanner:
         projected = project(box, matches[leader])
         return self.vintage.zoom(crop, projected) if projected else reading
 
-    def identify(self, image: Image.Image, image_key: str | None = None) -> ScanResult:
-        """Опознать вино по одному кадру."""
+    def identify(
+        self, image: Image.Image, image_key: str | None = None, trace: bool = False
+    ) -> ScanResult:
+        """Опознать вино по одному кадру. `trace` — сохранить внутренности для измерителя."""
         timings: dict[str, float] = {}
         wall_started = time.perf_counter()
 
@@ -415,7 +576,7 @@ class WineScanner:
                 vector = self.whitening.apply(vector)[0]
 
         with stage("search"):
-            visual = self.index.search(vector, top_k=VISUAL_CANDIDATES)
+            visual = self.index.search(vector, top_k=self.visual_candidates)
 
         use_cache = self.ocr_cache and image_key is not None
         matches: dict[str, object] = {}
@@ -424,10 +585,6 @@ class WineScanner:
         # считаются оба долго. Поэтому пока читается этикетка, в главном потоке уже идёт
         # сопоставление точек с визуальными кандидатами — их список известен сразу после
         # поиска в индексе и от текста не зависит.
-        #
-        # Совпадает такой предварительный список с итоговым почти полностью: текстовая ветка
-        # меняет порядок, но редко приводит кандидата, которого не было в визуальных пятидесяти.
-        # Тех, кого всё же приводит, досопоставляем после слияния — их единицы.
         if self.parallel:
             # Заранее берём не всё окно, а его верхнюю половину. Кандидат, стоящий у визуальной
             # ветки высоко, из итогового порядка почти никогда не выпадает, а вот нижняя часть
@@ -450,9 +607,16 @@ class WineScanner:
         textual = text_result["hits"]
 
         # Слияние веток. RRF складывает позиции, а не оценки, поэтому шкалы приводить не нужно:
-        # у визуальной ветки это косинус, у текстовой — смесь BM25 и fuzzy.
-        fused = fuse_rrf([[h.item_id for h in visual], [h.item_id for h in textual]])
-        order = ranked(fused)[: self.candidates]
+        # у визуальной ветки это косинус, у текстовой — n-граммы с покрытием слов.
+        with stage("signals"):
+            long_list, family_added = self._long_list(visual, textual, text_result["scores"])
+            ocr_tokens, ocr_attrs = text_result["tokens"], text_result["attrs"]
+            signals = {
+                item_id: self.text_index.signals(ocr_tokens, ocr_attrs, item_id)
+                for item_id in long_list
+            }
+            window = self._window(long_list, signals)
+            window_set = set(window)
 
         vis_rank = {h.item_id: i for i, h in enumerate(visual)}
         vis_score = {h.item_id: h.score for h in visual}
@@ -460,15 +624,19 @@ class WineScanner:
         txt_score = {h.item_id: h.score for h in textual}
 
         started = time.perf_counter()
-        self._match(query_features, order, matches)
+        self._match(query_features, window, matches)
         timings["rerank"] = timings.get("rerank", 0.0) + (time.perf_counter() - started)
 
         with stage("vintage"):
-            reading = self._read_vintage(crop, lines, order, matches)
+            reading = self._read_vintage(crop, lines, window, matches)
 
         rows = []
-        for position, item_id in enumerate(order):
-            match = matches.get(item_id)
+        for position, item_id in enumerate(long_list):
+            # Геометрия учитывается только у членов окна. Предварительное сопоставление могло
+            # посчитать инлаеры и тому, кто в окно не попал, — но тогда параллельный режим
+            # отвечал бы иначе, чем последовательный, а обучение видело бы не то, что сервис.
+            match = matches.get(item_id) if item_id in window_set else None
+            signal = signals[item_id]
             rows.append(
                 PairFeatures(
                     item_id=item_id,
@@ -486,11 +654,39 @@ class WineScanner:
                     ocr_conf=text_result["confidence"],
                     vintage_known=int(bool(reading)),
                     vintage_match=compare(reading.year, self.payload_by_id.get(item_id, {})),
+                    in_window=int(item_id in window_set),
+                    disc_hit=signal["disc_hit"],
+                    disc_n=signal["disc_n"],
+                    name_cover=signal["name_cover"],
+                    winery_hit=signal["winery_hit"],
+                    color_match=signal["color_match"],
+                    style_match=signal["style_match"],
+                    family=self.text_index.family_of.get(item_id, ""),
                 )
             )
 
         with stage("decide"):
             scored = self.decider.score(rows)
+
+        # Защита от близнеца: правило поверх модели, см. decide/guard.py. Режет вероятность
+        # лучшего ниже порога — ответ превращается в отказ с похожими, а сработавшее правило
+        # видно в ответе.
+        applied: list[str] = []
+        # Внутри семьи решает текст: если соседку по линейке этикетка подтверждает лучше,
+        # чем лидера модели, наверх идёт она, с уверенностью лидера — семья та же.
+        if scored and self.sibling:
+            swap = sibling_swap(scored, self.text_index.family_of)
+            if swap:
+                chosen = scored.pop(swap)
+                chosen.probability = max(chosen.probability, scored[0].probability)
+                scored.insert(0, chosen)
+                applied.append("sibling")
+        if scored and self.guard != "off":
+            twin = twin_guard(scored[0].features, self.guard)
+            if twin:
+                scored[0].probability = min(scored[0].probability, self.threshold - GUARD_EPS)
+                applied.append(twin)
+        guard = "+".join(applied) or None
 
         candidates = [
             Candidate(
@@ -502,18 +698,52 @@ class WineScanner:
             for s in scored
         ]
         best = candidates[0] if candidates else None
+        answered = bool(best and best.probability >= self.threshold)
+
+        judge_report = None
+        if self.judge is not None and candidates:
+            with stage("judge"):
+                candidates, answered, judge_report = self.judge.consult(
+                    crop, candidates, answered, self.threshold, self.text_index.family_of
+                )
+                best = candidates[0]
+
         # Не сумма этапов, а настоящее время запроса: этапы теперь идут внахлёст, и их сумма
         # больше того, что ждёт пользователь. Ровно эту величину и требует Э11.
         timings["total"] = time.perf_counter() - wall_started
 
         return ScanResult(
-            answered=bool(best and best.probability >= self.threshold),
+            answered=answered,
             best=best,
             candidates=candidates,
             text=text_result["text"],
             timings=timings,
             threshold=self.threshold,
             vintage=resolve(reading, best.payload) if best else None,
+            guard=guard,
+            judge=judge_report,
+            analogues=self.analogues.for_item(best.item_id, k=REPORTED_CANDIDATES) if best else None,
+            confidence=confidence_of(candidates),
+            trace=(
+                {
+                    "vector": vector,
+                    "visual": [(h.item_id, h.score) for h in visual],
+                    "textual": [(h.item_id, h.score) for h in textual],
+                    "long_list": list(long_list),
+                    "family_added": list(family_added),
+                    "window": list(window),
+                    "signals": signals,
+                    "inliers": {
+                        item_id: (m.inliers if m else 0)
+                        for item_id, m in matches.items()
+                        if item_id in window_set
+                    },
+                    "ocr_lines": [line.text for line in lines],
+                    "ocr_tokens": list(ocr_tokens),
+                }
+                if trace
+                else None
+            ),
         )
 
     def identify_path(self, path: str | Path) -> ScanResult:

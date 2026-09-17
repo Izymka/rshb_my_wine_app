@@ -1,7 +1,11 @@
-# Запуск сервиса на домашней машине с картой NVIDIA.
+# Запуск сервиса на машине с картой NVIDIA (у нас — RTX 4060 Ti).
 #
+#   cp .env.example .env            # ключи облачного OCR и VLM-судьи, если используются
 #   docker compose up --build
-#   curl localhost:8000/health   # проверить, что блоки действительно на GPU
+#   curl localhost:8080/health      # проверить, что блоки действительно на GPU
+#
+# Порт 8080 — тот, что по умолчанию ждёт скрипт оценки организаторов
+# (data/eval/participant_test.sh, endpoint http://127.0.0.1:8080/v1/eval/predict).
 #
 # Первое, что надо посмотреть в /health после переезда, — поле devices. Оно показывает, на чём
 # считается каждый блок по отдельности. XFeat и EasyOCR выбирают устройство сами, и остаться
@@ -11,16 +15,44 @@ services:
   scanner:
     build: .
     ports:
-      - "8000:8000"
+      - "8080:8000"
     volumes:
       # Индекс, дескрипторы каталога, детектор этикетки, решающий слой.
       - ./models:/app/models
+      # Эталоны каталога — их отдаёт GET /catalog/image/{slug} для интерфейса.
+      - ./data/catalog:/app/data/catalog:ro
       # Кэш чужих весов переживает пересборку образа.
       - torch-cache:/opt/torch
       - easyocr-cache:/opt/easyocr
     environment:
-      WINE_INDEX: /app/models/index
-      WINE_DECIDER: /app/models/decider
+      WINE_INDEX: /app/models/index_platform
+      WINE_DECIDER: /app/models/decider_platform
+      # Облачный OCR (yandex) с откатом на EasyOCR; без ключей оставить easyocr.
+      WINE_OCR: ${WINE_OCR:-easyocr}
+      YANDEX_OCR_API_KEY: ${YANDEX_OCR_API_KEY:-}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
+      # VLM-судья на спорных случаях: любой OpenAI-совместимый чат. Выключен без WINE_VLM=1.
+      WINE_VLM: ${WINE_VLM:-0}
+      WINE_VLM_BASE_URL: ${WINE_VLM_BASE_URL:-}
+      WINE_VLM_MODEL: ${WINE_VLM_MODEL:-}
+      WINE_VLM_API_KEY: ${WINE_VLM_API_KEY:-}
+      WINE_VLM_PROVIDER: ${WINE_VLM_PROVIDER:-openai}
+      WINE_VLM_FALLBACK: ${WINE_VLM_FALLBACK:-}
+      # Сомелье: GigaChat работает без VPN (текст), см. .env.example.
+      WINE_SOMMELIER: ${WINE_SOMMELIER:-0}
+      WINE_LLM_PROVIDER: ${WINE_LLM_PROVIDER:-gigachat}
+      WINE_LLM_FALLBACK: ${WINE_LLM_FALLBACK:-}
+      WINE_LLM_BASE_URL: ${WINE_LLM_BASE_URL:-}
+      WINE_LLM_MODEL: ${WINE_LLM_MODEL:-}
+      WINE_LLM_API_KEY: ${WINE_LLM_API_KEY:-}
+      GIGACHAT_CREDENTIALS: ${GIGACHAT_CREDENTIALS:-}
+      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-2-Pro}
+      GIGACHAT_CA_BUNDLE: ${GIGACHAT_CA_BUNDLE:-}
+      # Политика eval-ручки на незнакомом вине: 1 — честный null, 0 — всегда лучший кандидат.
+      WINE_EVAL_REFUSE: ${WINE_EVAL_REFUSE:-1}
+      # Окно ре-ранкинга: 25 на процессоре, 50 на видеокарте.
+      WINE_RERANK_CANDIDATES: ${WINE_RERANK_CANDIDATES:-50}
     deploy:
       resources:
         reservations:
@@ -35,6 +67,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    environment:
+      # Nuxt проксирует /api/* в сервис по внутренней сети compose.
+      NUXT_SCANNER_URL: http://scanner:8000
+    depends_on:
+      scanner:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

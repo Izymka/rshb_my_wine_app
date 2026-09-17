@@ -78,3 +78,75 @@ def variants(text: str) -> list[str]:
 def tokens(text: str) -> list[str]:
     """Токены для BM25. Однобуквенные выбрасываем — это чаще всего мусор распознавания."""
     return [t for t in normalize(text).split() if len(t) > 1]
+
+
+# --- Фонетическое сворачивание -------------------------------------------------------------
+#
+# `normalize` сводит алфавиты, но не написания: «Château Tamagne» и «Шато Тамань» после неё —
+# `chateau tamagne` и `shato taman`, а это для нечёткого сравнения далёкие строки. Ниже — правила,
+# которые сводят французскую и английскую орфографию к тому, как то же слово звучит по-русски
+# и, значит, транслитерируется из каталога. Правила не обязаны быть лингвистически точными,
+# они обязаны быть одинаковыми для обеих сторон и редко склеивать разные слова. Известная
+# потеря: «ч» и «ш» сливаются (`ch` — французское «ш»); на названиях вин это не мешало.
+#
+# Порядок важен: многобуквенные сочетания раньше однобуквенных, `c` перед гласной раньше
+# общего `c`, сдвоенные буквы — в самом конце.
+_PHONETIC_RULES = [
+    (re.compile(r"shch"), "sh"),
+    (re.compile(r"sch"), "sh"),
+    (re.compile(r"tch"), "ch"),
+    (re.compile(r"ch"), "sh"),
+    (re.compile(r"ck"), "k"),
+    (re.compile(r"qu"), "k"),
+    (re.compile(r"ph"), "f"),
+    (re.compile(r"th"), "t"),
+    (re.compile(r"kh"), "h"),
+    (re.compile(r"c(?=[eiy])"), "s"),
+    (re.compile(r"c"), "k"),
+    (re.compile(r"eau"), "o"),
+    (re.compile(r"au"), "o"),
+    (re.compile(r"ou"), "u"),
+    (re.compile(r"gne\b"), "n"),
+    (re.compile(r"gn"), "n"),
+    (re.compile(r"w"), "v"),
+    (re.compile(r"y"), "i"),
+    (re.compile(r"j"), "i"),
+    (re.compile(r"x"), "ks"),
+    (re.compile(r"iu"), "u"),
+    (re.compile(r"(.)\1+"), r"\1"),
+]
+
+
+def fold_phonetic(latin: str) -> str:
+    """Свернуть уже нормализованную латиницу к фонетической записи."""
+    for pattern, replacement in _PHONETIC_RULES:
+        latin = pattern.sub(replacement, latin)
+    return latin
+
+
+def fold(text: str) -> str:
+    """Самая сильная общая форма: normalize -> фонетика -> псевдонимы.
+
+    Этим сравниваются документы каталога и текст с этикетки в текстовом индексе. `normalize`
+    оставлена как есть: на неё завязаны тесты и кэши, а здесь нужна форма грубее.
+    """
+    from .aliases import (
+        apply_aliases,  # цикл импортов: aliases сворачивает свои ключи этой же функцией
+    )
+
+    return apply_aliases(fold_phonetic(normalize(text)))
+
+
+def fold_tokens(text: str) -> list[str]:
+    """Свёрнутые слова без однобуквенного мусора."""
+    return [t for t in fold(text).split() if len(t) > 1]
+
+
+def folded_variants(text: str) -> list[str]:
+    """Свёрнутые варианты запроса: прямой и с гомоглифами, если они различаются."""
+    seen: list[str] = []
+    for v in variants(text):
+        folded = fold(v)
+        if folded not in seen:
+            seen.append(folded)
+    return seen
