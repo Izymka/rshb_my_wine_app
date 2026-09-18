@@ -18,6 +18,10 @@
 Лицензия: реализация из HuggingFace transformers и веса `PekingU/rtdetr_r18vd` — Apache 2.0
 (LICENSES.md). Ultralytics-версия RT-DETR не используется — AGPL.
 
+Сохраняется лучшая по своей валидации модель (папка `--out`, история эпох в `training.json`);
+`--patience N` останавливает обучение после N эпох без роста, `--keep-all` дополнительно
+складывает модель каждой эпохи в `<out>/epoch-NN/`.
+
 Данные и правила те же, что у `train_label_detector.py`: Roboflow wine-labels как основа,
 своя разметка `--own` (деление по винам, повтор `--own-repeat`), тест только измеряется
 (`catalog.is_holdout` не даст передать его как `--own`). Обучение — на видеокарте: R18 на
@@ -140,6 +144,16 @@ def main() -> None:
     parser.add_argument("--own-valid-share", type=float, default=0.2)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=12)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=4,
+        help="ранняя остановка: столько эпох подряд без роста IoU на отборочной валидации "
+        "(своей, если есть) — и обучение прекращается; 0 — выключить",
+    )
+    parser.add_argument(
+        "--keep-all", action="store_true", help="сохранять модель каждой эпохи в <out>/epoch-NN/"
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--backbone-lr", type=float, default=1e-5)
@@ -203,7 +217,7 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
 
-    best_iou, history = -1.0, []
+    best_iou, best_epoch, stale, history = -1.0, 0, 0, []
     for epoch in range(1, args.epochs + 1):
         model.train()
         started, running = time.time(), 0.0
@@ -234,16 +248,32 @@ def main() -> None:
             report("  ТЕСТ (не влияет на отбор)", evaluate(model, processor, test_loader, device))
         history.append({"epoch": epoch, **metrics})
 
-        if metrics["mean_iou"] > best_iou:
-            best_iou = metrics["mean_iou"]
-            args.out.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(args.out)
-            processor.save_pretrained(args.out)
-            (args.out / "training.json").write_text(
-                json.dumps({"init": args.init, "best_epoch": epoch, "history": history}, ensure_ascii=False, indent=2),
+        def save(where: Path) -> None:
+            where.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(where)
+            processor.save_pretrained(where)
+            (where / "training.json").write_text(
+                json.dumps(
+                    {"init": args.init, "epoch": epoch, "best_epoch": best_epoch, "history": history},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
+
+        if args.keep_all:
+            save(args.out / f"epoch-{epoch:02d}")
+        if metrics["mean_iou"] > best_iou:
+            best_iou, best_epoch, stale = metrics["mean_iou"], epoch, 0
+            save(args.out)
             print(f"  сохранено: {args.out} (IoU {best_iou:.3f})")
+        else:
+            stale += 1
+            if args.patience and stale >= args.patience:
+                print(f"  ранняя остановка: {stale} эпох без роста, лучшая — {best_epoch}")
+                break
+
+    print(f"\nлучший IoU на отборочной валидации: {best_iou:.3f} (эпоха {best_epoch})")
 
 
 if __name__ == "__main__":

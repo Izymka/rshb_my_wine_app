@@ -20,6 +20,9 @@
 его как `--own` скрипт не даст (`catalog.is_holdout`). Для обучения размечаются вырезки своего
 набора — `data/own_labels`, их делает `prepare_label_annotation.py --sources own`.
 
+Сохраняется лучший по своей валидации чекпойнт (`--out`); `--patience N` — ранняя остановка
+после N эпох без роста, `--keep-all` — чекпойнт каждой эпохи рядом (`<out>.epoch-NN.pt`).
+
 Дообучаем только голову классификатора поверх COCO-весов: бэкбон уже умеет находить объекты,
 доучиваем «что считать целью». Поэтому хватает тысяч кадров, а не сотен тысяч, и одной
 видеокарты на полчаса.
@@ -94,6 +97,18 @@ def main() -> None:
         "не реализована, и с PYTORCH_ENABLE_MPS_FALLBACK шаг выходит в 13 раз медленнее",
     )
     parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=3,
+        help="ранняя остановка: столько эпох подряд без роста IoU на отборочной валидации "
+        "(своей, если есть) — и обучение прекращается; 0 — выключить",
+    )
+    parser.add_argument(
+        "--keep-all",
+        action="store_true",
+        help="сохранять чекпойнт каждой эпохи рядом с лучшим (<out>.epoch-NN.pt)",
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--limit", type=int, default=None, help="взять N кадров, для проверки кода")
@@ -196,7 +211,7 @@ def main() -> None:
     optimizer = torch.optim.SGD(params, lr=args.lr, momentum=0.9, weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    best_iou = 0.0
+    best_iou, best_epoch, stale = 0.0, 0, 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         started, running = time.time(), 0.0
@@ -232,22 +247,27 @@ def main() -> None:
         if test_loader is not None:
             report("  ТЕСТ (не влияет на отбор)", evaluate(model, test_loader, device))
 
+        checkpoint = {
+            "backbone": args.backbone,
+            "min_size": args.min_size,
+            "state_dict": model.state_dict(),
+            "metrics": metrics,
+            "epoch": epoch,
+        }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        if args.keep_all:
+            torch.save(checkpoint, args.out.with_suffix(f".epoch-{epoch:02d}.pt"))
         if metrics["mean_iou"] > best_iou:
-            best_iou = metrics["mean_iou"]
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                {
-                    "backbone": args.backbone,
-                    "min_size": args.min_size,
-                    "state_dict": model.state_dict(),
-                    "metrics": metrics,
-                    "epoch": epoch,
-                },
-                args.out,
-            )
+            best_iou, best_epoch, stale = metrics["mean_iou"], epoch, 0
+            torch.save(checkpoint, args.out)
             print(f"  сохранено в {args.out}")
+        else:
+            stale += 1
+            if args.patience and stale >= args.patience:
+                print(f"  ранняя остановка: {stale} эпох без роста, лучшая — {best_epoch}")
+                break
 
-    print(f"\nлучший mean IoU: {best_iou:.3f}")
+    print(f"\nлучший mean IoU: {best_iou:.3f} (эпоха {best_epoch})")
 
 
 if __name__ == "__main__":
