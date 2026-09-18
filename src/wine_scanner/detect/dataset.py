@@ -68,12 +68,16 @@ class CocoDetectionDataset(Dataset):
         """Сопоставить имена из разметки с файлами на диске, терпя разную нормализацию Unicode.
 
         macOS хранит кириллицу в именах «разложенной» (NFD: «й» — это «и» + бреве), Windows и
-        Linux — «собранной» (NFC). Разметка, сделанная на одной системе, на другой перестаёт
-        находить файлы, хотя они на месте. Сравниваем по NFC с обеих сторон и подставляем то
-        имя, которое реально лежит в папке. Чего нет совсем — ошибка со списком сразу, а не
-        FileNotFoundError посреди первой эпохи.
+        Linux — «собранной» (NFC), а архиватор на Windows может и вовсе прочитать UTF-8 как
+        CP866 — тогда «Лабра» на диске зовётся «╪Ы╪░╪▒» (`_name_keys`). Разметка, сделанная
+        на одной системе, на другой перестаёт находить файлы, хотя они на месте. Сравниваем
+        по всем формам и подставляем то имя, которое реально лежит в папке. Чего нет совсем
+        — ошибка со списком сразу, а не FileNotFoundError посреди первой эпохи.
         """
-        on_disk = {unicodedata.normalize("NFC", p.name): p.name for p in self.root.iterdir()}
+        on_disk: dict[str, str] = {}
+        for path in self.root.iterdir():
+            for key in _name_keys(path.name):
+                on_disk.setdefault(key, path.name)
         missing = []
         for image in self.images.values():
             name = image["file_name"]
@@ -133,6 +137,27 @@ class CocoDetectionDataset(Dataset):
         }
         tensor = self.transform(image) if self.transform else _to_tensor(image)
         return tensor, target
+
+
+# Кодировки, через которые Windows-архиваторы портят UTF-8 в именах: «Лабра» превращается в
+# «╪Ы╪░╪▒» (CP866 — консольная русская), «Р›Р°Р±СЂР°» (CP1251) или «Ð›Ð°Ð±Ñ€Ð°» (CP1252).
+_MOJIBAKE_CODEPAGES = ("cp866", "cp1251", "cp1252", "cp437", "latin-1")
+
+
+def _name_keys(name: str) -> set[str]:
+    """Все формы, под которыми файл с диска может встретиться в разметке.
+
+    Само имя в NFC, плюс «расшифровки» на случай, если архиватор на Windows прочитал
+    UTF-8 как однобайтовую кодировку: кодируем видимый мусор обратно в байты каждой из
+    кодировок и читаем как UTF-8; что не читается — не имя, пропускаем.
+    """
+    keys = {unicodedata.normalize("NFC", name)}
+    for codepage in _MOJIBAKE_CODEPAGES:
+        try:
+            keys.add(unicodedata.normalize("NFC", name.encode(codepage).decode("utf-8")))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+    return keys
 
 
 def split_by_wine(root: Path, valid_share: float, seed: int = 0):

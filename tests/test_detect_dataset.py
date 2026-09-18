@@ -97,3 +97,16 @@ def test_missing_files_fail_early_with_a_list(tmp_path):
     (tmp_path / "_annotations.csv").write_text("label,0,0,10,10,a.jpg,40,60\nlabel,0,0,10,10,gone.jpg,40,60\n")
     with pytest.raises(FileNotFoundError, match="gone.jpg"):
         CocoDetectionDataset(tmp_path)
+
+
+def test_mojibake_names_from_windows_unpacking_are_resolved(tmp_path):
+    """Архив с macOS распакован на Windows: UTF-8 имени прочитан как CP866."""
+    good = "Лабра_Ашамта_white_wine__angle_01.jpg"
+    mangled = good.encode("utf-8").decode("cp866")
+    assert mangled != good and "Лабра" not in mangled
+    make_images(tmp_path, [mangled])
+    (tmp_path / "_annotations.csv").write_text(f"label,0,0,10,10,{good},40,60\n", encoding="utf-8")
+    dataset = CocoDetectionDataset(tmp_path)
+    assert len(dataset) == 1
+    assert dataset.images[0]["file_name"] == mangled  # открываем то, что реально на диске
+    dataset[0]
