@@ -16,6 +16,7 @@
 
 import csv
 import json
+import unicodedata
 from pathlib import Path
 
 import torch
@@ -50,6 +51,8 @@ class CocoDetectionDataset(Dataset):
                 f"в {self.root} нет ни {self.COCO_FILE}, ни {self.CSV_FILE} (экспорт makesense.ai)"
             )
 
+        self._resolve_file_names()
+
         boxes_by_image: dict[int, list[list[float]]] = {}
         for image_id, (x, y, w, h) in annotations:
             if w <= 1 or h <= 1:  # вырожденные рамки ломают обучение
@@ -60,6 +63,31 @@ class CocoDetectionDataset(Dataset):
         # а часть детекторов на пустой разметке падает.
         self.ids = [i for i in self.images if boxes_by_image.get(i)]
         self.boxes = boxes_by_image
+
+    def _resolve_file_names(self) -> None:
+        """Сопоставить имена из разметки с файлами на диске, терпя разную нормализацию Unicode.
+
+        macOS хранит кириллицу в именах «разложенной» (NFD: «й» — это «и» + бреве), Windows и
+        Linux — «собранной» (NFC). Разметка, сделанная на одной системе, на другой перестаёт
+        находить файлы, хотя они на месте. Сравниваем по NFC с обеих сторон и подставляем то
+        имя, которое реально лежит в папке. Чего нет совсем — ошибка со списком сразу, а не
+        FileNotFoundError посреди первой эпохи.
+        """
+        on_disk = {unicodedata.normalize("NFC", p.name): p.name for p in self.root.iterdir()}
+        missing = []
+        for image in self.images.values():
+            name = image["file_name"]
+            actual = on_disk.get(unicodedata.normalize("NFC", name))
+            if actual is None:
+                missing.append(name)
+            else:
+                image["file_name"] = actual
+        if missing:
+            raise FileNotFoundError(
+                f"в {self.root} нет {len(missing)} файлов из разметки: "
+                + ", ".join(missing[:5])
+                + (" …" if len(missing) > 5 else "")
+            )
 
     @staticmethod
     def _read_coco(path: Path):
