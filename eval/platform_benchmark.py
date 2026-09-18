@@ -2,7 +2,12 @@
 
     uv run python eval/platform_benchmark.py --tag baseline
     uv run python eval/platform_benchmark.py --decider none --candidates 50 --tag retrieval-only
-    uv run python eval/platform_benchmark.py --sources live,eval --errors 10
+    uv run python eval/platform_benchmark.py --sources live,own,eval --errors 10   # + свой набор
+
+Тестовый набор изолирован (`catalog.is_holdout`): `data/live` и `data/eval` не участвуют ни в
+обучении решающего слоя, ни в подборе порога, ни в обучении детектора — поэтому цифры отсюда
+честные ровно настолько, насколько решающий слой обучен без `--include-holdout`
+(`decider_meta.holdout_isolated` в записи прогона).
 
 Единственный измеритель, который отвечает на вопрос «что увидит скрипт организаторов»: гоняется
 тот самый `WineScanner`, что стоит за `/v1/eval/predict`, с тем же индексом и решающим слоем,
@@ -355,7 +360,12 @@ def main() -> None:
     parser.add_argument(
         "--threshold", type=float, default=None, help="порог отказа вместо порога модели"
     )
-    parser.add_argument("--sources", default="live,own,eval", help="источники кадров через запятую")
+    parser.add_argument(
+        "--sources",
+        default="live,eval",
+        help="источники кадров через запятую; по умолчанию только изолированный тест "
+        "(live, eval), own — обучающий набор, добавлять лишь для сравнения",
+    )
     parser.add_argument(
         "--include-multi", action="store_true", help="брать кадры с несколькими бутылками"
     )

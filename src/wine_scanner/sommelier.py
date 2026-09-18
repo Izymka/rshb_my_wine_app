@@ -8,8 +8,9 @@
 
 Подключение — те же клиенты, что у VLM-судьи (llm.py), но отдельный флаг: судья работает на
 картинке и стоит в критическом пути ответа, сомелье — на тексте и по запросу пользователя.
-`WINE_SOMMELIER=1` плюс `WINE_LLM_PROVIDER` (`openai` — `WINE_LLM_BASE_URL/MODEL/API_KEY`, при их
-отсутствии берутся `WINE_VLM_*`; `gigachat` — `GIGACHAT_CREDENTIALS`) и `WINE_LLM_FALLBACK`. Без флага ручка отвечает 404, и интерфейс блок не
+`WINE_SOMMELIER=1` плюс `WINE_LLM_PROVIDER` (`yandex` — те же ключи, что у судьи, модель
+`YANDEX_LLM_MODEL`; `openai` — `WINE_LLM_BASE_URL/MODEL/API_KEY`, при их отсутствии берутся
+`WINE_VLM_*`) и `WINE_LLM_FALLBACK`. Без флага ручка отвечает 404, и интерфейс блок не
 показывает. Ошибка провайдера — честное «подсказки сейчас недоступны», карточка не страдает.
 """
 

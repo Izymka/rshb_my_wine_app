@@ -13,10 +13,13 @@
 на любом из двух свидетельств:
 
 - слово цвета с этикетки противоречит карточке (`color_match == -1`);
+- слово сладости или игристости противоречит карточке (`style_match == -1`): Цимлянское
+  «полусухое» против карточки «полусладкое» — та же линейка, та же этикетка, разница в одном
+  слове, и цвет тут не помогает (17.09: три кадра из трёх принимались за полусладкое);
 - ни одно различающее слово карточки не найдено, при этом этикетка подтверждает саму
   винодельню или соседа по ней (`disc_hit == 0` и (`winery_hit` или `disc_contra > 0`)).
 
-Оба требуют читаемой этикетки (`ocr_lines >= 3`) и карточки, у которой есть что различать
+Все требуют читаемой этикетки (`ocr_lines >= 3`) и карточки, у которой есть что различать
 (`disc_n > 0`). Режим `strict` — исходное, более узкое правило (обе улики сразу), оставлен
 для сравнения в бенчмарке. `off` — выключено.
 """
@@ -38,15 +41,16 @@ def twin_guard(features: dict, mode: str = DEFAULT_MODE) -> str | None:
         return None
 
     color_contradicts = features.get("color_match", 0) == -1
+    style_contradicts = features.get("style_match", 0) == -1
     has_disc = features.get("disc_n", 0) > 0
     no_own_words = has_disc and features.get("disc_hit", 0.0) == 0.0
     family_confirmed = features.get("winery_hit", 0) == 1 or features.get("disc_contra", 0.0) > 0
 
     if mode == "strict":
         return "twin" if color_contradicts and no_own_words else None
-    # Противоречие по цвету судит и карточки без различающих слов («Par Amour» белое против
-    # розового на этикетке): цвет — единственное, чем они отличаются.
-    if color_contradicts or (no_own_words and family_confirmed):
+    # Противоречие по цвету или сладости судит и карточки без различающих слов («Par Amour»
+    # белое против розового на этикетке): это единственное, чем они отличаются.
+    if color_contradicts or style_contradicts or (no_own_words and family_confirmed):
         return "twin"
     # Этикетка читается, у карточки есть сиблинги, а текст не подтверждает ни одного её
     # слова, ни винодельню: ответ держится на одной геометрии, которая близнецов не различает.
@@ -64,8 +68,9 @@ def text_evidence(features: dict) -> tuple:
     """Насколько этикетка подтверждает именно эту карточку, а не соседку по линейке.
 
     Порядок сравнения — лексикографический: сначала согласие по цвету (самое надёжное слово
-    этикетки, и противоречие по нему не перебивается ничем), потом доля различающих слов с
-    весами редкости внутри винодельни, потом место в текстовой ветке, потом покрытие названия. Инлаеры и косинус сюда не
+    этикетки, и противоречие по нему не перебивается ничем), потом по сладости и игристости,
+    потом доля различающих слов с весами редкости внутри винодельни, потом место в текстовой
+    ветке, потом покрытие названия. Инлаеры и косинус сюда не
     входят намеренно: внутри одной линейки они измеряют не «то ли это вино», а «насколько
     крупный у карточки эталон» (проверено: лидер по геометрии не совпал с верной картой ни на
     одном из 24 живых кадров).
@@ -73,6 +78,7 @@ def text_evidence(features: dict) -> tuple:
     txt_rank = features.get("txt_rank", 999)
     return (
         int(features.get("color_match", 0)),
+        int(features.get("style_match", 0)),
         round(float(features.get("disc_hit", 0.0)), 2),
         -min(int(txt_rank), 999),
         round(float(features.get("name_cover", 0.0)), 2),
@@ -86,7 +92,8 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
     чем нет, поэтому переставлять карточки по любому перевесу текстовых улик нельзя (проверено:
     такая версия меняла верные ответы на короткие названия). Перестановка только когда текст
     *против* лидера и *за* соседку: у лидера нет ни одного своего слова на этикетке, а у
-    соседки есть, — или цвет на этикетке противоречит лидеру и согласуется с соседкой.
+    соседки есть, — или цвет (сладость) на этикетке противоречит лидеру и не противоречит
+    соседке.
     """
     if not scored:
         return None
@@ -98,6 +105,7 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
     if not family:
         return None
     top_color = int(features.get("color_match", 0))
+    top_style = int(features.get("style_match", 0))
     top_has_disc = features.get("disc_n", 0) > 0
     top_unsupported = top_has_disc and features.get("disc_hit", 0.0) == 0.0
 
@@ -107,9 +115,14 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
             continue
         f = candidate.features
         color = int(f.get("color_match", 0))
+        style = int(f.get("style_match", 0))
         supported = f.get("disc_hit", 0.0) > 0.0
-        against_leader = (top_color == -1 and color >= 0 and (supported or color == 1)) or (
-            top_unsupported and supported and color >= 0
+        if color == -1 or style == -1:
+            continue  # соседка сама противоречит этикетке — не кандидат на замену
+        against_leader = (
+            (top_color == -1 and (supported or color == 1))
+            or (top_style == -1 and (supported or style == 1))
+            or (top_unsupported and supported)
         )
         if not against_leader:
             continue

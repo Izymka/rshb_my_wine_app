@@ -2,18 +2,23 @@
 
     uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels"
     uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels" \
-        --own data/live_labels --init models/label_detector.pt --own-repeat 20 --epochs 4 \
-        --device cuda --out models/label_detector_v2.pt
-    uv run python scripts/train_label_detector.py --data ... --own data/live_labels \
-        --init models/label_detector.pt --eval-only   # измерить текущий детектор на своих кадрах
+        --own data/own_labels --test data/live_labels --init models/label_detector.pt \
+        --own-repeat 20 --epochs 4 --device cuda --out models/label_detector_v2.pt
+    uv run python scripts/train_label_detector.py --data ... --test data/live_labels \
+        --init models/label_detector.pt --eval-only   # измерить текущий детектор на тесте
 
 Ждёт экспорт в формате COCO: подпапки train/ и valid/, в каждой картинки и _annotations.coco.json.
 
-Своя разметка (`--own`) — одна папка с кадрами и `_annotations.coco.json` (экспорт makesense.ai
-или Roboflow), делится на train/valid по кадрам 80/20 с фиксированным зерном и в обучении
-повторяется `--own-repeat` раз: своих кадров сотня против пяти тысяч чужих, и без повторов
-детектор их не заметит. Валидация печатается отдельно по чужим и по своим кадрам — интересует
-второе. `--init` — старт с уже дообученных весов, а не с COCO: так эпох нужно меньше.
+Своя разметка для обучения (`--own`) — одна папка с кадрами и `_annotations.csv` (makesense.ai)
+или `_annotations.coco.json` (Roboflow); делится на train/valid **по винам** 80/20 с
+фиксированным зерном и в обучении повторяется `--own-repeat` раз: своих кадров сотня против
+пяти тысяч чужих, и без повторов детектор их не заметит. Чекпойнт отбирается по своей
+валидации. `--init` — старт с уже дообученных весов, а не с COCO: так эпох нужно меньше.
+
+Тестовый набор (`--test`, `data/live_labels` — вырезки кадров российских вин) изолирован:
+измеряется целиком после каждой эпохи, но в обучение и отбор чекпойнта не входит, и передать
+его как `--own` скрипт не даст (`catalog.is_holdout`). Для обучения размечаются вырезки своего
+набора — `data/own_labels`, их делает `prepare_label_annotation.py --sources own`.
 
 Дообучаем только голову классификатора поверх COCO-весов: бэкбон уже умеет находить объекты,
 доучиваем «что считать целью». Поэтому хватает тысяч кадров, а не сотен тысяч, и одной
@@ -29,7 +34,8 @@ from torch.utils.data import ConcatDataset, DataLoader
 from torchvision.ops import box_iou
 from tqdm import tqdm
 
-from wine_scanner.detect import CocoDetectionDataset, build_label_detector, collate
+from wine_scanner.catalog import is_holdout
+from wine_scanner.detect import CocoDetectionDataset, build_label_detector, collate, split_by_wine
 
 
 def evaluate(model, loader, device) -> dict:
@@ -70,19 +76,6 @@ def report(title: str, metrics: dict) -> None:
     )
 
 
-def split_own(root: Path, valid_share: float, seed: int = 0):
-    """Своя разметка одной папкой -> два датасета с непересекающимися кадрами."""
-    import random
-
-    full = CocoDetectionDataset(root)
-    ids = list(full.ids)
-    random.Random(seed).shuffle(ids)
-    n_valid = max(1, int(len(ids) * valid_share)) if len(ids) > 4 else 0
-    valid, train = CocoDetectionDataset(root), CocoDetectionDataset(root)
-    valid.ids, train.ids = ids[:n_valid], ids[n_valid:]
-    return train, valid
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
@@ -104,7 +97,25 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--limit", type=int, default=None, help="взять N кадров, для проверки кода")
-    parser.add_argument("--own", type=Path, default=None, help="своя разметка COCO (одна папка)")
+    parser.add_argument(
+        "--own",
+        type=Path,
+        default=None,
+        help="своя разметка для обучения (одна папка, CSV makesense или COCO); "
+        "data/own_labels — вырезки своего набора",
+    )
+    parser.add_argument(
+        "--test",
+        type=Path,
+        default=None,
+        help="изолированный тестовый набор (data/live_labels): только измеряется, целиком, "
+        "в обучение и отбор чекпойнта не входит",
+    )
+    parser.add_argument(
+        "--include-holdout",
+        action="store_true",
+        help="разрешить --own на тестовом наборе — только для сравнения, цифры нечестные",
+    )
     parser.add_argument(
         "--own-repeat", type=int, default=20, help="во сколько раз повторить свои кадры"
     )
@@ -122,8 +133,19 @@ def main() -> None:
 
     own_train = own_valid = None
     if args.own is not None:
-        own_train, own_valid = split_own(args.own, args.own_valid_share)
-        print(f"своя разметка: train {len(own_train)}, valid {len(own_valid)}")
+        if is_holdout(args.own) and not args.include_holdout:
+            raise SystemExit(
+                f"{args.own} — изолированный тестовый набор, учить на нём нельзя; "
+                "передайте его как --test, для обучения размечайте data/own_labels"
+            )
+        own_train, own_valid = split_by_wine(args.own, args.own_valid_share)
+        print(
+            f"своя разметка: train {len(own_train)}, valid {len(own_valid)} кадров "
+            f"(деление по винам, valid — {int(round(args.own_valid_share * 100))} % вин)"
+        )
+    test_set = CocoDetectionDataset(args.test) if args.test is not None else None
+    if test_set is not None:
+        print(f"тестовый набор: {len(test_set)} кадров из {args.test} — только замер")
     print(f"train: {len(train_set)}, valid: {len(valid_set)}, устройство: {device}")
 
     # num_workers=0: на macOS дочерние процессы плохо уживаются с MPS.
@@ -139,6 +161,11 @@ def main() -> None:
     own_loader = (
         DataLoader(own_valid, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
         if own_valid is not None and len(own_valid)
+        else None
+    )
+    test_loader = (
+        DataLoader(test_set, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+        if test_set is not None and len(test_set)
         else None
     )
 
@@ -158,7 +185,9 @@ def main() -> None:
     if args.eval_only:
         report("чужая валидация", evaluate(model, valid_loader, device))
         if own_loader is not None:
-            report("свои кадры", evaluate(model, own_loader, device))
+            report("свои кадры (valid)", evaluate(model, own_loader, device))
+        if test_loader is not None:
+            report("ТЕСТ", evaluate(model, test_loader, device))
         return
 
     # Горизонтальное отражение здесь не используем: на этикетке текст, зеркальных этикеток
@@ -199,6 +228,9 @@ def main() -> None:
             own_metrics = evaluate(model, own_loader, device)
             report("  свои кадры", own_metrics)
             metrics = own_metrics
+
+        if test_loader is not None:
+            report("  ТЕСТ (не влияет на отбор)", evaluate(model, test_loader, device))
 
         if metrics["mean_iou"] > best_iou:
             best_iou = metrics["mean_iou"]

@@ -10,10 +10,11 @@
 карточки в списке нет, судья её не придумает. Поэтому он стоит в конце, после отбора и
 решающего слоя, и зовётся только когда есть что рассудить (`judge_reason`).
 
-Как подключается. `WINE_VLM=1` плюс провайдер (llm.py): OpenAI-совместимый чат
-(`WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) или GigaChat
-(`WINE_VLM_PROVIDER=gigachat`, `GIGACHAT_CREDENTIALS`); `WINE_VLM_FALLBACK=gigachat` — откат
-без VPN, если основной провайдер не ответил. Без `WINE_VLM=1` судья не создаётся вовсе. Любая
+Как подключается. `WINE_VLM=1` плюс провайдер (llm.py): Yandex AI Studio по умолчанию
+(`WINE_VLM_PROVIDER=yandex`, `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID`; работает без VPN) или
+любой OpenAI-совместимый чат (`WINE_VLM_PROVIDER=openai`, `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`,
+`WINE_VLM_API_KEY`); `WINE_VLM_FALLBACK=<провайдер>` — откат, если основной не ответил.
+Без `WINE_VLM=1` судья не создаётся вовсе. Любая
 ошибка — сеть, таймаут, мусор в ответе — оставляет результат пайплайна как есть и оставляет
 след в `ScanResult.judge`, чтобы бенчмарк видел, как часто судья молчал.
 
@@ -142,7 +143,7 @@ class VlmJudge:
         client: httpx.Client | None = None,
         llm=None,
     ):
-        # Либо готовый чат-клиент (llm.py: OpenAI-совместимый, GigaChat, цепочка с откатом),
+        # Либо готовый чат-клиент (llm.py: OpenAI-совместимый, Yandex, цепочка с откатом),
         # либо параметры OpenAI-совместимого — из них клиент собирается здесь.
         if llm is None:
             if not base_url or not model:

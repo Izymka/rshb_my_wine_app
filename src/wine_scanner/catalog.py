@@ -274,6 +274,24 @@ def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
 
 LIVE_MANIFEST = Path("data/live/manifest.csv")
 
+# --- Тестовый набор изолирован ---------------------------------------------------------------
+#
+# Договорённость 17.09.2026: учить что угодно можно на выданном каталоге, синтетике из него и
+# открытых датасетах; кадры российских вин, снятые Ириной (`data/live`), и публичные кадры
+# организаторов (`data/eval`) — только тест. Ни решающий слой, ни детектор, ни порог отказа
+# их не видят. Свой набор `data/own` (импорт, снят во Вьетнаме) для обучения разрешён.
+# Проверка — по пути файла: это единственное, что есть у любого запроса в любом файле
+# признаков, и подделать её случайно нельзя.
+# `data/live_labels` — вырезки тех же тестовых кадров под разметку детектора.
+HOLDOUT_ROOTS = (Path("data/live"), EVAL_ROOT, Path("data/live_labels"))
+
+
+def is_holdout(path: str | Path) -> bool:
+    """Кадр из изолированного тестового набора — учиться на нём нельзя."""
+    parts = Path(path).parts
+    return any(parts[: len(root.parts)] == root.parts for root in HOLDOUT_ROOTS)
+
+
 
 def load_live(manifest: Path = LIVE_MANIFEST, include_multi: bool = False) -> list[Query]:
     """Живые кадры вин платформы по манифесту `scripts/import_live_photos.py`.

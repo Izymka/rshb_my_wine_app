@@ -1,32 +1,37 @@
 """Клиенты языковых моделей для судьи и сомелье: один интерфейс, два провайдера, откат.
 
 Зачем слой. Судья (decide/judge.py) и сомелье (sommelier.py) хотят одного и того же: отправить
-текст (и, для судьи, картинку) и получить строку. Как это делается у провайдеров — разное:
+текст (и, для судьи, картинку) и получить строку. Провайдеры при этом различаются в мелочах:
 OpenAI-совместимые чаты (OpenAI, Gemini, OpenRouter) принимают картинку внутри сообщения
-data-URI и Bearer-ключ; GigaChat требует обменять ключ авторизации на токен, картинку сначала
-загрузить отдельным запросом и сослаться на неё по идентификатору, а сертификат у него от
-российского удостоверяющего центра. Всё это спрятано здесь.
+data-URI и Bearer-ключ; Yandex AI Studio говорит на том же диалекте, но ключ ждёт в форме
+`Api-Key`, папку — отдельным заголовком, а модель — как `gpt://<папка>/<модель>`. Всё это
+спрятано здесь.
 
-Откат. Основной провайдер может быть за VPN, а живой прогон у организаторов — без гарантии
-сети. `FallbackChat` пробует клиентов по очереди и запоминает, кто ответил; сервису это
+Почему Yandex. Основной сценарий — живой прогон у организаторов без гарантии VPN. Yandex AI
+Studio работает из России, картинки понимает (`qwen3.6-35b-a3b`), русский текст — родной.
+GigaChat пробовали 17.09: на любую картинку этикетки отвечает отказом («чувствительная тема»),
+для судьи не годится — убран целиком, чтобы не держать мёртвый код.
+
+Откат. `FallbackChat` пробует клиентов по очереди и запоминает, кто ответил; сервису это
 незаметно, в `/health` видно, кем отвечали.
 
 Переменные окружения (см. .env.example):
-- `WINE_VLM_PROVIDER` / `WINE_LLM_PROVIDER`: `openai` (по умолчанию) или `gigachat`;
+- `WINE_VLM_PROVIDER` / `WINE_LLM_PROVIDER`: `yandex` (по умолчанию) или `openai`;
 - `WINE_VLM_FALLBACK` / `WINE_LLM_FALLBACK`: провайдер на случай отказа основного;
 - OpenAI-совместимый: `*_BASE_URL`, `*_MODEL`, `*_API_KEY`;
-- GigaChat: `GIGACHAT_CREDENTIALS` (ключ авторизации из личного кабинета), `GIGACHAT_SCOPE`
-  (`GIGACHAT_API_PERS` по умолчанию), `GIGACHAT_MODEL` (`GigaChat-2-Pro` по умолчанию —
-  младшая модель картинки не понимает), `GIGACHAT_CA_BUNDLE` (путь к сертификату Минцифры;
-  без него проверка TLS выключается, о чём пишется в лог).
+- Yandex: `YANDEX_LLM_API_KEY` (ключ сервисного аккаунта с ролью `ai.languageModels.user`
+  и областью действия `yc.ai.languageModels.execute` — ключ, выпущенный только под OCR,
+  сервис языковых моделей не знает; если переменной нет, берётся `YANDEX_OCR_API_KEY`),
+  `YANDEX_FOLDER_ID`, `YANDEX_VLM_MODEL` (судья, `qwen3.6-35b-a3b`), `YANDEX_LLM_MODEL`
+  (сомелье, `yandexgpt-5-lite`), `YANDEX_LLM_BASE_URL` (`https://ai.api.cloud.yandex.net/v1`;
+  прежний адрес `https://llm.api.cloud.yandex.net/v1` тоже отвечает).
 """
 
+import base64
 import io
 import json
 import logging
 import os
-import time
-import uuid
 from dataclasses import dataclass, field
 
 import httpx
@@ -67,14 +72,20 @@ class OpenAICompatibleChat:
     timeout: float = DEFAULT_TIMEOUT
     client: httpx.Client | None = None
     name: str = "openai"
+    # Умеет ли провайдер response_format=json_object; иначе JSON просим словами в подсказке,
+    # а разбор у судьи терпит ограду и лишний текст.
+    supports_json_mode: bool = True
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
         if self.client is None:
             self.client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=2.0))
 
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
     def _post(self, body: dict) -> str:
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        headers = self._headers()
         try:
             response = self.client.post(
                 f"{self.base_url}/chat/completions", json=body, headers=headers
@@ -82,7 +93,7 @@ class OpenAICompatibleChat:
         except httpx.HTTPError as error:
             raise ChatError(f"{self.name}: {error.__class__.__name__}") from error
         if response.status_code != 200:
-            raise ChatError(f"{self.name}: HTTP {response.status_code}")
+            raise ChatError(f"{self.name}: HTTP {response.status_code}: {response.text[:200]}")
         try:
             return _content(response.json())
         except ValueError as error:
@@ -90,15 +101,13 @@ class OpenAICompatibleChat:
 
     def chat(self, messages: list[dict], temperature: float = 0.4, json_mode: bool = False) -> str:
         body = {"model": self.model, "temperature": temperature, "messages": messages}
-        if json_mode:
+        if json_mode and self.supports_json_mode:
             body["response_format"] = {"type": "json_object"}
         return self._post(body)
 
     def chat_with_image(
         self, prompt: str, image: bytes, temperature: float = 0.0, json_mode: bool = False
     ) -> str:
-        import base64
-
         url = "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")
         messages = [
             {
@@ -112,108 +121,38 @@ class OpenAICompatibleChat:
         return self.chat(messages, temperature=temperature, json_mode=json_mode)
 
 
-GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-GIGACHAT_API_URL = "https://gigachat.devices.sberbank.ru/api/v1"
-GIGACHAT_DEFAULT_MODEL = "GigaChat-2-Pro"
-# Токен живёт 30 минут; обновляем заранее, чтобы не поймать 401 посреди запроса.
-GIGACHAT_TOKEN_MARGIN = 120.0
+YANDEX_LLM_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
+YANDEX_VLM_MODEL = "qwen3.6-35b-a3b"
+YANDEX_LLM_MODEL = "yandexgpt-5-lite"
 
 
 @dataclass
-class GigaChatChat:
-    """GigaChat: OAuth по ключу авторизации, картинки через /files, работает без VPN."""
+class YandexChat(OpenAICompatibleChat):
+    """Yandex AI Studio: OpenAI-совместимый чат, работает без VPN.
 
-    credentials: str
-    model: str = GIGACHAT_DEFAULT_MODEL
-    scope: str = "GIGACHAT_API_PERS"
-    timeout: float = DEFAULT_TIMEOUT
-    verify: bool | str = False
-    client: httpx.Client | None = None
-    name: str = "gigachat"
-    _token: str | None = field(default=None, init=False, repr=False)
-    _expires_at: float = field(default=0.0, init=False, repr=False)
+    Отличия от чистого OpenAI: ключ в заголовке `Api-Key`, папка — в `OpenAI-Project`,
+    модель — `gpt://<папка>/<модель>` (короткое имя дописывается само). `response_format`
+    у Yandex — только `json_schema`, поэтому `json_object` не шлём: судья просит JSON словами.
+    """
+
+    base_url: str = YANDEX_LLM_BASE_URL
+    model: str = YANDEX_VLM_MODEL
+    folder_id: str | None = None
+    name: str = "yandex"
+    supports_json_mode: bool = False
 
     def __post_init__(self) -> None:
-        if self.client is None:
-            if self.verify is False:
-                log.warning(
-                    "GigaChat: проверка TLS выключена — задайте GIGACHAT_CA_BUNDLE "
-                    "(сертификат Минцифры), чтобы включить"
-                )
-            self.client = httpx.Client(
-                timeout=httpx.Timeout(self.timeout, connect=3.0), verify=self.verify
-            )
-
-    def _refresh_token(self) -> None:
-        headers = {
-            "Authorization": f"Basic {self.credentials}",
-            "RqUID": str(uuid.uuid4()),
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-        }
-        try:
-            response = self.client.post(
-                GIGACHAT_OAUTH_URL, headers=headers, data={"scope": self.scope}
-            )
-        except httpx.HTTPError as error:
-            raise ChatError(f"gigachat oauth: {error.__class__.__name__}") from error
-        if response.status_code != 200:
-            raise ChatError(f"gigachat oauth: HTTP {response.status_code}")
-        data = response.json()
-        self._token = data["access_token"]
-        # expires_at приходит в миллисекундах эпохи.
-        self._expires_at = float(data.get("expires_at", 0)) / 1000.0 or time.time() + 1500
+        super().__post_init__()
+        if self.folder_id and not self.model.startswith("gpt://"):
+            self.model = f"gpt://{self.folder_id}/{self.model}"
 
     def _headers(self) -> dict:
-        if not self._token or time.time() > self._expires_at - GIGACHAT_TOKEN_MARGIN:
-            self._refresh_token()
-        return {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
-
-    def _post_json(self, path: str, body: dict) -> dict:
-        try:
-            response = self.client.post(
-                f"{GIGACHAT_API_URL}{path}", json=body, headers=self._headers()
-            )
-            if response.status_code == 401:
-                self._token = None
-                response = self.client.post(
-                    f"{GIGACHAT_API_URL}{path}", json=body, headers=self._headers()
-                )
-        except httpx.HTTPError as error:
-            raise ChatError(f"gigachat: {error.__class__.__name__}") from error
-        if response.status_code != 200:
-            raise ChatError(f"gigachat: HTTP {response.status_code}: {response.text[:200]}")
-        return response.json()
-
-    def upload_image(self, image: bytes) -> str:
-        """Положить картинку в хранилище GigaChat, вернуть идентификатор для attachments."""
-        try:
-            response = self.client.post(
-                f"{GIGACHAT_API_URL}/files",
-                headers=self._headers(),
-                files={"file": ("label.jpg", image, "image/jpeg")},
-                data={"purpose": "general"},
-            )
-        except httpx.HTTPError as error:
-            raise ChatError(f"gigachat files: {error.__class__.__name__}") from error
-        if response.status_code != 200:
-            raise ChatError(f"gigachat files: HTTP {response.status_code}")
-        try:
-            return response.json()["id"]
-        except (KeyError, ValueError) as error:
-            raise ChatError("gigachat files: в ответе нет id") from error
-
-    def chat(self, messages: list[dict], temperature: float = 0.4, json_mode: bool = False) -> str:
-        # GigaChat не знает response_format: просим JSON словами — разбор у судьи терпимый.
-        body = {"model": self.model, "temperature": max(temperature, 0.01), "messages": messages}
-        return _content(self._post_json("/chat/completions", body))
-
-    def chat_with_image(
-        self, prompt: str, image: bytes, temperature: float = 0.0, json_mode: bool = False
-    ) -> str:
-        file_id = self.upload_image(image)
-        messages = [{"role": "user", "content": prompt, "attachments": [file_id]}]
-        return self.chat(messages, temperature=temperature, json_mode=json_mode)
+        headers = {"x-data-logging-enabled": "false"}
+        if self.api_key:
+            headers["Authorization"] = f"Api-Key {self.api_key}"
+        if self.folder_id:
+            headers["OpenAI-Project"] = self.folder_id
+        return headers
 
 
 @dataclass
@@ -250,17 +189,20 @@ class FallbackChat:
         )
 
 
-def gigachat_from_env(timeout: float = DEFAULT_TIMEOUT) -> GigaChatChat | None:
-    credentials = os.environ.get("GIGACHAT_CREDENTIALS")
-    if not credentials:
+def yandex_from_env(prefix: str, timeout: float = DEFAULT_TIMEOUT) -> YandexChat | None:
+    """Клиент Yandex AI Studio; модель — `YANDEX_VLM_MODEL` для судьи, `YANDEX_LLM_MODEL` для сомелье."""
+    api_key = os.environ.get("YANDEX_LLM_API_KEY") or os.environ.get("YANDEX_OCR_API_KEY")
+    folder_id = os.environ.get("YANDEX_FOLDER_ID")
+    if not api_key or not folder_id:
         return None
-    bundle = os.environ.get("GIGACHAT_CA_BUNDLE")
-    return GigaChatChat(
-        credentials=credentials,
-        model=os.environ.get("GIGACHAT_MODEL", GIGACHAT_DEFAULT_MODEL),
-        scope=os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
+    kind = prefix.removeprefix("WINE_")  # VLM | LLM
+    default_model = YANDEX_VLM_MODEL if kind == "VLM" else YANDEX_LLM_MODEL
+    return YandexChat(
+        base_url=os.environ.get("YANDEX_LLM_BASE_URL", YANDEX_LLM_BASE_URL),
+        model=os.environ.get(f"YANDEX_{kind}_MODEL", default_model),
+        api_key=api_key,
+        folder_id=folder_id,
         timeout=timeout,
-        verify=bundle if bundle else False,
     )
 
 
@@ -284,15 +226,15 @@ def chat_from_env(prefix: str, timeout: float = DEFAULT_TIMEOUT):
     `prefix` — `WINE_VLM` для судьи или `WINE_LLM` для сомелье; у сомелье переменные
     `WINE_LLM_*` могут отсутствовать — тогда берутся судейские.
     """
-    providers = [os.environ.get(f"{prefix}_PROVIDER", "openai")]
+    providers = [os.environ.get(f"{prefix}_PROVIDER", "yandex")]
     fallback = os.environ.get(f"{prefix}_FALLBACK")
     if fallback and fallback not in providers:
         providers.append(fallback)
 
     clients = []
     for provider in providers:
-        if provider == "gigachat":
-            client = gigachat_from_env(timeout)
+        if provider == "yandex":
+            client = yandex_from_env(prefix, timeout)
         elif provider == "openai":
             client = openai_from_env(prefix, timeout) or (
                 openai_from_env("WINE_VLM", timeout) if prefix != "WINE_VLM" else None

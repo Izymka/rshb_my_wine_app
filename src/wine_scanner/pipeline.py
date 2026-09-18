@@ -249,7 +249,7 @@ class WineScanner:
         self,
         index_dir: Path = INDEX_DIR,
         decider_dir: Path = DECIDER_DIR,
-        weights: Path = LABEL_WEIGHTS,
+        weights: Path | None = None,
         candidates: int = RERANK_CANDIDATES,
         threshold: float | None = None,
         device=None,
@@ -320,6 +320,11 @@ class WineScanner:
             "decider": digest([decider_dir / "model.txt", decider_dir / "meta.json"]),
         }
 
+        # Веса детектора этикетки — те же, что резали каталог при сборке индекса: иначе запрос и
+        # эталон кропаются по-разному, и сравнение детекторов на бенчмарке ничего не значит.
+        if weights is None:
+            weights = Path(self.config.get("weights", LABEL_WEIGHTS))
+        self.weights = weights
         if embedder is None:
             device = device or pick_device()
             embedder = build_embedder(

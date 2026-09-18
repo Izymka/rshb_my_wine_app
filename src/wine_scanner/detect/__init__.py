@@ -1,5 +1,5 @@
 from .bottle import BottleDetector, Box, CachedCropper, CascadeCropper, build_label_detector
-from .dataset import CocoDetectionDataset, collate
+from .dataset import CocoDetectionDataset, collate, split_by_wine
 
 __all__ = [
     "BottleDetector",
@@ -9,4 +9,5 @@ __all__ = [
     "CocoDetectionDataset",
     "build_label_detector",
     "collate",
+    "split_by_wine",
 ]

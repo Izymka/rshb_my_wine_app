@@ -10,6 +10,7 @@ BASE = {
     "disc_hit": 0.67,
     "winery_hit": 1,
     "color_match": 0,
+    "style_match": 0,
     "disc_contra": 0.0,
 }
 
@@ -43,6 +44,12 @@ def features(**overrides) -> dict:
         (features(color_match=-1, disc_n=0, disc_hit=0.0), "twin", "twin"),
         # Нет различающих слов и нет противоречия — модели виднее.
         (features(color_match=0, disc_n=0, disc_hit=0.0), "twin", None),
+        # Цимлянское полусухое против карточки «полусладкое»: цвет молчит (белое = белое),
+        # свои слова частично есть, различие — только в сладости.
+        (features(style_match=-1, color_match=1), "twin", "twin"),
+        (features(style_match=-1), "strict", None),
+        # Сладость совпала — это подтверждение, а не улика.
+        (features(style_match=1), "twin", None),
     ],
 )
 def test_twin_guard(case, mode, expected):
@@ -93,3 +100,14 @@ def test_sibling_swap_needs_readable_label_and_family():
     assert sibling_swap([top, loud], FAMILY) is None
     foreign_top = scored("taman", disc_hit=0.0)
     assert sibling_swap([foreign_top, loud], FAMILY) is None
+
+
+def test_sibling_swap_on_sweetness_contradiction():
+    """Лидер — полусладкое, на этикетке «брют»; соседка-брют подтверждена сладостью."""
+    top = scored("alushta", disc_hit=0.5, style_match=-1)
+    brut = scored("livadia", disc_hit=0.0, style_match=1)
+    assert sibling_swap([top, brut], FAMILY) == 1
+    # Соседка сама противоречит этикетке по цвету — не замена, даже если лидер не подтверждён.
+    wrong_color = scored("livadia", disc_hit=0.67, color_match=-1)
+    top_unsupported = scored("alushta", disc_hit=0.0)
+    assert sibling_swap([top_unsupported, wrong_color], FAMILY) is None

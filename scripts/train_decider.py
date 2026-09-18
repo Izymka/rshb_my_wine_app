@@ -28,6 +28,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
+from wine_scanner.catalog import is_holdout
 from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures, derive, logit, matrix
 
 FEATURES_PATH = Path("eval/results/features.jsonl")
@@ -193,6 +194,12 @@ def main() -> None:
         help="вес живых кадров (group live-*) относительно псевдофото при обучении",
     )
     parser.add_argument(
+        "--include-holdout",
+        action="store_true",
+        help="учить и на изолированном тестовом наборе (data/live, data/eval) — только для "
+        "сравнения со старыми прогонами, цифры с этим флагом честными не считаются",
+    )
+    parser.add_argument(
         "--no-augment-unknown",
         dest="augment_unknown",
         action="store_false",
@@ -207,6 +214,13 @@ def main() -> None:
         FAMILIES.update(dict(zip(table["slug"], table["winery"], strict=True)))
 
     by_query = load_queries(args.features)
+    if not args.include_holdout:
+        holdout = [q for q in by_query if is_holdout(q)]
+        for q in holdout:
+            del by_query[q]
+        print(f"тестовый набор изолирован: {len(holdout)} запросов из data/live и data/eval не в обучении")
+    else:
+        print("ВНИМАНИЕ: --include-holdout — модель учится на тестовом наборе, цифры нечестные")
     if args.only_groups:
         prefixes = tuple(args.only_groups.split(","))
         by_query = {q: rows for q, rows in by_query.items() if rows[0].group.startswith(prefixes)}
@@ -343,6 +357,7 @@ def main() -> None:
         feature_names=FEATURE_NAMES,
         meta={
             "trained_on": str(args.features),
+            "holdout_isolated": not args.include_holdout,
             "queries": len(queries),
             "unknown_queries": int((~known).sum()),
             "wines": len(set(wines)),
