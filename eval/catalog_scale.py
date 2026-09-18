@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from wine_scanner.catalog import CatalogItem, load_own, load_xwines
-from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
+from wine_scanner.detect import CachedCropper, build_cropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, pick_device
 
 DISTRACTORS = Path("data/third-party datasets/wine-images-126k/catalog.jsonl")
@@ -150,10 +150,7 @@ def main() -> None:
     # пространство признаков, окажутся неестественно далеко от запросов, и замер покажет
     # благополучие, которого нет.
     cropper = CachedCropper(
-        CascadeCropper(
-            BottleDetector(device=device, mode="bottle"),
-            BottleDetector(device=device, weights_path=args.weights),
-        ),
+        build_cropper("cascade", args.weights, device),
         CROP_CACHE,
     )
     embedder = Dinov2Embedder(

@@ -16,7 +16,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
-from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
+from wine_scanner.detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper, detector_kind
 from wine_scanner.embed import DEFAULT_MODEL, build_embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import LabelOCR
@@ -43,21 +43,6 @@ def load_catalog(name: str) -> list[CatalogItem]:
     if not items:
         raise ValueError(f"пустой каталог для --catalog {name}")
     return items
-
-
-def build_cropper(detect: str | None, weights: Path, device) -> object | None:
-    if detect is None:
-        return None
-    if detect == "cascade":
-        detector = CascadeCropper(
-            BottleDetector(device=device, mode="bottle"),
-            BottleDetector(device=device, weights_path=weights),
-        )
-    elif detect == "trained":
-        detector = BottleDetector(device=device, weights_path=weights)
-    else:
-        detector = BottleDetector(device=device, mode=detect)
-    return CachedCropper(detector, CROP_CACHE)
 
 
 def year_boxes(items: list[CatalogItem], cropper) -> dict[str, tuple]:
@@ -130,7 +115,11 @@ def main() -> None:
     embedder = build_embedder(
         model_name=args.model,
         device=device,
-        cropper=build_cropper(args.detect, args.weights, device),
+        cropper=(
+            CachedCropper(build_cropper(args.detect, args.weights, device), CROP_CACHE)
+            if args.detect
+            else None
+        ),
         fit=args.fit,
     )
     print(f"модель: {args.model}, устройство: {device}, размерность: {embedder.dim}")
@@ -199,6 +188,8 @@ def main() -> None:
             {
                 "model": args.model,
                 "detect": args.detect,
+                "detector": detector_kind(args.weights),
+                "bottle_model": COCO_BOTTLE_MODEL if detector_kind(args.weights) == "rtdetr" else "torchvision-coco",
                 "fit": args.fit,
                 "weights": str(args.weights),
                 "catalog": args.catalog,

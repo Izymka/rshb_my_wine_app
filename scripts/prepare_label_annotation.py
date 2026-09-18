@@ -41,7 +41,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from wine_scanner.catalog import LIVE_MANIFEST, load_live
-from wine_scanner.detect import BottleDetector
+from wine_scanner.detect import bottle_detector
 from wine_scanner.embed import load_image, pick_device
 
 OUT = Path("data/own_labels")
@@ -59,7 +59,8 @@ def main() -> None:
 
     sources = set(args.sources.split(","))
     queries = [q for q in load_live(args.manifest, include_multi=False) if q.source in sources]
-    detector = BottleDetector(device=pick_device(), mode="bottle")
+    # Та же первая ступень, что в каскаде: вырезка бутылки RT-DETR по весам COCO.
+    detector = bottle_detector("rtdetr", pick_device())
     args.out.mkdir(parents=True, exist_ok=True)
 
     names = []

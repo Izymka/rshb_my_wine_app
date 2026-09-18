@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 from wine_scanner.burst import fuse_max, fuse_mean, fuse_rrf, load_bursts, ranked, sharpness
 from wine_scanner.catalog import load_own, load_xwines
-from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
+from wine_scanner.detect import CachedCropper, build_cropper
 from wine_scanner.embed import Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
 
@@ -44,10 +44,7 @@ def main() -> None:
 
     device = pick_device()
     cropper = CachedCropper(
-        CascadeCropper(
-            BottleDetector(device=device, mode="bottle"),
-            BottleDetector(device=device, weights_path=args.weights),
-        ),
+        build_cropper("cascade", args.weights, device),
         CROP_CACHE,
     )
     embedder = Dinov2Embedder(cropper=cropper, fit="pad")

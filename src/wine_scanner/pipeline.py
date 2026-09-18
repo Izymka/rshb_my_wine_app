@@ -49,7 +49,7 @@ from .decide import Decider, PairFeatures, Scored, derive
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
 from .decide.guard import SIBLING_ENABLED, sibling_swap, twin_guard
 from .decide.judge import VlmJudge
-from .detect import BottleDetector, CachedCropper, CascadeCropper
+from .detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper
 from .embed import DEFAULT_MODEL, Whitening, build_embedder, load_image, pick_device
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex
@@ -409,15 +409,9 @@ class WineScanner:
     def _build_cropper(self, weights: Path, device, crop_cache: Path | None):
         """Обрезка ровно та же, которой строился индекс."""
         detect = self.config.get("detect", "cascade")
-        if detect == "cascade":
-            detector = CascadeCropper(
-                BottleDetector(device=device, mode="bottle"),
-                BottleDetector(device=device, weights_path=weights),
-            )
-        elif detect == "trained":
-            detector = BottleDetector(device=device, weights_path=weights)
-        else:
-            detector = BottleDetector(device=device, mode=detect)
+        detector = build_cropper(
+            detect, weights, device, bottle_model=self.config.get("bottle_model", COCO_BOTTLE_MODEL)
+        )
         # Кэш кропов ключуется путём файла и его временем правки — для загруженного по сети
         # снимка это бессмысленно, поэтому в сервисе он выключен.
         return CachedCropper(detector, crop_cache) if crop_cache else detector

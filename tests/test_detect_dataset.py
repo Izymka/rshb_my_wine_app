@@ -57,3 +57,23 @@ def test_csv_with_header_and_two_boxes_per_image(tmp_path):
 def test_missing_annotations_is_an_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         CocoDetectionDataset(tmp_path)
+
+
+def test_crop_box_returns_to_frame_coordinates():
+    """Рамка с ужатой вырезки → кадр: обратный масштаб вырезки, сдвиг, масштаб кадра."""
+    from scripts.prepare_frame_annotation import crop_to_frame
+
+    # Вырезка 1000×2000 из кадра с углом (100, 200), сохранена ужатой до 800×1600 (k = 1.25);
+    # кадр сохранён в половину (sx = sy = 0.5).
+    x, y, w, h = crop_to_frame((80, 160, 400, 240), (100, 200, 1100, 2200), (800, 1600), (0.5, 0.5))
+    assert (x, y, w, h) == ((100 + 100) * 0.5, (200 + 200) * 0.5, 500 * 0.5, 300 * 0.5)
+
+
+def test_crop_rect_matches_crop():
+    """`crop` режет ровно по `crop_rect` — иначе предразметка разъедется с вырезками."""
+    from wine_scanner.detect.bottle import Box, BottleDetector
+
+    detector = BottleDetector.__new__(BottleDetector)
+    detector.mode, detector.margin = "bottle", 0.08
+    rect = detector.crop_rect(Box(100, 200, 300, 600, score=0.9), (400, 800))
+    assert rect == (84, 168, 316, 632)

@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 
 from wine_scanner.burst import sharpness
 from wine_scanner.catalog import load_own
-from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
+from wine_scanner.detect import CachedCropper, build_cropper
 from wine_scanner.embed import Dinov2Embedder, load_image, pick_device
 
 CROP_CACHE = Path("models/crop_cache")
@@ -55,14 +55,8 @@ WRONG_BOTTLE_COS = 0.65
 WRONG_BOTTLE_SHARPNESS = 200
 
 
-def build_cropper(device, weights: Path):
-    return CachedCropper(
-        CascadeCropper(
-            BottleDetector(device=device, mode="bottle"),
-            BottleDetector(device=device, weights_path=weights),
-        ),
-        CROP_CACHE,
-    )
+def cached_cascade(device, weights: Path):
+    return CachedCropper(build_cropper("cascade", weights, device), CROP_CACHE)
 
 
 def check(group: str, side: int, sharp: float, fill: float, cos: float | None) -> list[str]:
@@ -105,7 +99,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = pick_device()
-    cropper = build_cropper(device, args.weights)
+    cropper = cached_cascade(device, args.weights)
     embedder = Dinov2Embedder(device=device, cropper=cropper, fit="pad")
 
     if args.live:

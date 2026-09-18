@@ -1,4 +1,8 @@
-"""Детекция бутылки готовым детектором COCO.
+"""Детекция бутылки и этикетки: Faster R-CNN (torchvision) и общая логика выбора рамки.
+
+С 18.09.2026 рабочая архитектура обеих ступеней каскада — RT-DETR (`rtdetr.py`), Faster R-CNN
+остаётся для старых индексов (`models/label_detector*.pt`) и сравнения. Общее для обоих —
+`BoxCropper`: какую бутылку считать снятой и как резать.
 
 Первый шаг Э3, и он не требует ни разметки, ни обучения: в COCO есть класс bottle, а веса
 Faster R-CNN идут вместе с torchvision. Смысл в том, чтобы сначала дёшево измерить, сколько
@@ -84,8 +88,107 @@ class Box:
         return max(0.0, self.x2 - self.x1) * max(0.0, self.y2 - self.y1)
 
 
-class BottleDetector:
-    """Находит бутылку на кадре и отдаёт обрезанное изображение."""
+class BoxCropper:
+    """Общая часть детекторов: из списка рамок выбрать целевую и вырезать кадр.
+
+    Сама детекция у наследников разная (Faster R-CNN из torchvision, RT-DETR из transformers),
+    а правило «какую бутылку считать снятой» и поля вырезки — одни: иначе смена детектора
+    меняла бы и кроп, и сравнение детекторов измеряло бы не то.
+    """
+
+    margin: float = 0.08
+    mode: str = "bottle"
+    cache_tag: str = "?"
+    # Рамки мельче этой доли кадра не считаются: снятая бутылка всегда крупная, а крошечная
+    # уверенная рамка — это горлышко соседа или блик. 0 — без ограничения (Faster R-CNN).
+    min_area_share: float = 0.0
+    # Рамка обязана накрывать центр кадра: снимающий наводит камеру на нужную бутылку, и
+    # рамка сбоку — сосед по полке. Если такой нет — кадр целиком, дальше решает детектор
+    # этикетки (так каскад вёл себя и раньше, когда бутылка не находилась). Faster R-CNN: выкл.
+    require_center: bool = False
+
+    def detect(self, image: Image.Image) -> list[Box]:
+        raise NotImplementedError
+
+    def pick(self, boxes: list[Box], size: tuple[int, int]) -> Box | None:
+        """Выбрать целевую бутылку среди найденных.
+
+        На кадрах с полки бутылок много, нужна одна — та, которую снимали. Ранжируем по
+        произведению трёх величин: уверенность детектора, доля площади кадра и близость центра
+        рамки к центру кадра. Снимающий почти всегда наводит камеру на нужную бутылку и
+        подходит ближе, поэтому целевая обычно и крупнее, и центральнее соседей.
+        """
+        width, height = size
+        frame_area = width * height
+        boxes = [b for b in boxes if b.area >= self.min_area_share * frame_area]
+        if self.require_center:
+            boxes = [b for b in boxes if b.x1 <= width / 2 <= b.x2 and b.y1 <= height / 2 <= b.y2]
+        if not boxes:
+            return None
+
+        def rank(box: Box) -> float:
+            cx = (box.x1 + box.x2) / 2 / width
+            cy = (box.y1 + box.y2) / 2 / height
+            # 1.0 в центре кадра, 0.0 по углам
+            centrality = 1.0 - (abs(cx - 0.5) + abs(cy - 0.5))
+            return box.score * (box.area / frame_area) ** 0.5 * centrality
+
+        return max(boxes, key=rank)
+
+    def label_window(self, box: Box, size: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Оценить прямоугольник этикетки по рамке бутылки.
+
+        Пока своего детектора этикетки нет, пользуемся геометрией бутылки: этикетка занимает
+        почти всю ширину и расположена в нижней половине, её центр примерно на 58% высоты
+        сверху. Берём квадрат со стороной чуть шире бутылки — так в кадр попадает этикетка
+        целиком и почти ничего лишнего.
+
+        Это заглушка до Э3б: обученный детектор даст рамку точнее, а интерфейс не изменится.
+        """
+        width, height = size
+        box_width = box.x2 - box.x1
+        box_height = box.y2 - box.y1
+
+        side = box_width * (1 + 2 * self.margin)
+        cx = (box.x1 + box.x2) / 2
+        cy = box.y1 + box_height * 0.58
+
+        return (
+            max(0, int(cx - side / 2)),
+            max(0, int(cy - side / 2)),
+            min(width, int(cx + side / 2)),
+            min(height, int(cy + side / 2)),
+        )
+
+    def crop_rect(self, box: Box, size: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Прямоугольник вырезки по рамке: бутылка с полями `margin` или окно этикетки.
+
+        Вынесен отдельно, чтобы разметку, сделанную на вырезке, можно было вернуть в
+        координаты исходного кадра (`scripts/prepare_frame_annotation.py`).
+        """
+        if self.mode == "label":
+            return self.label_window(box, size)
+
+        width, height = size
+        dx = (box.x2 - box.x1) * self.margin
+        dy = (box.y2 - box.y1) * self.margin
+        return (
+            max(0, int(box.x1 - dx)),
+            max(0, int(box.y1 - dy)),
+            min(width, int(box.x2 + dx)),
+            min(height, int(box.y2 + dy)),
+        )
+
+    def crop(self, image: Image.Image) -> Image.Image:
+        """Обрезать кадр по найденной бутылке. Если бутылки нет — вернуть кадр как есть."""
+        box = self.pick(self.detect(image), image.size)
+        if box is None:
+            return image
+        return image.crop(self.crop_rect(box, image.size))
+
+
+class BottleDetector(BoxCropper):
+    """Faster R-CNN: бутылка по весам COCO или этикетка по дообученным весам (`weights_path`)."""
 
     def __init__(
         self,
@@ -144,73 +247,6 @@ class BottleDetector:
             for box, score in zip(output["boxes"][keep], output["scores"][keep], strict=True)
         ]
 
-    def pick(self, boxes: list[Box], size: tuple[int, int]) -> Box | None:
-        """Выбрать целевую бутылку среди найденных.
-
-        На кадрах с полки бутылок много, нужна одна — та, которую снимали. Ранжируем по
-        произведению трёх величин: уверенность детектора, доля площади кадра и близость центра
-        рамки к центру кадра. Снимающий почти всегда наводит камеру на нужную бутылку и
-        подходит ближе, поэтому целевая обычно и крупнее, и центральнее соседей.
-        """
-        if not boxes:
-            return None
-        width, height = size
-        frame_area = width * height
-
-        def rank(box: Box) -> float:
-            cx = (box.x1 + box.x2) / 2 / width
-            cy = (box.y1 + box.y2) / 2 / height
-            # 1.0 в центре кадра, 0.0 по углам
-            centrality = 1.0 - (abs(cx - 0.5) + abs(cy - 0.5))
-            return box.score * (box.area / frame_area) ** 0.5 * centrality
-
-        return max(boxes, key=rank)
-
-    def label_window(self, box: Box, size: tuple[int, int]) -> tuple[int, int, int, int]:
-        """Оценить прямоугольник этикетки по рамке бутылки.
-
-        Пока своего детектора этикетки нет, пользуемся геометрией бутылки: этикетка занимает
-        почти всю ширину и расположена в нижней половине, её центр примерно на 58% высоты
-        сверху. Берём квадрат со стороной чуть шире бутылки — так в кадр попадает этикетка
-        целиком и почти ничего лишнего.
-
-        Это заглушка до Э3б: обученный детектор даст рамку точнее, а интерфейс не изменится.
-        """
-        width, height = size
-        box_width = box.x2 - box.x1
-        box_height = box.y2 - box.y1
-
-        side = box_width * (1 + 2 * self.margin)
-        cx = (box.x1 + box.x2) / 2
-        cy = box.y1 + box_height * 0.58
-
-        return (
-            max(0, int(cx - side / 2)),
-            max(0, int(cy - side / 2)),
-            min(width, int(cx + side / 2)),
-            min(height, int(cy + side / 2)),
-        )
-
-    def crop(self, image: Image.Image) -> Image.Image:
-        """Обрезать кадр по найденной бутылке. Если бутылки нет — вернуть кадр как есть."""
-        box = self.pick(self.detect(image), image.size)
-        if box is None:
-            return image
-
-        if self.mode == "label":
-            return image.crop(self.label_window(box, image.size))
-
-        width, height = image.size
-        dx = (box.x2 - box.x1) * self.margin
-        dy = (box.y2 - box.y1) * self.margin
-        return image.crop(
-            (
-                max(0, int(box.x1 - dx)),
-                max(0, int(box.y1 - dy)),
-                min(width, int(box.x2 + dx)),
-                min(height, int(box.y2 + dy)),
-            )
-        )
 
 
 class CachedCropper:
@@ -253,7 +289,7 @@ class CascadeCropper:
     а не одна модель, которой приходится уметь всё сразу.
     """
 
-    def __init__(self, bottle: BottleDetector, label: BottleDetector):
+    def __init__(self, bottle: BoxCropper, label: BoxCropper):
         self.bottle = bottle
         self.label = label
         self.cache_tag = f"cascade:{bottle.cache_tag}->{label.cache_tag}"
