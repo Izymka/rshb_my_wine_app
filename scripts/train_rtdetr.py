@@ -1,9 +1,9 @@
 """Дообучение RT-DETR на один класс «этикетка» — соперник Faster R-CNN из каскада.
 
     uv run python scripts/train_rtdetr.py --data "data/third-party datasets/wine-labels" \\
-        --own data/own_labels --test data/live_labels --device cuda --epochs 12 \\
+        --own data/train/labels --test data/test/labels --device cuda --epochs 12 \\
         --out models/rtdetr_label
-    uv run python scripts/train_rtdetr.py --data ... --test data/live_labels \\
+    uv run python scripts/train_rtdetr.py --data ... --test data/test/labels \\
         --init models/rtdetr_label --eval-only                 # измерить сохранённую модель
     uv run python scripts/train_rtdetr.py --data ... --limit 8 --epochs 1 --out /tmp/rtdetr-smoke
                                                                # проверка кода на процессоре
@@ -12,7 +12,7 @@
 разметке: IoU 0.818 против 0.882 на чужой валидации). RT-DETR — детектор-трансформер без
 якорей и без NMS, на COCO точнее и быстрее R-CNN того же размера; ТЗ хакатона скорость тоже
 оценивает. Сравниваем по одной и той же метрике на одном и том же изолированном тесте
-(`--test data/live_labels`): IoU лучшей рамки с разметкой и доля кадров с IoU ≥ 0.75 — ровно
+(`--test data/test/labels`): IoU лучшей рамки с разметкой и доля кадров с IoU ≥ 0.75 — ровно
 то, что нужно для обрезки. Победитель встаёт в каскад вместо `label_detector.pt`.
 
 Лицензия: реализация из HuggingFace transformers и веса `PekingU/rtdetr_r18vd` — Apache 2.0
@@ -137,8 +137,8 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True, help="Roboflow wine-labels (train/, valid/)")
     parser.add_argument("--out", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument("--init", default=PRETRAINED, help="стартовые веса: имя на HF или своя папка")
-    parser.add_argument("--own", type=Path, default=None, help="своя разметка для обучения (data/own_labels)")
-    parser.add_argument("--test", type=Path, default=None, help="изолированный тест (data/live_labels)")
+    parser.add_argument("--own", type=Path, default=None, help="своя разметка для обучения (data/train/labels)")
+    parser.add_argument("--test", type=Path, default=None, help="изолированный тест (data/test/labels)")
     parser.add_argument("--include-holdout", action="store_true", help="разрешить --own на тесте (нечестно)")
     parser.add_argument("--own-repeat", type=int, default=20)
     parser.add_argument("--own-valid-share", type=float, default=0.2)
@@ -177,7 +177,7 @@ def main() -> None:
         if is_holdout(args.own) and not args.include_holdout:
             raise SystemExit(
                 f"{args.own} — изолированный тестовый набор, учить на нём нельзя; "
-                "передайте его как --test, для обучения размечайте data/own_labels"
+                "передайте его как --test, для обучения размечайте data/train/labels"
             )
         own_train, own_valid = split_by_wine(args.own, args.own_valid_share)
         print(f"своя разметка: train {len(own_train)}, valid {len(own_valid)} кадров (деление по винам)")

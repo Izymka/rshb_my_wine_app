@@ -199,7 +199,7 @@ def main() -> None:
     ]
     table["shared_image"] = table["image_md5"].duplicated(keep=False) & table["image_md5"].notna()
 
-    images_dir = args.out / "images"
+    images_dir = args.out / "originals"
     images_dir.mkdir(parents=True, exist_ok=True)
     sizes: dict[str, tuple[int, int, str]] = {}
     for row in tqdm(list(table.itertuples(index=False)), desc="эталоны"):

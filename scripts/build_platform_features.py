@@ -9,9 +9,10 @@
 из трёх источников, и у части из них верного ответа нет по-настоящему:
 
 - псевдофото из вырезок (`data/synthetic/manifest.csv`) — положительные примеры;
-- свой набор (`data/own`): вина, которых нет в каталоге платформы, идут как живые незнакомые
-  (`true_id` = `unknown:<папка>`), а те, что есть, — как положительные по таблице соответствий;
-- публичные кадры организаторов (`data/eval`): Массандра известна, два других незнакомы.
+- обучающий манифест `data/train/manifest.csv`: свой набор (импорт: незнакомцы, Chateau Tamagne —
+  известное) и незнакомцы с российской полки, не вошедшие в тест;
+- изолированный тест `data/test/manifest.csv` (`--sources ...,test`) — только чтобы посчитать
+  признаки для бенчмарка; `train_decider.py` такие запросы выбрасывает по пути (`is_holdout`).
 
 Незнакомый запрос — это тот, у которого `true_id` начинается с `unknown:`. Метка у всех его
 кандидатов нулевая, и train_decider.py использует его для порога вместо симуляции.
@@ -24,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from wine_scanner.catalog import EVAL_ROOT, LIVE_MANIFEST, OWN_ROOT, load_live, load_own
+from wine_scanner.catalog import TEST_MANIFEST, TRAIN_MANIFEST, load_manifest
 from wine_scanner.decide import PairFeatures
 from wine_scanner.embed import load_image
 from wine_scanner.pipeline import RetrievalOnlyDecider, WineScanner
@@ -32,50 +33,22 @@ from wine_scanner.pipeline import RetrievalOnlyDecider, WineScanner
 OUT_PATH = Path("eval/results/features_platform.jsonl")
 SYNTHETIC_MANIFEST = Path("data/synthetic/manifest.csv")
 
-# Свой набор -> slug платформы. Проверено глазами 16.09.2026: Chateau Tamagne красное 2025 —
-# тот же дизайн, что у карточки 2023 года (в каталоге только она); Inkerman Ркацители в каталоге
-# отсутствует (под «Инкерман полусладкое» лежит игристое), Лабра Ашамта — тоже. Всё остальное
-# в своём наборе — импорт, которого на платформе нет по определению.
-OWN_TO_PLATFORM = {
-    "Chateau_Tamagne_красное_2025": "kuban-vino-shato-tamane-ruzh-2023-tsvaygelt-krasnoe-suhoe-12",
-}
-EVAL_TRUTH = {
-    "096ca74e.jpg": None,  # Aristov Donum XXIV — нет в дампе
-    "019c68d0.jpg": None,  # Табия Пино Нуар 2025 — нет в дампе
-    "02eef911.webp": "massandra-muskatel-belyy-belye-sorta-vinograda-beloe-sladkoe-16",
-}
+MANIFESTS = {"train": TRAIN_MANIFEST, "test": TEST_MANIFEST}
 
 
-def collect_queries(
-    synthetic: Path,
-    own_root: Path,
-    eval_root: Path,
-    sources: set[str],
-    live_manifest: Path = LIVE_MANIFEST,
-) -> list[dict]:
+def collect_queries(synthetic: Path, sources: set[str]) -> list[dict]:
     rows: list[dict] = []
     if "synthetic" in sources and synthetic.exists():
         for r in pd.read_csv(synthetic).itertuples(index=False):
             rows.append({"path": r.path, "true_id": r.true_id, "group": r.group})
-    # Живые кадры вин платформы (data/live): известные — позитивы, незнакомые — негативы.
-    # Свой набор и eval в манифесте тоже есть, поэтому при source=live они не дублируются.
-    if "live" in sources and live_manifest.exists():
-        for q in load_live(live_manifest):
-            rows.append({"path": str(q.path), "true_id": q.true_id, "group": f"live-{q.group}"})
-        sources = sources - {"own", "eval"}
-    _, own_queries = load_own(own_root) if "own" in sources else (None, [])
-    for q in own_queries:
-        wine = q.path.parent.name
-        true_id = OWN_TO_PLATFORM.get(wine, f"unknown:{wine}")
-        rows.append({"path": str(q.path), "true_id": true_id, "group": f"own-{q.group}"})
-    for name, slug in EVAL_TRUTH.items() if "eval" in sources else ():
-        rows.append(
-            {
-                "path": str(eval_root / "queries" / name),
-                "true_id": slug or f"unknown:eval-{Path(name).stem}",
-                "group": "eval",
-            }
-        )
+    # Кадры по манифестам: известные — позитивы, незнакомые (`unknown:`) — негативы. Свой набор
+    # и публичные кадры организаторов в манифестах уже есть, отдельных источников для них нет.
+    # Префикс `live-` у всех кадров манифестов: по нему train_decider.py даёт им вес
+    # `--live-weight` против псевдофото, и старые файлы признаков размечены так же.
+    for name, manifest in MANIFESTS.items():
+        if name in sources and manifest.exists():
+            for q in load_manifest(manifest):
+                rows.append({"path": str(q.path), "true_id": q.true_id, "group": f"live-{q.group}"})
     return rows
 
 
@@ -92,9 +65,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--sources",
-        default="synthetic,live",
-        help="какие источники запросов брать, через запятую: synthetic, live (манифест "
-        "data/live, включает own и eval), own, eval",
+        default="synthetic,train,test",
+        help="какие источники запросов брать, через запятую: synthetic, train "
+        "(data/train/manifest.csv — свой набор и незнакомцы вне теста), test (data/test/manifest.csv, "
+        "включая data/eval; только для бенчмарка, в обучение не попадает)",
     )
     parser.add_argument(
         "--resume",
@@ -110,7 +84,7 @@ def main() -> None:
     args = parser.parse_args()
 
     sources = set(args.sources.split(","))
-    queries = collect_queries(args.synthetic, OWN_ROOT, EVAL_ROOT, sources)
+    queries = collect_queries(args.synthetic, sources)
     if args.limit:
         queries = queries[: args.limit]
     unknown = sum(q["true_id"].startswith("unknown:") for q in queries)
@@ -132,7 +106,7 @@ def main() -> None:
 
     kept: list[str] = []
     if args.keep_from is not None and args.keep_from.exists():
-        prefixes = {"synthetic": "synthetic", "own": "own-", "eval": "eval", "live": "live-"}
+        prefixes = {"synthetic": "synthetic", "train": "live-", "test": "live-"}
         skip = tuple(prefixes[s] for s in sources)
         for line in args.keep_from.read_text(encoding="utf-8").splitlines():
             if not json.loads(line)["group"].startswith(skip):

@@ -1,8 +1,8 @@
 """Подготовить исходные кадры (до кропа) к разметке бутылок и этикеток — для RT-DETR.
 
-    uv run python scripts/prepare_frame_annotation.py                                   # обучение: data/own -> data/own_frames
-    uv run python scripts/prepare_frame_annotation.py --sources live,eval --out data/live_frames  # тест
-    uv run python scripts/prepare_frame_annotation.py --extra data/own/shelf_raw --out data/own_frames  # + полки
+    uv run python scripts/prepare_frame_annotation.py                                    # data/test: новое → frames_unannotated
+    uv run python scripts/prepare_frame_annotation.py --manifest data/train/manifest.csv  # data/train
+    uv run python scripts/prepare_frame_annotation.py --manifest data/train/manifest.csv --extra data/own/shelf_raw  # + полки
 
 Чем это отличается от `prepare_label_annotation.py`. Тот скрипт режет кадр детектором бутылки
 и отдаёт на разметку вырезку — так учится второй детектор каскада. Здесь на разметку идёт
@@ -10,19 +10,21 @@
 (COCO-бутылка → этикетка на вырезке): не режет края этикетки из-за плохой рамки бутылки и
 не тратит два прогона на кадр.
 
-Две папки, и они не смешиваются — те же, что у вырезок: `data/own_frames` — свой набор
-(импорт, снят во Вьетнаме) плюс, по желанию, кадры полок `data/own/shelf_raw`, на них детектор
-**учится**; `data/live_frames` — кадры российских вин и публичные кадры организаторов,
-изолированный **тест** (`catalog.is_holdout`). Кадры полок из манифеста (`group == multi`)
-попадают в тест вместе с остальными `data/live`.
+Раскладка с 18.09.2026: у каждого манифеста (`data/test`, `data/train`) рядом лежат две папки
+кадров — `frames_annotated/` (кадры + `_annotations.csv` из makesense) и `frames_unannotated/`
+(то, что ещё предстоит разметить). Скрипт берёт кадры манифеста, пропускает те, что уже есть
+в любой из двух папок, и кладёт новые в `frames_unannotated/` с предразметкой. После разметки
+кадры вместе со строками `_annotations.csv` переносятся в `frames_annotated/` — руками или
+`--merge`. `data/test` — изолированный тест (`catalog.is_holdout`), `data/train` — обучение;
+они не смешиваются.
 
 Кадр ужимается до `--max-side` (1600 px): RT-DETR всё равно смотрит на 640, а разметке
 хватает, зато папка весит десятки мегабайт, а не гигабайты, и makesense не тормозит.
 Ориентация EXIF применена (`load_image`), поэтому кадр в makesense, на диске и в обучении —
 один и тот же.
 
-**Предразметка.** Рамки этикеток на вырезках уже есть (`data/own_labels`, `data/live_labels`,
-285 штук), рисовать их заново незачем. Скрипт прогоняет детектор бутылки заново, восстанавливает
+**Предразметка.** Рамки этикеток на вырезках, если они есть (`<корень>/labels/`, 285 штук
+на 18.09), рисовать заново незачем. Скрипт прогоняет детектор бутылки заново, восстанавливает
 прямоугольник вырезки и переносит рамку этикетки в координаты кадра; рамки всех бутылок,
 которые нашёл COCO-детектор, кладёт классом `bottle`. Итог — `_prefill.coco.json`: в makesense
 после загрузки картинок Actions → Import Annotations → COCO. Дальше руками: поправить
@@ -45,17 +47,17 @@
 """
 
 import argparse
+import csv
 import json
 from collections import defaultdict
 from pathlib import Path
 
 from tqdm import tqdm
 
-from wine_scanner.catalog import LIVE_MANIFEST, Query, load_live
+from wine_scanner.catalog import TEST_MANIFEST, Query, load_manifest
 from wine_scanner.detect import BottleDetector, CocoDetectionDataset
 from wine_scanner.embed import load_image, pick_device
 
-OUT = Path("data/own_frames")
 CATEGORIES = [{"id": 1, "name": "bottle"}, {"id": 2, "name": "label"}]
 BOTTLE, LABEL = 1, 2
 
@@ -108,30 +110,70 @@ def extra_queries(folder: Path) -> list[Query]:
     return [Query(path=p, true_id="", group="shelf", wine_id=folder.name) for p in paths]
 
 
+def merge_annotated(root: Path) -> None:
+    """Перенести размеченные кадры из frames_unannotated в frames_annotated вместе со строками CSV."""
+    src, dst = root / "frames_unannotated", root / "frames_annotated"
+    csv_src, csv_dst = src / "_annotations.csv", dst / "_annotations.csv"
+    if not csv_src.exists():
+        raise SystemExit(f"нет {csv_src}: экспортируйте разметку из makesense (Single CSV file)")
+    rows = list(csv.DictReader(csv_src.open(encoding="utf-8", newline="")))
+    if not rows:
+        raise SystemExit(f"файл {csv_src} пуст")
+    done = {r["image_name"] for r in rows}
+    dst.mkdir(exist_ok=True)
+    existing = list(csv.DictReader(csv_dst.open(encoding="utf-8", newline=""))) if csv_dst.exists() else []
+    with csv_dst.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(existing + rows)
+    for name in sorted(done):
+        if (src / name).exists():
+            (src / name).rename(dst / name)
+    csv_src.rename(src / "_annotations.merged.csv")
+    left = [p.name for p in src.iterdir() if p.suffix.lower() == ".jpg"]
+    print(f"перенесено кадров {len(done)}, рамок {len(rows)}; осталось без разметки {len(left)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, default=LIVE_MANIFEST)
-    parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument("--manifest", type=Path, default=TEST_MANIFEST)
+    parser.add_argument("--out", type=Path, help="по умолчанию <корень манифеста>/frames_unannotated")
     parser.add_argument("--max-side", type=int, default=1600, help="ужать кадр для разметки; 0 — оригинал")
     parser.add_argument(
-        "--sources", default="own", help="какие кадры брать: own (обучение), live, eval (тест)"
+        "--sources", default="live,own,eval", help="какие кадры манифеста брать: live, own, eval"
     )
     parser.add_argument(
         "--labels",
         type=Path,
-        help="папка с разметкой вырезок для предразметки (по умолчанию own_labels / live_labels)",
+        help="папка с разметкой вырезок для предразметки (по умолчанию <корень>/labels)",
     )
     parser.add_argument("--extra", type=Path, action="append", default=[], help="папка кадров без манифеста")
     parser.add_argument("--no-prefill", action="store_true", help="только кадры, без детектора")
+    parser.add_argument(
+        "--merge", action="store_true",
+        help="вместо подготовки: перенести размеченное из frames_unannotated в frames_annotated",
+    )
     args = parser.parse_args()
 
+    root = args.manifest.parent
+    if args.merge:
+        merge_annotated(root)
+        return
+    args.out = args.out or root / "frames_unannotated"
+    annotated = root / "frames_annotated"
+    already = {p.name for folder in (annotated, args.out) if folder.exists() for p in folder.iterdir()}
+
     sources = set(args.sources.split(","))
-    queries = [q for q in load_live(args.manifest, include_multi=True) if q.source in sources]
+    queries = [q for q in load_manifest(args.manifest, include_multi=True) if q.source in sources]
     for folder in args.extra:
         queries += extra_queries(folder)
+    queries = [q for q in queries if f"{q.wine_id}__{q.path.stem}.jpg" not in already]
+    print(f"кадров в манифесте и --extra: новых {len(queries)}, уже подготовлено {len(already)}")
+    if not queries:
+        return
     if args.labels is None and not args.no_prefill:
-        args.labels = Path("data/live_labels" if sources & {"live", "eval"} else "data/own_labels")
-    crop_labels = load_crop_labels(args.labels) if args.labels else {}
+        args.labels = root / "labels"
+    crop_labels = load_crop_labels(args.labels) if args.labels and args.labels.exists() else {}
     detector = None if args.no_prefill else BottleDetector(device=pick_device(), mode="bottle")
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -176,10 +218,22 @@ def main() -> None:
             annotations.append(_annotation(image_id, LABEL, crop_to_frame(box, rect, saved, scale)))
             transferred += 1
 
-    (args.out / "_images.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+    with (args.out / "_images.txt").open("a", encoding="utf-8") as f:
+        f.write("\n".join(names) + "\n")
     if detector is not None:
+        prefill_path = args.out / "_prefill.coco.json"
+        if prefill_path.exists():
+            old = json.loads(prefill_path.read_text(encoding="utf-8"))
+            shift = max((i["id"] for i in old["images"]), default=-1) + 1
+            for img in images:
+                img["id"] += shift
+            ann_shift = max((a["id"] for a in old["annotations"]), default=0)
+            for ann in annotations:
+                ann["image_id"] += shift
+                ann["id"] += ann_shift
+            images, annotations = old["images"] + images, old["annotations"] + annotations
         coco = {"images": images, "categories": CATEGORIES, "annotations": annotations}
-        (args.out / "_prefill.coco.json").write_text(
+        prefill_path.write_text(
             json.dumps(coco, ensure_ascii=False, indent=1), encoding="utf-8"
         )
         bottles = sum(1 for a in annotations if a["category_id"] == BOTTLE)

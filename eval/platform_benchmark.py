@@ -2,16 +2,16 @@
 
     uv run python eval/platform_benchmark.py --tag baseline
     uv run python eval/platform_benchmark.py --decider none --candidates 50 --tag retrieval-only
-    uv run python eval/platform_benchmark.py --sources live,own,eval --errors 10   # + свой набор
+    uv run python eval/platform_benchmark.py --manifest data/train/manifest.csv --tag train   # обучающий набор, только для сравнения
 
-Тестовый набор изолирован (`catalog.is_holdout`): `data/live` и `data/eval` не участвуют ни в
+Тестовый набор изолирован (`catalog.is_holdout`): `data/test` и `data/eval` не участвуют ни в
 обучении решающего слоя, ни в подборе порога, ни в обучении детектора — поэтому цифры отсюда
 честные ровно настолько, насколько решающий слой обучен без `--include-holdout`
 (`decider_meta.holdout_isolated` в записи прогона).
 
 Единственный измеритель, который отвечает на вопрос «что увидит скрипт организаторов»: гоняется
 тот самый `WineScanner`, что стоит за `/v1/eval/predict`, с тем же индексом и решающим слоем,
-по кадрам из `data/live/manifest.csv` (`scripts/import_live_photos.py`). До него метрики на
+по кадрам из `data/test/manifest.csv` (`scripts/import_live_photos.py`). До него метрики на
 платформе считались либо на псевдофото из вырезок, либо на трёх публичных кадрах — и ни то,
 ни другое не описывало живую полку.
 
@@ -51,7 +51,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from wine_scanner.catalog import LIVE_MANIFEST, Query, load_live
+from wine_scanner.catalog import TEST_MANIFEST, Query, load_manifest
 from wine_scanner.decide.guard import DEFAULT_MODE as DEFAULT_GUARD
 from wine_scanner.decide.guard import GUARD_MODES
 from wine_scanner.embed import load_image
@@ -326,7 +326,7 @@ def git_head() -> str | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, default=LIVE_MANIFEST)
+    parser.add_argument("--manifest", type=Path, default=TEST_MANIFEST)
     parser.add_argument("--index", type=Path, default=Path("models/index_platform"))
     parser.add_argument(
         "--decider",
@@ -362,9 +362,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--sources",
-        default="live,eval",
-        help="источники кадров через запятую; по умолчанию только изолированный тест "
-        "(live, eval), own — обучающий набор, добавлять лишь для сравнения",
+        default="live,own,eval",
+        help="источники кадров манифеста через запятую (live, own, eval)",
     )
     parser.add_argument(
         "--include-multi", action="store_true", help="брать кадры с несколькими бутылками"
@@ -386,7 +385,7 @@ def main() -> None:
 
     sources = set(args.sources.split(","))
     queries = [
-        q for q in load_live(args.manifest, include_multi=args.include_multi) if q.source in sources
+        q for q in load_manifest(args.manifest, include_multi=args.include_multi) if q.source in sources
     ]
     if args.limit:
         queries = queries[: args.limit]

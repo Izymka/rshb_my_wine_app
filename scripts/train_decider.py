@@ -196,7 +196,7 @@ def main() -> None:
     parser.add_argument(
         "--include-holdout",
         action="store_true",
-        help="учить и на изолированном тестовом наборе (data/live, data/eval) — только для "
+        help="учить и на изолированном тестовом наборе (data/test, data/eval) — только для "
         "сравнения со старыми прогонами, цифры с этим флагом честными не считаются",
     )
     parser.add_argument(
@@ -218,7 +218,7 @@ def main() -> None:
         holdout = [q for q in by_query if is_holdout(q)]
         for q in holdout:
             del by_query[q]
-        print(f"тестовый набор изолирован: {len(holdout)} запросов из data/live и data/eval не в обучении")
+        print(f"тестовый набор изолирован: {len(holdout)} запросов из data/test и data/eval не в обучении")
     else:
         print("ВНИМАНИЕ: --include-holdout — модель учится на тестовом наборе, цифры нечестные")
     if args.only_groups:

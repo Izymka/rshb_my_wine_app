@@ -2,9 +2,9 @@
 
     uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels"
     uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels" \
-        --own data/own_labels --test data/live_labels --init models/label_detector.pt \
+        --own data/train/labels --test data/test/labels --init models/label_detector.pt \
         --own-repeat 20 --epochs 4 --device cuda --out models/label_detector_v2.pt
-    uv run python scripts/train_label_detector.py --data ... --test data/live_labels \
+    uv run python scripts/train_label_detector.py --data ... --test data/test/labels \
         --init models/label_detector.pt --eval-only   # измерить текущий детектор на тесте
 
 Ждёт экспорт в формате COCO: подпапки train/ и valid/, в каждой картинки и _annotations.coco.json.
@@ -15,10 +15,10 @@
 пяти тысяч чужих, и без повторов детектор их не заметит. Чекпойнт отбирается по своей
 валидации. `--init` — старт с уже дообученных весов, а не с COCO: так эпох нужно меньше.
 
-Тестовый набор (`--test`, `data/live_labels` — вырезки кадров российских вин) изолирован:
+Тестовый набор (`--test`, `data/test/labels` — вырезки кадров российских вин) изолирован:
 измеряется целиком после каждой эпохи, но в обучение и отбор чекпойнта не входит, и передать
 его как `--own` скрипт не даст (`catalog.is_holdout`). Для обучения размечаются вырезки своего
-набора — `data/own_labels`, их делает `prepare_label_annotation.py --sources own`.
+набора — `data/train/labels`, их делает `prepare_label_annotation.py --manifest data/train/manifest.csv`.
 
 Сохраняется лучший по своей валидации чекпойнт (`--out`); `--patience N` — ранняя остановка
 после N эпох без роста, `--keep-all` — чекпойнт каждой эпохи рядом (`<out>.epoch-NN.pt`).
@@ -117,13 +117,13 @@ def main() -> None:
         type=Path,
         default=None,
         help="своя разметка для обучения (одна папка, CSV makesense или COCO); "
-        "data/own_labels — вырезки своего набора",
+        "data/train/labels — вырезки своего набора",
     )
     parser.add_argument(
         "--test",
         type=Path,
         default=None,
-        help="изолированный тестовый набор (data/live_labels): только измеряется, целиком, "
+        help="изолированный тестовый набор (data/test/labels): только измеряется, целиком, "
         "в обучение и отбор чекпойнта не входит",
     )
     parser.add_argument(
@@ -151,7 +151,7 @@ def main() -> None:
         if is_holdout(args.own) and not args.include_holdout:
             raise SystemExit(
                 f"{args.own} — изолированный тестовый набор, учить на нём нельзя; "
-                "передайте его как --test, для обучения размечайте data/own_labels"
+                "передайте его как --test, для обучения размечайте data/train/labels"
             )
         own_train, own_valid = split_by_wine(args.own, args.own_valid_share)
         print(

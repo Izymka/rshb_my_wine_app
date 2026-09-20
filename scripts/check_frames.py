@@ -27,7 +27,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from wine_scanner.burst import sharpness
-from wine_scanner.catalog import load_own
+from wine_scanner.catalog import PLATFORM_IMAGES, load_own
 from wine_scanner.detect import CachedCropper, build_cropper
 from wine_scanner.embed import Dinov2Embedder, load_image, pick_device
 
@@ -92,10 +92,10 @@ def main() -> None:
         "--live",
         type=Path,
         default=None,
-        help="манифест живых кадров (data/live/manifest.csv) вместо своего набора; "
+        help="манифест кадров (data/test/manifest.csv или data/train/manifest.csv) вместо своего набора; "
         "эталон берётся из каталога платформы по true_slug",
     )
-    parser.add_argument("--catalog-images", type=Path, default=Path("data/catalog/images"))
+    parser.add_argument("--catalog-images", type=Path, default=PLATFORM_IMAGES)
     args = parser.parse_args()
 
     device = pick_device()
@@ -105,9 +105,9 @@ def main() -> None:
     if args.live:
         # Живые кадры платформы: эталон — вырезка каталога; у незнакомцев эталона нет, для них
         # проверяются только физические свойства кадра.
-        from wine_scanner.catalog import CatalogItem, load_live
+        from wine_scanner.catalog import CatalogItem, load_manifest
 
-        queries = [q for q in load_live(args.live, include_multi=True) if q.source == "live"]
+        queries = [q for q in load_manifest(args.live, include_multi=True) if q.source == "live"]
         slugs = sorted({q.true_id for q in queries if q.known})
         catalog = [
             CatalogItem(slug, args.catalog_images / f"{slug}.png", {})

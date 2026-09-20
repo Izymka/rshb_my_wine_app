@@ -143,6 +143,9 @@ def load_own(root: Path = OWN_ROOT) -> tuple[list[CatalogItem], list[Query]]:
 # ---------------------------------------------------------------------------------------------
 
 PLATFORM_ROOT = Path("data/catalog")
+# Эталоны платформы — вырезанные бутылки, композит на белом, `originals/<slug>.png`. Это
+# исходники: их режет детектор при сборке индекса, руками они не правятся.
+PLATFORM_IMAGES = PLATFORM_ROOT / "originals"
 PLATFORM_DUMP = Path("data/strapi_output0709.csv")
 UPLOADS_ROOT = Path("data/uploads")
 EVAL_ROOT = Path("data/eval")
@@ -251,7 +254,7 @@ def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
     items: list[CatalogItem] = []
     skipped = 0
     for row in table.itertuples(index=False):
-        image_path = root / "images" / f"{row.slug}.png"
+        image_path = root / "originals" / f"{row.slug}.png"
         if not image_path.exists():
             skipped += 1
             continue
@@ -272,18 +275,23 @@ def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
     return items
 
 
-LIVE_MANIFEST = Path("data/live/manifest.csv")
+TEST_ROOT = Path("data/test")
+TRAIN_ROOT = Path("data/train")
+TEST_MANIFEST = TEST_ROOT / "manifest.csv"
+TRAIN_MANIFEST = TRAIN_ROOT / "manifest.csv"
 
 # --- Тестовый набор изолирован ---------------------------------------------------------------
 #
-# Договорённость 17.09.2026: учить что угодно можно на выданном каталоге, синтетике из него и
-# открытых датасетах; кадры российских вин, снятые Ириной (`data/live`), и публичные кадры
-# организаторов (`data/eval`) — только тест. Ни решающий слой, ни детектор, ни порог отказа
-# их не видят. Свой набор `data/own` (импорт, снят во Вьетнаме) для обучения разрешён.
+# Договорённость 17.09.2026, раскладка 18.09.2026: учить что угодно можно на выданном каталоге,
+# синтетике из него, открытых датасетах и `data/train` (свой набор `data/own` — импорт, снят во
+# Вьетнаме — и та часть съёмок российских вин, что не вошла в тест). `data/test` — все снятые
+# вина, которые есть в каталоге, плюс 50 незнакомых с российской полки (выбраны случайно, seed
+# 2026, из 62), — и публичные кадры организаторов `data/eval` — только тест. Ни решающий слой,
+# ни детектор, ни порог отказа их не видят. Внутри `data/test` лежат и кадры под разметку
+# детектора (`frames_*`) с вырезками (`labels`) — они изолированы тем же путём.
 # Проверка — по пути файла: это единственное, что есть у любого запроса в любом файле
 # признаков, и подделать её случайно нельзя.
-# `data/live_labels` — вырезки тех же тестовых кадров под разметку детектора.
-HOLDOUT_ROOTS = (Path("data/live"), EVAL_ROOT, Path("data/live_labels"))
+HOLDOUT_ROOTS = (TEST_ROOT, EVAL_ROOT)
 
 
 def is_holdout(path: str | Path) -> bool:
@@ -292,9 +300,8 @@ def is_holdout(path: str | Path) -> bool:
     return any(parts[: len(root.parts)] == root.parts for root in HOLDOUT_ROOTS)
 
 
-
-def load_live(manifest: Path = LIVE_MANIFEST, include_multi: bool = False) -> list[Query]:
-    """Живые кадры вин платформы по манифесту `scripts/import_live_photos.py`.
+def load_manifest(manifest: Path = TEST_MANIFEST, include_multi: bool = False) -> list[Query]:
+    """Кадры по манифесту `scripts/import_live_photos.py` (`data/test` или `data/train`).
 
     В отличие от `load_own`, эталона рядом с кадрами нет и не нужно: он уже в каталоге
     платформы под `true_slug`. Пустой `true_slug` — вина в каталоге нет, `true_id` получает
@@ -330,6 +337,9 @@ def load_live(manifest: Path = LIVE_MANIFEST, include_multi: bool = False) -> li
             + (" …" if len(missing) > 5 else "")
         )
     return queries
+
+
+load_live = load_manifest  # прежнее имя, до раскладки 18.09 манифест был один — data/live
 
 
 def load_eval_queries(root: Path = EVAL_ROOT) -> list[Path]:

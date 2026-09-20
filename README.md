@@ -69,13 +69,13 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 Каталог платформы (дамп CSV + медиа) → индекс → whitening → признаки → решающий слой:
 
 ```bash
-uv run python scripts/build_catalog.py                      # data/catalog/: catalog.csv + images/<slug>.png
+uv run python scripts/build_catalog.py                      # data/catalog/: catalog.csv + originals/<slug>.png
 uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad \
   --model google/siglip2-so400m-patch16-384 --out models/index_platform      # ~20 мин на ноутбуке
 uv run python scripts/fit_whitening.py --index models/index_platform --dim 256
 uv run python scripts/synthesize_queries.py --n 300         # псевдофото из вырезок каталога
-uv run python scripts/import_live_photos.py                  # живые кадры -> data/live/manifest.csv
-uv run python scripts/build_platform_features.py --sources synthetic,live
+uv run python scripts/import_live_photos.py                  # новые съёмки из data/incoming -> data/test | data/train
+uv run python scripts/build_platform_features.py --sources synthetic,train,test
 uv run python scripts/train_decider.py --features eval/results/features_platform.jsonl \
   --scenario real --live-weight 30 --out models/decider_platform
 ```
@@ -85,7 +85,7 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
 ## Как измеряется
 
 `eval/platform_benchmark.py` гоняет тот же `WineScanner`, что стоит за API, по живым кадрам
-(`data/live/manifest.csv`) и раскладывает путь ответа по ступеням: визуальный ранг верной
+(`data/test/manifest.csv` — изолированный тест: все снятые вина из каталога и 50 незнакомых) и раскладывает путь ответа по ступеням: визуальный ранг верной
 карточки, текстовый ранг, попала ли в окно ре-ранкинга, итоговый top-1, исход (верно /
 близнец / чужое / отказ), ложные приёмы на незнакомых винах. Каждый прогон дописывается в
 `eval/results/platform_runs.jsonl` — это и есть таблица абляций.
