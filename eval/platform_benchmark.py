@@ -193,6 +193,22 @@ def summarize(outcomes: list[Outcome]) -> dict:
             sum(o.verdict == "correct" for o in known), sum(o.answered for o in known)
         ),
         "coverage": rate(sum(o.answered for o in known), n),
+        "known_correct_coverage": rate(sum(o.verdict == "correct" for o in known), n),
+        "overall_answered_precision": rate(
+            sum(o.verdict == "correct" for o in known), sum(o.answered for o in outcomes)
+        ),
+    }
+    # Метрика заказчика: все эти запросы имеют slug в каталоге. Не смешиваем её с
+    # unknown: отказ там оценивается отдельной open-world метрикой ниже.
+    metrics["slug_only"] = {
+        "n": n,
+        "retrieval_top1": metrics["final_top1"],
+        "answer_coverage": metrics["coverage"],
+        "answered_correct": sum(o.verdict == "correct" for o in known),
+        "correct_slug_rate": metrics["known_correct_coverage"],
+        "answered_precision": metrics["answered_precision"],
+        "wrong_or_twin": sum(o.answered and o.verdict != "correct" for o in known),
+        "refused": sum(not o.answered for o in known),
     }
     by_group: dict[str, list[Outcome]] = defaultdict(list)
     for o in unknown:
@@ -271,7 +287,7 @@ def print_report(metrics: dict, wines: list[dict], timing: dict, errors: list[Ou
     v = metrics["verdicts"]
     print(
         f"исходы: верно {v.get('correct', 0)}, близнец {v.get('twin', 0)}, чужое {v.get('other', 0)}, "
-        f"отказ {v.get('refused', 0)}  →  точность среди ответов {fmt(metrics['answered_precision'])}, "
+        f"отказ {v.get('refused', 0)}  ->  точность среди ответов {fmt(metrics['answered_precision'])}, "
         f"покрытие {fmt(metrics['coverage'])}"
     )
     fa = metrics["false_accept"]
@@ -487,6 +503,8 @@ def main() -> None:
                             "path": str(o.query.path),
                             "wine_id": o.query.wine_id,
                             "true_id": o.query.true_id,
+                            "known": o.known,
+                            "answered": o.answered,
                             "group": o.query.group,
                             "vis_rank": o.vis_rank,
                             "txt_rank": o.txt_rank,

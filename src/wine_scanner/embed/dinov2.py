@@ -136,7 +136,8 @@ class Dinov2Embedder:
         """
         if self.precision == "fp32" or self.device.type != "cuda":
             return nullcontext()
-        return torch.autocast("cuda", dtype=torch.float16)
+        dtype = torch.bfloat16 if self.precision == "bf16" else torch.float16
+        return torch.autocast("cuda", dtype=dtype)
 
     def encode_paths(
         self, paths: list[Path], batch_size: int = 16, num_workers: int = 4, progress: bool = True

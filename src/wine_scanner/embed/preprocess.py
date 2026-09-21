@@ -33,12 +33,15 @@ class PadToSquare:
     расходятся. Дополнение полями сохраняет геометрию ценой части полезной площади кадра.
     """
 
+    def __init__(self, fill: tuple[int, int, int] = (124, 116, 104)):
+        self.fill = fill
+
     def __call__(self, image: Image.Image) -> Image.Image:
         width, height = image.size
         side = max(width, height)
         if width == height:
             return image
-        canvas = Image.new("RGB", (side, side), (124, 116, 104))  # средний цвет ImageNet
+        canvas = Image.new("RGB", (side, side), self.fill)
         canvas.paste(image, ((side - width) // 2, (side - height) // 2))
         return canvas
 

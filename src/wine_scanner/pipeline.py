@@ -6,11 +6,11 @@ eval/: бенчмарки собирали те же блоки заново, к
 
 Порядок блоков ровно тот, что закреплён замерами (см. CLAUDE.md и PLAN.md):
 
-    кадр -> каскадная обрезка -> DINOv2 (+whitening) -> FAISS (100 кандидатов)
+    кадр -> RT-DETR бутылка + этикетка -> SigLIP 2 (+whitening) -> FAISS
                               \\-> OCR -> n-граммы + покрытие слов (50 кандидатов)
          слияние RRF + родня по винодельне -> длинный список (текстовые сигналы всем)
          -> окно 25 + подтверждённые текстом сиблинги -> XFeat + RANSAC
-         -> LightGBM -> защита от близнеца -> вероятность -> ответ
+         -> CatBoost -> защита от близнеца -> вероятность -> ответ
 
 Длинный список и окно — два яруса кандидатов (16.09.2026, каталог платформы). Близнецы
 внутри линейки различимы словами, а не картинкой, и слова считаются дёшево: поэтому
@@ -21,7 +21,7 @@ eval/: бенчмарки собирали те же блоки заново, к
 Три вещи, о которых стоит помнить, читая код.
 
 Первое: тяжёлые блоки поднимаются лениво и живут в объекте, а не создаются на запрос. Загрузка
-DINOv2, детектора, EasyOCR и XFeat занимает десятки секунд — в сервисе это делается один раз
+SigLIP 2, детектора, PaddleOCR и XFeat занимает десятки секунд — в сервисе это делается один раз
 на старте, иначе первый же запрос упрётся в таймаут.
 
 Второе: у каждого запроса собирается разбивка времени по блокам. Не для красоты — Э11 требует
@@ -46,11 +46,13 @@ from PIL import Image
 from .analogues import Analogues
 from .burst import fuse_rrf, ranked, sharpness
 from .decide import Decider, PairFeatures, Scored, derive
+from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
 from .decide.guard import SIBLING_ENABLED, sibling_swap, twin_guard
 from .decide.judge import VlmJudge
 from .detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper
-from .embed import DEFAULT_MODEL, Whitening, build_embedder, load_image, pick_device
+from .embed import Whitening, build_embedder, load_image, pick_device
+from .embed.siglip import DEFAULT_SIGLIP_MODEL as DEFAULT_MODEL
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex
 from .rerank import DescriptorStore, XFeatMatcher
@@ -58,7 +60,8 @@ from .vintage import Answer, VintageReader, compare, project, resolve
 
 INDEX_DIR = Path("models/index")
 DECIDER_DIR = Path("models/decider")
-LABEL_WEIGHTS = Path("models/label_detector.pt")
+LABEL_WEIGHTS = Path("models/rtdetr_label")
+
 
 def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, default))
@@ -256,7 +259,7 @@ class WineScanner:
         crop_cache: Path | None = None,
         ocr_cache: bool = False,
         parallel: bool = True,
-        precision: str = "fp32",
+        precision: str | None = None,
         embedder=None,
         index=None,
         text_index=None,
@@ -270,12 +273,16 @@ class WineScanner:
         guard: str = DEFAULT_GUARD,
         sibling: bool = SIBLING_ENABLED,
         judge=None,
+        local_preprocess: str | None = None,
+        ocr_preprocess: str | None = None,
     ):
         self.candidates = candidates
         self.visual_candidates = visual_candidates
         self.text_candidates = text_candidates
         self.family_expansion = (
-            bool(int(os.environ.get("WINE_FAMILY", "1"))) if family_expansion is None else family_expansion
+            bool(int(os.environ.get("WINE_FAMILY", "1")))
+            if family_expansion is None
+            else family_expansion
         )
         # Сколько текстом подтверждённых кандидатов можно добавить в окно сверх основного:
         # ограничение нужно, чтобы длинная линейка не удвоила стоимость ре-ранкинга.
@@ -300,6 +307,14 @@ class WineScanner:
         self.config = (
             json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
         )
+        self.local_preprocess = local_preprocess or self.config.get("local_preprocess", "rgb")
+        precision = precision or self.config.get("precision", "fp32")
+        self.ocr_preprocess = ocr_preprocess or self.config.get("ocr_preprocess", "rgb")
+        if local_preprocess and local_preprocess != self.config.get("local_preprocess", "rgb"):
+            if (Path(index_dir) / "descriptors").exists():
+                raise ValueError(
+                    "Rebuild catalog descriptors for the requested local preprocessing"
+                )
 
         # Whitening (Э5) лежит рядом с индексом и применяется на лету: индекс хранит сырые
         # векторы, а здесь они отбеливаются вместе с каждым запросом. Так преобразование
@@ -317,7 +332,7 @@ class WineScanner:
             "index": digest(
                 [index_dir / "vectors.faiss", index_dir / "meta.json", config_path, whitening_path]
             ),
-            "decider": digest([decider_dir / "model.txt", decider_dir / "meta.json"]),
+            "decider": digest([decider_dir / "model.cbm", decider_dir / "meta.json"]),
         }
 
         # Веса детектора этикетки — те же, что резали каталог при сборке индекса: иначе запрос и
@@ -326,6 +341,12 @@ class WineScanner:
             weights = Path(self.config.get("weights", LABEL_WEIGHTS))
         self.weights = weights
         if embedder is None:
+            expected_hash = self.config.get("label_sha256")
+            if expected_hash:
+                with (Path(weights) / "model.safetensors").open("rb") as stream:
+                    actual_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+                if actual_hash != expected_hash:
+                    raise ValueError("Label weights changed: rebuild the index and decider")
             device = device or pick_device()
             embedder = build_embedder(
                 model_name=self.config.get("model", DEFAULT_MODEL),
@@ -335,6 +356,7 @@ class WineScanner:
                 precision=precision,
                 size=self.config.get("size"),
                 descriptor=self.config.get("descriptor"),
+                pad_color=tuple(self.config.get("pad_color", (124, 116, 104))),
             )
         self.embedder = embedder
         self.cropper = getattr(embedder, "cropper", None)
@@ -366,9 +388,7 @@ class WineScanner:
             item_id: payload.get("image_path")
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
         }
-        self.payload_by_id = dict(
-            zip(self.index.item_ids, self.index.payloads, strict=True)
-        )
+        self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
         # Где на карточке напечатан год. Считается при сборке индекса тем же распознавателем,
         # что и всё остальное, — на запросе это лишний вызов OCR по каждому кандидату.
         # Индекс, собранный до Э8, поля не содержит: тогда год читается только из общего
@@ -390,7 +410,7 @@ class WineScanner:
     def devices(self) -> dict[str, str]:
         """На чём реально считается каждый блок.
 
-        Нужно не для красоты: XFeat и EasyOCR выбирают устройство сами, независимо от того,
+        Нужно не для красоты: XFeat и PaddleOCR выбирают устройство сами, независимо от того,
         что мы передали эмбеддеру, и молча остаться на процессоре здесь легче лёгкого.
         Поле уходит в /health, чтобы после переезда это проверялось одним запросом.
         """
@@ -399,8 +419,8 @@ class WineScanner:
             "precision": str(getattr(self.embedder, "precision", "?")),
             "rerank": str(getattr(self.matcher, "device", "?")),
             "ocr": (
-                getattr(self.ocr, "backend", "easyocr")
-                if getattr(self.ocr, "backend", "easyocr") != "easyocr"
+                getattr(self.ocr, "backend", "paddle")
+                if getattr(self.ocr, "backend", "paddle") != "paddle"
                 else ("cuda" if getattr(self.ocr, "gpu", False) else "cpu")
             ),
             "ocr_fallbacks": str(getattr(self.ocr, "fallbacks", 0)),
@@ -443,7 +463,11 @@ class WineScanner:
         if cached is not None:
             return cached
         self.recomputed_descriptors += 1
-        return self.matcher.describe(self._crop(load_image(path), key), cache_key=key)
+        from .embed.branches import branch_image
+
+        return self.matcher.describe(
+            branch_image(self._crop(load_image(path), key), self.local_preprocess), cache_key=key
+        )
 
     def _text_branch(self, crop: Image.Image, use_cache: bool) -> dict:
         """Текстовая ветка целиком: распознать этикетку и найти по тексту кандидатов.
@@ -453,7 +477,9 @@ class WineScanner:
         """
         timings: dict[str, float] = {}
         started = time.perf_counter()
-        lines = self.ocr.read(crop, use_cache=use_cache)
+        from .embed.branches import branch_image
+
+        lines = self.ocr.read(branch_image(crop, self.ocr_preprocess), use_cache=use_cache)
         text = LabelOCR.joined(lines)
         timings["ocr"] = time.perf_counter() - started
 
@@ -568,6 +594,9 @@ class WineScanner:
 
         with stage("crop"):
             crop = self._crop(image, image_key)
+        from .embed.branches import branch_image
+
+        local_crop = branch_image(crop, self.local_preprocess)
 
         with stage("embed"):
             vector = self.embedder.encode_image(crop).numpy()
@@ -593,13 +622,13 @@ class WineScanner:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="text") as pool:
                 future = pool.submit(self._text_branch, crop, use_cache)
                 with stage("rerank"):
-                    query_features = self.matcher.describe(crop)
+                    query_features = self.matcher.describe(local_crop)
                     self._match(query_features, head, matches)
                 text_result = future.result()
         else:
             text_result = self._text_branch(crop, use_cache)
             with stage("rerank"):
-                query_features = self.matcher.describe(crop)
+                query_features = self.matcher.describe(local_crop)
 
         timings.update(text_result["timings"])
         lines = text_result["lines"]
@@ -615,6 +644,7 @@ class WineScanner:
                 for item_id in long_list
             }
             window = self._window(long_list, signals)
+            window = list(dict.fromkeys([*window, *(hit.item_id for hit in textual[:5])]))
             window_set = set(window)
 
         vis_rank = {h.item_id: i for i, h in enumerate(visual)}
@@ -649,6 +679,9 @@ class WineScanner:
                     inlier_ratio=match.inlier_ratio if match else 0.0,
                     reproj_error=match.reproj_error if match else 0.0,
                     homography_ok=int(match.homography_ok) if match else 0,
+                    geometry_query_coverage=match.query_coverage if match else 0.0,
+                    geometry_candidate_coverage=match.candidate_coverage if match else 0.0,
+                    geometry_normalized_error=match.normalized_reproj_error if match else 0.0,
                     ocr_lines=len(lines),
                     ocr_conf=text_result["confidence"],
                     vintage_known=int(bool(reading)),
@@ -661,15 +694,20 @@ class WineScanner:
                     color_match=signal["color_match"],
                     style_match=signal["style_match"],
                     family=self.text_index.family_of.get(item_id, ""),
+                    **text_pair_features(
+                        " ".join(line.text for line in lines),
+                        str(self.payload_by_id.get(item_id, {}).get("name", "")),
+                        [line.text for line in lines],
+                    ),
                 )
             )
 
         with stage("decide"):
             scored = self.decider.score(rows)
 
-        # Защита от близнеца: правило поверх модели, см. decide/guard.py. Режет вероятность
-        # лучшего ниже порога — ответ превращается в отказ с похожими, а сработавшее правило
-        # видно в ответе.
+        # Защита от близнеца: правило поверх модели, см. decide/guard.py. ``twin`` режет
+        # вероятность ниже порога; ``warn`` сохраняет тот же сигнал, но оставляет лучший
+        # ответ. В закрытом каталоге это даёт пользователю полезную близкую карточку.
         applied: list[str] = []
         # Внутри семьи решает текст: если соседку по линейке этикетка подтверждает лучше,
         # чем лидера модели, наверх идёт она, с уверенностью лидера — семья та же.
@@ -683,8 +721,11 @@ class WineScanner:
         if scored and self.guard != "off":
             twin = twin_guard(scored[0].features, self.guard)
             if twin:
-                scored[0].probability = min(scored[0].probability, self.threshold - GUARD_EPS)
-                applied.append(twin)
+                if self.guard == "warn":
+                    applied.append(f"{twin}_warning")
+                else:
+                    scored[0].probability = min(scored[0].probability, self.threshold - GUARD_EPS)
+                    applied.append(twin)
         guard = "+".join(applied) or None
 
         candidates = [
@@ -721,7 +762,9 @@ class WineScanner:
             vintage=resolve(reading, best.payload) if best else None,
             guard=guard,
             judge=judge_report,
-            analogues=self.analogues.for_item(best.item_id, k=REPORTED_CANDIDATES) if best else None,
+            analogues=self.analogues.for_item(best.item_id, k=REPORTED_CANDIDATES)
+            if best
+            else None,
             confidence=confidence_of(candidates),
             trace=(
                 {

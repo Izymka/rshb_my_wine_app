@@ -71,9 +71,9 @@ def test_crop_box_returns_to_frame_coordinates():
 
 def test_crop_rect_matches_crop():
     """`crop` режет ровно по `crop_rect` — иначе предразметка разъедется с вырезками."""
-    from wine_scanner.detect.bottle import Box, BottleDetector
+    from wine_scanner.detect.bottle import Box, BoxCropper
 
-    detector = BottleDetector.__new__(BottleDetector)
+    detector = BoxCropper()
     detector.mode, detector.margin = "bottle", 0.08
     rect = detector.crop_rect(Box(100, 200, 300, 600, score=0.9), (400, 800))
     assert rect == (84, 168, 316, 632)
@@ -86,7 +86,7 @@ def test_file_names_match_across_unicode_normalization(tmp_path):
     nfc = unicodedata.normalize("NFC", "Ркацители_й.jpg")
     assert nfd != nfc
     make_images(tmp_path, [nfc])  # на диске — «собранная» форма, как на Windows
-    (tmp_path / "_annotations.csv").write_text(f"label,0,0,10,10,{nfd},40,60\n")  # в разметке — с macOS
+    (tmp_path / "_annotations.csv").write_text(f"label,0,0,10,10,{nfd},40,60\n", encoding="utf-8")
     dataset = CocoDetectionDataset(tmp_path)
     assert len(dataset) == 1
     dataset[0]  # файл открывается
@@ -94,7 +94,9 @@ def test_file_names_match_across_unicode_normalization(tmp_path):
 
 def test_missing_files_fail_early_with_a_list(tmp_path):
     make_images(tmp_path, ["a.jpg"])
-    (tmp_path / "_annotations.csv").write_text("label,0,0,10,10,a.jpg,40,60\nlabel,0,0,10,10,gone.jpg,40,60\n")
+    (tmp_path / "_annotations.csv").write_text(
+        "label,0,0,10,10,a.jpg,40,60\nlabel,0,0,10,10,gone.jpg,40,60\n"
+    )
     with pytest.raises(FileNotFoundError, match="gone.jpg"):
         CocoDetectionDataset(tmp_path)
 

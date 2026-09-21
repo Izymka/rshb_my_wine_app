@@ -1,4 +1,4 @@
-"""OCR-бэкенды: разбор ответа облака, откат на EasyOCR, ключи кэша."""
+"""OCR-бэкенды: разбор ответа облака, откат на PaddleOCR, ключи кэша."""
 
 import json
 
@@ -85,16 +85,16 @@ def test_cloud_lines_are_returned(tmp_path, image):
     assert ocr.fallbacks == 0
 
 
-def test_cloud_failure_falls_back_to_easyocr(tmp_path, image, monkeypatch):
+def test_cloud_failure_falls_back_to_paddle(tmp_path, image, monkeypatch):
     ocr = LabelOCR(cache_dir=tmp_path, backend="yandex", cloud=FakeCloud(fail=True))
-    monkeypatch.setattr(ocr, "_read_easyocr", lambda img: [TextLine("местный", 0.5, "cyrillic")])
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: [TextLine("местный", 0.5, "paddle")])
     assert [line.text for line in ocr.read(image)] == ["местный"]
     assert ocr.fallbacks == 1
 
 
-def test_cache_key_differs_between_backends_but_not_for_easyocr(tmp_path, image):
+def test_cache_key_differs_between_backends(tmp_path, image):
     local = LabelOCR(cache_dir=tmp_path)
-    same_local = LabelOCR(cache_dir=tmp_path, backend="easyocr")
+    same_local = LabelOCR(cache_dir=tmp_path, backend="paddle")
     cloud = LabelOCR(cache_dir=tmp_path, backend="yandex", cloud=FakeCloud())
     assert local._cache_path(image) == same_local._cache_path(image)
     assert local._cache_path(image) != cloud._cache_path(image)
@@ -108,7 +108,15 @@ def test_cloud_reads_larger_frames(tmp_path):
 
 def test_unknown_backend_rejected(tmp_path):
     with pytest.raises(ValueError):
-        LabelOCR(cache_dir=tmp_path, backend="paddle")
+        LabelOCR(cache_dir=tmp_path, backend="easyocr")
+
+
+def test_hybrid_calls_cloud_only_for_weak_local_text(tmp_path, image, monkeypatch):
+    cloud = FakeCloud([TextLine("облако", 0.9, "yandex")])
+    ocr = LabelOCR(cache_dir=tmp_path, backend="hybrid", cloud=cloud)
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: [TextLine("коротко", 0.5, "paddle")])
+    assert [line.text for line in ocr.read(image)] == ["облако"]
+    assert cloud.calls == 1
 
 
 def transport(handler):

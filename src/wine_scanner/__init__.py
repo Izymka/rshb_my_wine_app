@@ -1,39 +1,13 @@
-"""Пакет сканера вина.
+"""Wine scanner package and existing macOS OpenMP compatibility settings.
 
-Здесь же улаживается конфликт, из-за которого сквозной пайплайн вообще не запускался.
-
-Суть. В одном процессе оказывается четыре независимые копии OpenMP: своя у torch, своя
-у faiss, своя у scikit-learn и системная из homebrew, которую тянет LightGBM. Штатно macOS
-такое запрещает — вторая инициализация роняет процесс с OMP: Error #15. Флаг
-KMP_DUPLICATE_LIB_OK снимает запрет, но не устраняет причину: код может войти в параллельную
-секцию через одну копию рантайма, а уснуть на барьере другой.
-
-Ровно это и происходило, причём двумя разными способами:
-
-* если faiss успевал загрузиться раньше LightGBM, создание бустера падало сегфолтом;
-* если раньше был LightGBM, процесс намертво вставал при загрузке весов детектора —
-  torch входил в параллельную секцию своей копии и ждал на барьере homebrew-копии.
-
-Второй симптом — это то самое зависание прогона `--text --rerank`, причину которого раньше
-найти не удавалось. Обход был случайным (OCR до создания XFeat), поэтому и работал через раз.
-
-Лечится двумя строчками ниже: LightGBM импортируется первым, а параллелизм torch на CPU
-выключается. Тяжёлые модели считаются на MPS, поэтому потеря невелика — замер задержки
-показал, что в бюджет 2 с мы укладываемся. На Linux (то есть в Docker) проблемы нет вовсе:
-там все колёса собраны против одной libgomp.
+The production decider uses CatBoost. Importing this package no longer eagerly imports
+historical LightGBM. CPU thread limits on macOS remain configurable.
 """
 
 import os
 import sys
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
-# Отсутствие пакета — нормальная ситуация: LightGBM живёт в опциональной группе decide,
-# и на baseline его просто нет.
-try:  # noqa: SIM105
-    import lightgbm  # noqa: F401
-except ImportError:
-    pass
 
 if sys.platform == "darwin":
     import torch

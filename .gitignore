@@ -12,6 +12,7 @@ __pycache__/
 data/*
 !data/splits/
 models/
+rtdetr_data.tgz
 *.faiss
 *.npy
 /.env

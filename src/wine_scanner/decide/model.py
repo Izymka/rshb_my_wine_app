@@ -4,9 +4,9 @@
 печатал метрики и умирал вместе с процессом. Для сервиса нужна ровно обратная вещь: обучить
 один раз, положить на диск, поднимать за миллисекунды.
 
-Формат хранения намеренно текстовый и без pickle:
+Формат хранения без pickle:
 
-* `model.txt` — родной дамп бустера LightGBM, читается любой версией библиотеки;
+* `model.cbm` — родной бинарный формат CatBoost;
 * `meta.json` — коэффициенты калибровки, порог, порядок признаков и метрики прогона.
 
 Pickle-файл sklearn перестаёт открываться после обновления библиотеки, причём молча и в самый
@@ -106,7 +106,11 @@ class Decider:
         if not rows:
             return []
         derived = derive(rows)
-        raw = np.asarray(self.booster.predict(np.asarray(matrix(derived))), dtype=float).ravel()
+        values = np.asarray(matrix(derived))
+        if hasattr(self.booster, "predict_proba"):
+            raw = np.asarray(self.booster.predict_proba(values)[:, 1], dtype=float)
+        else:
+            raw = np.asarray(self.booster.predict(values), dtype=float).ravel()
         probability = self.calibrate(raw)
         scored = [
             Scored(row.item_id, float(p), float(r), features)
@@ -118,10 +122,11 @@ class Decider:
     def save(self, directory: str | Path = DEFAULT_DIR) -> None:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        self.booster.save_model(str(directory / "model.txt"))
+        self.booster.save_model(str(directory / "model.cbm"))
         (directory / "meta.json").write_text(
             json.dumps(
                 {
+                    "backend": "catboost",
                     "calib_weight": self.calib_weight,
                     "calib_bias": self.calib_bias,
                     "threshold": self.threshold,
@@ -137,11 +142,14 @@ class Decider:
 
     @classmethod
     def load(cls, directory: str | Path = DEFAULT_DIR) -> "Decider":
-        import lightgbm as lgb
+        from catboost import CatBoostClassifier
 
         directory = Path(directory)
         meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
-        booster = lgb.Booster(model_file=str(directory / "model.txt"))
+        if meta.get("backend") != "catboost":
+            raise ValueError("Rebuild decider with CatBoost and current feature schema")
+        booster = CatBoostClassifier()
+        booster.load_model(str(directory / "model.cbm"))
         return cls(
             booster=booster,
             calib_weight=meta["calib_weight"],

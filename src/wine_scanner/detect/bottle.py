@@ -1,78 +1,10 @@
-"""Детекция бутылки и этикетки: Faster R-CNN (torchvision) и общая логика выбора рамки.
-
-С 18.09.2026 рабочая архитектура обеих ступеней каскада — RT-DETR (`rtdetr.py`), Faster R-CNN
-остаётся для старых индексов (`models/label_detector*.pt`) и сравнения. Общее для обоих —
-`BoxCropper`: какую бутылку считать снятой и как резать.
-
-Первый шаг Э3, и он не требует ни разметки, ни обучения: в COCO есть класс bottle, а веса
-Faster R-CNN идут вместе с torchvision. Смысл в том, чтобы сначала дёшево измерить, сколько
-даёт сама обрезка кадра, и только потом решать, стоит ли вечер разметки ради собственного
-детектора этикетки. Если прироста не будет — размечать нечего.
-
-Дальше (Э3б) сюда же встанет дообученная голова на один класс «этикетка»: она обрежет плотнее,
-без горлышка и дна, а интерфейс останется тот же.
-"""
+"""Shared box selection, rectangular crops and cascade for RT-DETR."""
 
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
 from PIL import Image
-from torchvision.models.detection import (
-    FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
-    FasterRCNN_MobileNet_V3_Large_FPN_Weights,
-    FasterRCNN_ResNet50_FPN_V2_Weights,
-    fasterrcnn_mobilenet_v3_large_320_fpn,
-    fasterrcnn_mobilenet_v3_large_fpn,
-    fasterrcnn_resnet50_fpn_v2,
-)
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-
-BACKBONES = {
-    "resnet50": (fasterrcnn_resnet50_fpn_v2, FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1),
-    "mobilenet": (
-        fasterrcnn_mobilenet_v3_large_fpn,
-        FasterRCNN_MobileNet_V3_Large_FPN_Weights.COCO_V1,
-    ),
-    "mobilenet320": (
-        fasterrcnn_mobilenet_v3_large_320_fpn,
-        FasterRCNN_MobileNet_V3_Large_320_FPN_Weights.COCO_V1,
-    ),
-}
-
-
-def build_label_detector(
-    backbone: str = "mobilenet320",
-    pretrained: bool = True,
-    trainable_backbone_layers: int | None = None,
-    min_size: int | None = None,
-):
-    """Faster R-CNN с головой на два класса: фон и этикетка.
-
-    Веса COCO оставляем во всём, кроме последнего слоя-классификатора — его меняем под свою
-    задачу. Это и есть стандартное дообучение детектора: бэкбон уже умеет видеть объекты
-    вообще, доучиваем только «что считать целью».
-
-    `trainable_backbone_layers` задаёт, сколько верхних блоков бэкбона размораживается.
-    Чем меньше, тем быстрее обратный проход и тем меньше риск переобучения на небольшой выборке.
-    `min_size` — сторона, к которой детектор ужимает вход; главный рычаг скорости.
-    """
-    factory, weights = BACKBONES[backbone]
-    kwargs = {}
-    if trainable_backbone_layers is not None:
-        kwargs["trainable_backbone_layers"] = trainable_backbone_layers
-
-    model = factory(weights=weights if pretrained else None, **kwargs)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
-
-    if min_size is not None:
-        # Разрешение обязано совпадать между обучением и инференсом, иначе рамки поедут.
-        # Поэтому min_size сохраняется в чекпоинт и применяется при загрузке.
-        model.transform.min_size = (min_size,)
-        model.transform.max_size = int(min_size * 5 / 3)
-    return model
 
 
 @dataclass
@@ -91,9 +23,8 @@ class Box:
 class BoxCropper:
     """Общая часть детекторов: из списка рамок выбрать целевую и вырезать кадр.
 
-    Сама детекция у наследников разная (Faster R-CNN из torchvision, RT-DETR из transformers),
-    а правило «какую бутылку считать снятой» и поля вырезки — одни: иначе смена детектора
-    меняла бы и кроп, и сравнение детекторов измеряло бы не то.
+    Обе ступени используют RT-DETR; правило выбора рамки и поля вырезки общие
+    для индекса, сервиса и измерений качества.
     """
 
     margin: float = 0.08
@@ -187,68 +118,6 @@ class BoxCropper:
         return image.crop(self.crop_rect(box, image.size))
 
 
-class BottleDetector(BoxCropper):
-    """Faster R-CNN: бутылка по весам COCO или этикетка по дообученным весам (`weights_path`)."""
-
-    def __init__(
-        self,
-        device: torch.device | None = None,
-        score_threshold: float = 0.5,
-        margin: float = 0.08,
-        mode: str = "bottle",
-        weights_path: Path | None = None,
-        infer_min_size: int | None = None,
-        backbone: str = "resnet50",
-    ):
-        self.device = device or torch.device("cpu")
-        self.score_threshold = score_threshold
-        self.margin = margin
-        # "bottle" — рамка целиком, "label" — оценка области этикетки по геометрии бутылки.
-        # Для дообученного детектора этикетки режим всегда "bottle": рамка уже и есть этикетка.
-        self.mode = mode
-
-        if weights_path is not None:
-            checkpoint = torch.load(weights_path, map_location="cpu")
-            model = build_label_detector(
-                checkpoint["backbone"], pretrained=False, min_size=checkpoint.get("min_size")
-            )
-            model.load_state_dict(checkpoint["state_dict"])
-            self.model = model.to(self.device).eval()
-            self.preprocess = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1.transforms()
-            self.bottle_label = 1
-            self.mode = "bottle"
-            # Метка для ключа кэша: у дообученного детектора рамки другие, чем у COCO,
-            # и кропы не должны переиспользоваться между ними.
-            self.cache_tag = f"trained:{weights_path.name}"
-            if infer_min_size:
-                # Разрешение инференса выше обучающего. Обычно так делать не следует, но FPN
-                # к смене масштаба устойчив, а на дальних кадрах этикетка при 320 пикселях
-                # просто исчезает. Прирост проверяем замером, а не предположением.
-                self.model.transform.min_size = (infer_min_size,)
-                self.model.transform.max_size = int(infer_min_size * 5 / 3)
-                self.cache_tag += f":min{infer_min_size}"
-            return
-
-        factory, weights = BACKBONES[backbone]
-        self.model = factory(weights=weights).to(self.device).eval()
-        self.preprocess = weights.transforms()
-        # Номер класса берём из метаданных весов, а не константой: в torchvision своя нумерация
-        # на 91 категорию с пропусками, и угаданное число молча отрежет не то.
-        self.bottle_label = weights.meta["categories"].index("bottle")
-        self.cache_tag = f"coco:{backbone}:{mode}"
-
-    @torch.inference_mode()
-    def detect(self, image: Image.Image) -> list[Box]:
-        tensor = self.preprocess(image).to(self.device)
-        output = self.model([tensor])[0]
-        keep = (output["labels"] == self.bottle_label) & (output["scores"] >= self.score_threshold)
-        return [
-            Box(*box.tolist(), score=float(score))
-            for box, score in zip(output["boxes"][keep], output["scores"][keep], strict=True)
-        ]
-
-
-
 class CachedCropper:
     """Обрезка с кэшем на диске.
 
@@ -259,22 +128,43 @@ class CachedCropper:
 
     def __init__(self, detector, cache_dir: Path):
         self.detector = detector
+        self._fingerprint = self._model_fingerprint(detector)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _model_fingerprint(detector) -> str:
+        """Invalidate crops after retraining even when the checkpoint folder is unchanged."""
+        if hasattr(detector, "bottle") and hasattr(detector, "label"):
+            return ":".join(
+                CachedCropper._model_fingerprint(d) for d in (detector.bottle, detector.label)
+            )
+        parts = [str(getattr(detector, "margin", ""))]
+        source = Path(getattr(detector, "source", "__remote__"))
+        for name in ("model.safetensors", "config.json", "preprocessor_config.json"):
+            path = source / name
+            if path.is_file():
+                with path.open("rb") as stream:
+                    parts.append(hashlib.file_digest(stream, "sha256").hexdigest())
+        return ":".join(parts)
 
     def _key(self, path: Path) -> Path:
         stat = path.stat()
         digest = hashlib.sha1(
-            f"{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{self.detector.cache_tag}".encode()
+            (
+                f"{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:"
+                f"{self.detector.cache_tag}:{self._fingerprint}"
+            ).encode()
         ).hexdigest()
-        return self.cache_dir / f"{digest}.jpg"
+        return self.cache_dir / f"{digest}.png"
 
     def __call__(self, path: Path, image: Image.Image) -> Image.Image:
         cached = self._key(path)
         if cached.exists():
             return Image.open(cached).convert("RGB")
         cropped = self.detector.crop(image)
-        cropped.save(cached, quality=95)
+        # Lossless cache: a cache hit must not change pixels relative to the first call.
+        cropped.save(cached, compress_level=1)
         return cropped
 
 

@@ -97,7 +97,12 @@ class CocoDetectionDataset(Dataset):
     def _read_coco(path: Path):
         data = json.loads(path.read_text(encoding="utf-8"))
         images = {img["id"]: img for img in data["images"]}
-        annotations = [(ann["image_id"], tuple(ann["bbox"])) for ann in data["annotations"]]
+        categories = {c["id"]: c["name"].lower() for c in data.get("categories", [])}
+        annotations = [
+            (ann["image_id"], tuple(ann["bbox"]))
+            for ann in data["annotations"]
+            if not categories or categories.get(ann["category_id"]) in {"label", "wine-labels"}
+        ]
         return images, annotations
 
     @staticmethod
@@ -110,7 +115,9 @@ class CocoDetectionDataset(Dataset):
             for row in csv.reader(f):
                 if len(row) < 8 or row[0] == "label_name":  # пустые строки и заголовок
                     continue
-                _, x, y, w, h, name, width, height = row[:8]
+                category, x, y, w, h, name, width, height = row[:8]
+                if category.lower() not in {"label", "wine-labels"}:
+                    continue
                 if name not in ids_by_name:
                     ids_by_name[name] = len(ids_by_name)
                     images[ids_by_name[name]] = {
@@ -185,7 +192,7 @@ def split_by_wine(root: Path, valid_share: float, seed: int = 0):
 def _to_tensor(image):
     from torchvision.transforms import functional as TF
 
-    # Faster R-CNN нормализует вход сам, поэтому здесь только перевод в тензор.
+    # Нормализацию и resize выполняет RTDetrImageProcessor в collate_for.
     return TF.to_tensor(image)
 
 

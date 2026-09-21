@@ -1,30 +1,19 @@
 """Распознавание текста на этикетке.
 
-EasyOCR не умеет держать кириллицу и французский в одном читателе — проверено, отвечает
-«Cyrillic is only compatible with English». Российское вино может быть подписано и так, и так,
-поэтому держим два читателя и объединяем их выводы.
-
-Объединение безопаснее выбора: если читать латинским читателем кириллическую этикетку,
-получится осмысленно выглядящий мусор, который трудно отличить от правды по уверенности.
-А лишние нераспознанные слова в запросе поиску почти не мешают — BM25 считает совпавшие
-термины, несовпавшие просто не дают вклада.
+PP-OCRv5 читает кириллицу и латиницу одной локальной моделью, поэтому текстовая ветка не
+склеивает два несовместимых читателя и не получает латинский «похожий мусор» вместо русского.
+Yandex Vision остаётся точечным облачным резервом для слабого локального чтения.
 """
 
 import hashlib
 import json
 import os
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-import torch
 from PIL import Image
 
 OCR_CACHE = Path("models/ocr_cache")
-
-CYRILLIC_LANGS = ["ru", "en"]
-LATIN_LANGS = ["fr", "en"]
 
 # Сторона, до которой ужимается кадр перед распознаванием.
 #
@@ -34,21 +23,18 @@ LATIN_LANGS = ["fr", "en"]
 # R@50 0.979 / 0.979 / 0.989. Разница в пределах шума набора, то есть выигрыш во времени
 # достаётся бесплатно.
 #
-# Почему лишние пиксели не помогают: EasyOCR внутри приводит найденные строки к своей рабочей
-# высоте, и подача текста в четыре раза крупнее не добавляет ему информации. А вот детектору
-# текста мелкая сетка даже мешает — на 640 группа blur читается лучше, чем на полном размере.
+# Умеренный размер ограничивает задержку локального распознавания и сохраняет мелкий текст.
 DEFAULT_MAX_SIDE = 640
 
-# Версия формата кэша. Меняется, когда в TextLine появляется поле: старые записи его не
-# содержат, и без версии они бы молча подсовывали строки без координат, а блок винтажа
-# просто никогда бы не срабатывал — при полностью зелёных тестах.
-CACHE_VERSION = 2
+# Версия формата и конфигурации кэша. Меняется при новом поле TextLine или модели OCR: иначе
+# старые строки молча попадут в признаки нового CatBoost и смешают два разных читателя.
+CACHE_VERSION = 3
 
-# Читатели. `easyocr` — локальный, работает всегда; `yandex` — облачный Yandex Vision
-# (ocr/yandex.py), при любой ошибке откатывается на EasyOCR. Выбор — переменной окружения
-# WINE_OCR, чтобы сервис и бенчмарк переключались без правки кода.
-BACKENDS = ("easyocr", "yandex")
-DEFAULT_BACKEND = os.environ.get("WINE_OCR", "easyocr")
+# `paddle` — локальная ветка по умолчанию. `yandex` выбирает Vision целиком с локальным
+# откатом. `hybrid` сначала читает PaddleOCR и посылает кадр в Vision только если локальный
+# текст слишком слабый: так облако помогает сложным случаям, а не становится точкой отказа.
+BACKENDS = ("paddle", "yandex", "hybrid")
+DEFAULT_BACKEND = os.environ.get("WINE_OCR", "paddle")
 # Облаку платим за запрос, а не за пиксели, и читает оно мелкий текст лучше на большем кадре.
 CLOUD_MAX_SIDE = 1024
 
@@ -88,26 +74,25 @@ class LabelOCR:
             raise ValueError(f"неизвестный OCR-бэкенд {self.backend!r}, знаю {BACKENDS}")
         # Облачный клиент можно подменить (тесты, другой провайдер): нужен только .read(image).
         self.cloud = cloud
-        if self.cloud is None and self.backend == "yandex":
+        if self.cloud is None and self.backend in {"yandex", "hybrid"}:
             from .yandex import YandexOCR
 
             self.cloud = YandexOCR()
-        # Сколько раз облако не ответило и кадр дочитал EasyOCR. Уходит в /health.
+        # Сколько раз облако не ответило и кадр дочитал PaddleOCR. Уходит в /health.
         self.fallbacks = 0
-        # EasyOCR умеет только CUDA: внутри он проверяет torch.cuda и ничего не знает про MPS.
-        # На ноутбуке это значит процессор и 1.2 с на кадр, на машине с картой — порядок
-        # выигрыша, потому что распознавание здесь самый дорогой блок после ре-ранкинга.
-        self.gpu = torch.cuda.is_available() if gpu is None else gpu
+        self.cloud_calls = 0
+        # Оставлен для обратной совместимости вызывающего кода. PaddleOCR в текущей Windows
+        # сборке работает на CPU; GPU потребует отдельный PaddlePaddle wheel.
+        self.gpu = gpu
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._readers: dict[str, object] = {}
+        self._local = None
 
     def _prepare(self, image: Image.Image) -> Image.Image:
         """Ужать кадр до max_side по длинной стороне.
 
-        Распознавание не выигрывает от лишних пикселей: EasyOCR внутри всё равно приводит
-        строки к своей высоте. Зато время растёт линейно по площади, а это самая дорогая
-        часть всего пайплайна.
+        Распознавание не выигрывает от избыточного разрешения, зато время растёт с площадью.
+        Поэтому ограничение стороны остаётся главным ограничителем задержки OCR.
         """
         side = self.effective_max_side()
         if side is None or max(image.size) <= side:
@@ -117,10 +102,12 @@ class LabelOCR:
         return scaled
 
     def effective_max_side(self) -> int | None:
-        """До какой стороны ужимается кадр: у облака порог выше, чем у EasyOCR."""
+        """До какой стороны ужимается кадр: облако получает более детальный crop."""
         if self.max_side is None:
             return None
-        return max(self.max_side, CLOUD_MAX_SIDE) if self.backend != "easyocr" else self.max_side
+        if self.backend in {"yandex", "hybrid"}:
+            return max(self.max_side, CLOUD_MAX_SIDE)
+        return self.max_side
 
     def _cache_path(self, image: Image.Image) -> Path:
         """Ключ кэша считается по самим пикселям, а не по имени файла.
@@ -138,22 +125,15 @@ class LabelOCR:
         digest.update(
             f"{image.size}:{self.min_confidence}:{self.effective_max_side()}:v{CACHE_VERSION}".encode()
         )
-        # Имя бэкенда попадает в ключ только у не-EasyOCR: иначе обесценился бы кэш на сотни
-        # запросов, накопленный до появления облака, — а он и есть то, чем живёт сборка признаков.
-        if self.backend != "easyocr":
-            digest.update(f":{self.backend}".encode())
+        digest.update(f":{self.backend}".encode())
         return self.cache_dir / f"{digest.hexdigest()}.json"
 
-    def _reader(self, name: str):
-        """Читатели создаются лениво: каждый тянет свою модель распознавания."""
-        if name not in self._readers:
-            import easyocr
+    def _paddle(self):
+        if self._local is None:
+            from .paddle import PaddleOCR
 
-            langs = CYRILLIC_LANGS if name == "cyrillic" else LATIN_LANGS
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                self._readers[name] = easyocr.Reader(langs, gpu=self.gpu, verbose=False)
-        return self._readers[name]
+            self._local = PaddleOCR(min_confidence=self.min_confidence)
+        return self._local
 
     def read(self, image: Image.Image, use_cache: bool = False) -> list[TextLine]:
         """Распознать текст. Кэш включается явно — он нужен бенчмаркам, а не сервису.
@@ -178,27 +158,28 @@ class LabelOCR:
         return lines
 
     def _read_backend(self, image: Image.Image) -> list[TextLine]:
-        if self.backend == "easyocr" or self.cloud is None:
-            return self._read_easyocr(image)
+        if self.backend == "paddle" or self.cloud is None:
+            return self._read_paddle(image)
         from .yandex import OCRBackendError
 
+        local = self._read_paddle(image) if self.backend == "hybrid" else None
+        if local is not None and not self._needs_cloud(local):
+            return local
         try:
-            return self.cloud.read(image)
+            self.cloud_calls += 1
+            cloud = self.cloud.read(image)
+            return cloud or (local or [])
         except OCRBackendError:
             self.fallbacks += 1
-            return self._read_easyocr(image)
+            return local if local is not None else self._read_paddle(image)
 
-    def _read_easyocr(self, image: Image.Image) -> list[TextLine]:
-        array = np.asarray(image)
-        width, height = image.size
-        lines: list[TextLine] = []
-        for name in ("cyrillic", "latin"):
-            for box, text, confidence in self._reader(name).readtext(array):
-                if confidence >= self.min_confidence and text.strip():
-                    lines.append(
-                        TextLine(text.strip(), float(confidence), name, _rect(box, width, height))
-                    )
-        return lines
+    @staticmethod
+    def _needs_cloud(lines: list[TextLine]) -> bool:
+        """Only weak local evidence pays for a Vision request in hybrid mode."""
+        return len(lines) < 3 or max((line.confidence for line in lines), default=0.0) < 0.6
+
+    def _read_paddle(self, image: Image.Image) -> list[TextLine]:
+        return self._paddle().read(image)
 
     def read_digits(self, image: Image.Image, min_confidence: float = 0.1) -> str:
         """Прочитать на маленьком участке только цифры.
@@ -210,32 +191,15 @@ class LabelOCR:
         а от мусора нас всё равно защищает проверка правдоподобия года.
 
         Кэша здесь нет: участок вырезан по геометрии конкретной пары и второй раз не повторится.
-        Читает всегда EasyOCR, независимо от бэкенда: облаку не объяснить «только цифры».
+        Читает локальный PaddleOCR: облаку не объяснить «только цифры», а год не должен
+        делать внешний запрос.
         """
-        result = self._reader("latin").readtext(
-            np.asarray(image), allowlist="0123456789", detail=1
-        )
         return " ".join(
-            text.strip() for _, text, confidence in result if confidence >= min_confidence
-        )
+            "".join(char for char in line.text if char.isdigit())
+            for line in self._read_paddle(image)
+            if line.confidence >= min_confidence
+        ).strip()
 
     @staticmethod
     def joined(lines: list[TextLine]) -> str:
         return " ".join(line.text for line in lines)
-
-
-def _rect(box, width: int, height: int) -> tuple[float, float, float, float]:
-    """Четырёхугольник EasyOCR -> охватывающий прямоугольник в долях кадра.
-
-    EasyOCR отдаёт четыре угла, потому что строка может идти под наклоном. Наклон нам не
-    нужен: участок всё равно вырезается с запасом, а прямоугольник переносится через
-    гомографию четырьмя углами так же, как любой другой.
-    """
-    xs = [float(point[0]) / width for point in box]
-    ys = [float(point[1]) / height for point in box]
-    return (
-        max(0.0, min(xs)),
-        max(0.0, min(ys)),
-        min(1.0, max(xs)),
-        min(1.0, max(ys)),
-    )

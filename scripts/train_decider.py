@@ -23,13 +23,14 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
 from wine_scanner.catalog import is_holdout
 from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures, derive, logit, matrix
+from wine_scanner.decide.features import FEATURE_VERSION
 
 FEATURES_PATH = Path("eval/results/features.jsonl")
 OUT_DIR = Path("models/decider")
@@ -60,7 +61,10 @@ def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
     grouped: dict[str, list[PairFeatures]] = defaultdict(list)
     with path.open(encoding="utf-8") as fh:
         for line in fh:
-            row = PairFeatures.from_dict(json.loads(line))
+            payload = json.loads(line)
+            if payload.get("feature_version") != FEATURE_VERSION:
+                raise ValueError("Rebuild candidate features with the current pipeline")
+            row = PairFeatures.from_dict(payload)
             grouped[row.query].append(row)
     return grouped
 
@@ -96,16 +100,20 @@ def training_rows(
     return rows, labels, weights
 
 
-def make_model() -> LGBMClassifier:
-    return LGBMClassifier(
-        n_estimators=200,
+def make_model() -> CatBoostClassifier:
+    return CatBoostClassifier(
+        iterations=400,
         learning_rate=0.05,
-        num_leaves=15,
-        min_child_samples=20,
+        depth=6,
+        l2_leaf_reg=5,
+        loss_function="Logloss",
+        random_seed=2026,
+        thread_count=4,
+        allow_writing_files=False,
         # Положительных примеров на порядки меньше — по одному верному кандидату на запрос
         # при длинном списке в сотню с лишним строк.
-        class_weight="balanced",
-        verbose=-1,
+        auto_class_weights="Balanced",
+        verbose=False,
     )
 
 
@@ -184,7 +192,7 @@ def main() -> None:
     parser.add_argument(
         "--only-groups",
         default=None,
-        help="учить только на запросах, чья группа начинается с одного из префиксов (через запятую), "
+        help="учить на запросах выбранных групп (префиксы через запятую), "
         "например live- — без псевдофото",
     )
     parser.add_argument(
@@ -192,12 +200,6 @@ def main() -> None:
         type=float,
         default=3.0,
         help="вес живых кадров (group live-*) относительно псевдофото при обучении",
-    )
-    parser.add_argument(
-        "--include-holdout",
-        action="store_true",
-        help="учить и на изолированном тестовом наборе (data/test, data/eval) — только для "
-        "сравнения со старыми прогонами, цифры с этим флагом честными не считаются",
     )
     parser.add_argument(
         "--no-augment-unknown",
@@ -214,13 +216,10 @@ def main() -> None:
         FAMILIES.update(dict(zip(table["slug"], table["winery"], strict=True)))
 
     by_query = load_queries(args.features)
-    if not args.include_holdout:
-        holdout = [q for q in by_query if is_holdout(q)]
-        for q in holdout:
-            del by_query[q]
-        print(f"тестовый набор изолирован: {len(holdout)} запросов из data/test и data/eval не в обучении")
-    else:
-        print("ВНИМАНИЕ: --include-holdout — модель учится на тестовом наборе, цифры нечестные")
+    holdout = [q for q in by_query if is_holdout(q)]
+    for q in holdout:
+        del by_query[q]
+    print(f"Тестовый набор изолирован: исключено {len(holdout)} запросов")
     if args.only_groups:
         prefixes = tuple(args.only_groups.split(","))
         by_query = {q: rows for q, rows in by_query.items() if rows[0].group.startswith(prefixes)}
@@ -237,13 +236,16 @@ def main() -> None:
     splitter = GroupKFold(n_splits=args.folds)
     oof_raw = np.zeros(len(queries))
     oof_correct = np.zeros(len(queries), dtype=bool)
+    oof_item_ids = [""] * len(queries)
     oof_unknown = np.full((2, len(queries)), np.nan)  # 0 — с роднёй, 1 — без родни
 
     for train_idx, test_idx in splitter.split(queries, groups=wines):
         rows, labels, weights = training_rows(
             [by_query[queries[i]] for i in train_idx], args.augment_unknown, args.live_weight
         )
-        model = make_model().fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
+        model = make_model().fit(
+            np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights)
+        )
 
         def predict(candidates: list[PairFeatures], model=model) -> np.ndarray:
             return model.predict_proba(np.asarray(matrix(derive(candidates))))[:, 1]
@@ -254,6 +256,7 @@ def main() -> None:
             best = int(np.argmax(probs))
             oof_raw[i] = probs[best]
             oof_correct[i] = bool(candidates[best].label)
+            oof_item_ids[i] = candidates[best].item_id
             if not known[i]:
                 # Живой незнакомец: его лучший кандидат — то, что сервис ответил бы мимо.
                 continue
@@ -350,14 +353,14 @@ def main() -> None:
     final.fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
 
     decider = Decider(
-        booster=final.booster_,
+        booster=final,
         calib_weight=weight,
         calib_bias=bias,
         threshold=picked["threshold"],
         feature_names=FEATURE_NAMES,
         meta={
             "trained_on": str(args.features),
-            "holdout_isolated": not args.include_holdout,
+            "holdout_isolated": True,
             "queries": len(queries),
             "unknown_queries": int((~known).sum()),
             "wines": len(set(wines)),
@@ -372,9 +375,31 @@ def main() -> None:
             "coverage": picked["coverage"],
             "precision": picked["precision"],
             "false_answer_rate": picked["false_answer_rate"],
+            "feature_importance": dict(
+                zip(FEATURE_NAMES, map(float, final.get_feature_importance()), strict=True)
+            ),
         },
     )
     decider.save(args.out)
+    probabilities = decider.calibrate(oof_raw)
+    with (args.out / "oof_predictions.jsonl").open("w", encoding="utf-8") as stream:
+        for i, query in enumerate(queries):
+            stream.write(
+                json.dumps(
+                    {
+                        "query": query,
+                        "wine": wines[i],
+                        "known": bool(known[i]),
+                        "best_id": oof_item_ids[i],
+                        "correct": bool(oof_correct[i]),
+                        "raw": float(oof_raw[i]),
+                        "calibrated": float(probabilities[i]),
+                        "note": "OOF base model; calibration/threshold fitted on these OOF scores",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     print(f"\nмодель сохранена: {args.out}")
 
 

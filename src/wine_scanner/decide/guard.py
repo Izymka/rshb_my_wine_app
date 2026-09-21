@@ -9,7 +9,7 @@
 Проверка на каталоге показала, что напрашивающееся правило «ни одно различающее слово не
 подтверждено» не срабатывает: у розового портвейна слова «портвейн» и «алушта» — те же, что
 у красного сиблинга, `disc_hit` у красного 2/3. Отличает его только противоречие по цвету:
-на этикетке «розовый», в карточке — Красное. Поэтому режим `twin` (по умолчанию) срабатывает
+на этикетке «розовый», в карточке — Красное. Поэтому режим `twin` срабатывает
 на любом из двух свидетельств:
 
 - слово цвета с этикетки противоречит карточке (`color_match == -1`);
@@ -20,14 +20,17 @@
   винодельню или соседа по ней (`disc_hit == 0` и (`winery_hit` или `disc_contra > 0`)).
 
 Все требуют читаемой этикетки (`ocr_lines >= 3`) и карточки, у которой есть что различать
-(`disc_n > 0`). Режим `strict` — исходное, более узкое правило (обе улики сразу), оставлен
-для сравнения в бенчмарке. `off` — выключено.
+(`disc_n > 0`). Режим `warn` (по умолчанию) оставляет этот сигнал в `guard`, но не
+отменяет ответ. Режим `strict` — исходное, более узкое правило (обе улики сразу),
+оставлен для сравнения в бенчмарке. `off` — выключено.
 """
 
 import os
 
-GUARD_MODES = ("off", "strict", "twin")
-DEFAULT_MODE = os.environ.get("WINE_GUARD", "twin")
+GUARD_MODES = ("off", "strict", "twin", "warn")
+# ``warn`` exposes twin evidence to the client but keeps the best catalogue answer.
+# The closed-world product flow prefers a useful nearest card to a silent refusal.
+DEFAULT_MODE = os.environ.get("WINE_GUARD", "warn")
 MIN_OCR_LINES = 3
 
 
@@ -54,7 +57,10 @@ def twin_guard(features: dict, mode: str = DEFAULT_MODE) -> str | None:
         return "twin"
     # Этикетка читается, у карточки есть сиблинги, а текст не подтверждает ни одного её
     # слова, ни винодельню: ответ держится на одной геометрии, которая близнецов не различает.
-    if no_own_words and features.get("name_cover", 0.0) == 0.0 and features.get("winery_hit", 0) == 0:
+    no_name_or_winery = (
+        features.get("name_cover", 0.0) == 0.0 and features.get("winery_hit", 0) == 0
+    )
+    if no_own_words and no_name_or_winery:
         return "twin"
     return None
 

@@ -16,6 +16,7 @@ def build_embedder(
     precision: str = "fp32",
     size: int | None = None,
     descriptor: str | None = None,
+    pad_color: tuple[int, int, int] = (124, 116, 104),
 ):
     if "siglip" in model_name.lower():
         from .siglip import Siglip2Embedder
@@ -27,6 +28,7 @@ def build_embedder(
             cropper=cropper,
             fit=fit,
             precision=precision,
+            pad_color=pad_color,
         )
     kwargs = {}
     if size is not None:

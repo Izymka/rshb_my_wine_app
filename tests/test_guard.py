@@ -24,6 +24,7 @@ def features(**overrides) -> dict:
     [
         # Розовый Алушта против красной карточки: свои слова частично есть, цвет противоречит.
         (features(color_match=-1), "twin", "twin"),
+        (features(color_match=-1), "warn", "twin"),
         (features(color_match=-1), "strict", None),
         (features(color_match=-1), "off", None),
         # Ни одного своего слова, но винодельня подтверждена.
@@ -37,6 +38,7 @@ def features(**overrides) -> dict:
         (features(disc_hit=0.0, color_match=-1), "strict", "twin"),
         # Нормальный уверенный ответ.
         (features(color_match=1), "twin", None),
+        (features(color_match=1), "warn", None),
         # Этикетка не читается — правилу нечем судить.
         (features(color_match=-1, ocr_lines=1), "twin", None),
         # Карточке нечего различать словами — но цвет противоречит, и этого достаточно

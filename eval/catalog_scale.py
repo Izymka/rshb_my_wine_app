@@ -120,7 +120,7 @@ def main() -> None:
     parser.add_argument("--distractors", type=Path, default=DISTRACTORS)
     parser.add_argument("--limit", type=int, default=None, help="взять не весь набор, для отладки")
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
+    parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument("--out", type=Path, default=RESULTS_PATH)
     parser.add_argument(
         "--vectors",

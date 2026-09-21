@@ -1,4 +1,4 @@
-"""Прогнать каталог через DINOv2 и сложить векторы в FAISS.
+"""Прогнать каталог через SigLIP 2 и сложить нормированные векторы в FAISS.
 
     uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad
 
@@ -9,6 +9,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -17,13 +18,20 @@ from tqdm import tqdm
 
 from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
 from wine_scanner.detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper, detector_kind
-from wine_scanner.embed import DEFAULT_MODEL, build_embedder, load_image, pick_device
+from wine_scanner.embed import build_embedder, load_image, pick_device
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import LabelOCR
 from wine_scanner.rerank import DescriptorStore, XFeatMatcher
 from wine_scanner.vintage import catalog_years, reference_region
 
 CROP_CACHE = Path("models/crop_cache")
+
+
+def file_hash(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def load_catalog(name: str) -> list[CatalogItem]:
@@ -57,8 +65,8 @@ def year_boxes(items: list[CatalogItem], cropper) -> dict[str, tuple]:
     по ним не работает — год для них берётся из общего текста этикетки или не берётся вовсе.
     """
     # Боксы года на карточках каталога не должны зависеть от WINE_OCR: облако их не считает
-    # так же, и индекс перестал бы воспроизводиться. Каталог читает всегда EasyOCR.
-    ocr = LabelOCR(backend="easyocr")
+    # так же, и индекс перестал бы воспроизводиться. Каталог читает всегда PaddleOCR.
+    ocr = LabelOCR(backend="paddle")
     found: dict[str, tuple] = {}
     for item in tqdm(items, desc="год на карточках"):
         image = load_image(item.image_path)
@@ -76,13 +84,13 @@ def main() -> None:
     parser.add_argument(
         "--catalog", default="platform", choices=["platform", "own", "xwines", "own+xwines"]
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default="google/siglip2-so400m-patch16-384")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
         "--detect", choices=["bottle", "label", "trained", "cascade"], default="cascade"
     )
     parser.add_argument("--fit", default="pad", choices=["center_crop", "squash", "pad"])
-    parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
+    parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument(
         "--limit", type=int, default=None, help="взять первые N карточек, для проверки"
     )
@@ -104,7 +112,16 @@ def main() -> None:
     )
     parser.add_argument("--rerank-max-side", type=int, default=640)
     parser.add_argument("--rerank-points", type=int, default=2048)
+    parser.add_argument(
+        "--local-preprocess", choices=["rgb", "gray", "clahe2", "clahe4"], default="rgb"
+    )
+    parser.add_argument(
+        "--ocr-preprocess", choices=["rgb", "gray", "clahe2", "clahe4"], default="rgb"
+    )
+    parser.add_argument("--pad-color", default="255,255,255")
+    parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp16")
     args = parser.parse_args()
+    from wine_scanner.embed.branches import branch_image
 
     items = load_catalog(args.catalog)
     if args.limit:
@@ -121,6 +138,8 @@ def main() -> None:
             else None
         ),
         fit=args.fit,
+        precision=args.precision,
+        pad_color=tuple(map(int, args.pad_color.split(","))),
     )
     print(f"модель: {args.model}, устройство: {device}, размерность: {embedder.dim}")
 
@@ -130,6 +149,14 @@ def main() -> None:
     # моделью их можно взять из уже собранного — это полтора часа против минут.
     reused_boxes: dict[str, tuple] = {}
     if args.reuse_from is not None:
+        old_config = json.loads((args.reuse_from / "config.json").read_text(encoding="utf-8"))
+        expected = {
+            "local_preprocess": args.local_preprocess,
+            "detect": args.detect,
+            "label_sha256": file_hash(args.weights / "model.safetensors"),
+        }
+        if any(old_config.get(k) != v for k, v in expected.items()):
+            raise ValueError("Cannot reuse descriptors with different detector/preprocessing")
         old_meta = json.loads((args.reuse_from / "meta.json").read_text(encoding="utf-8"))
         for item_id, payload in zip(old_meta["item_ids"], old_meta["payloads"], strict=True):
             if payload.get("vintage_box"):
@@ -180,16 +207,23 @@ def main() -> None:
                 continue
             image = load_image(item.image_path)
             crop = embedder.cropper(item.image_path, image) if embedder.cropper else image
-            store.save(item.item_id, matcher.describe(crop))
+            store.save(item.item_id, matcher.describe(branch_image(crop, args.local_preprocess)))
         print(f"дескрипторов: {len(store)}")
 
     (args.out / "config.json").write_text(
         json.dumps(
             {
                 "model": args.model,
+                "embedding_sha256": file_hash(Path(args.model) / "model.safetensors"),
+                "embedding_provenance": json.loads(
+                    (Path(args.model) / "provenance.json").read_text(encoding="utf-8")
+                )
+                if (Path(args.model) / "provenance.json").exists()
+                else None,
+                "label_sha256": file_hash(args.weights / "model.safetensors"),
                 "detect": args.detect,
                 "detector": detector_kind(args.weights),
-                "bottle_model": COCO_BOTTLE_MODEL if detector_kind(args.weights) == "rtdetr" else "torchvision-coco",
+                "bottle_model": COCO_BOTTLE_MODEL,
                 "fit": args.fit,
                 "weights": str(args.weights),
                 "catalog": args.catalog,
@@ -197,6 +231,10 @@ def main() -> None:
                 "size": embedder.size,
                 "descriptor": embedder.descriptor,
                 "dim": embedder.dim,
+                "pad_color": list(map(int, args.pad_color.split(","))),
+                "local_preprocess": args.local_preprocess,
+                "ocr_preprocess": args.ocr_preprocess,
+                "precision": args.precision,
             },
             ensure_ascii=False,
             indent=2,

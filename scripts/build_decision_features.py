@@ -45,7 +45,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=OUT_PATH)
     parser.add_argument("--candidates", type=int, default=CANDIDATES)
-    parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
+    parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--ocr-max-side", type=int, default=DEFAULT_MAX_SIDE)
     args = parser.parse_args()

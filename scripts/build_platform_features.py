@@ -26,7 +26,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from wine_scanner.catalog import TEST_MANIFEST, TRAIN_MANIFEST, load_manifest
-from wine_scanner.decide import PairFeatures
+from wine_scanner.decide import FEATURE_NAMES, PairFeatures
+from wine_scanner.decide.features import FEATURE_VERSION
 from wine_scanner.embed import load_image
 from wine_scanner.pipeline import RetrievalOnlyDecider, WineScanner
 
@@ -65,9 +66,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--sources",
-        default="synthetic,train,test",
+        default="synthetic,train",
         help="какие источники запросов брать, через запятую: synthetic, train "
-        "(data/train/manifest.csv — свой набор и незнакомцы вне теста), test (data/test/manifest.csv, "
+        "(data/train/manifest.csv — свои кадры вне теста), test (data/test/manifest.csv, "
         "включая data/eval; только для бенчмарка, в обучение не попадает)",
     )
     parser.add_argument(
@@ -114,6 +115,21 @@ def main() -> None:
         print(f"перенесено пар из {args.keep_from}: {len(kept)}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path = args.out.with_suffix(".meta.json")
+    metadata = {
+        "feature_version": FEATURE_VERSION,
+        "feature_names": list(FEATURE_NAMES),
+        "pipeline_version": scanner.version,
+        "index_config": scanner.config,
+        "sources": sorted(sources),
+    }
+    if args.resume and args.out.exists():
+        if (
+            not metadata_path.exists()
+            or json.loads(metadata_path.read_text(encoding="utf-8")) != metadata
+        ):
+            raise ValueError("Cannot resume features from another pipeline/configuration")
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     done: set[str] = set()
     if args.resume and args.out.exists():
         for line in args.out.read_text(encoding="utf-8").splitlines():
@@ -126,11 +142,14 @@ def main() -> None:
             fh.write(line + "\n")
         for query in tqdm(queries, desc="признаки"):
             result = scanner.identify(load_image(query["path"]), image_key=query["path"])
+            lines = []
             for candidate in result.candidates:
                 row = PairFeatures.from_dict(candidate.features)
                 row.query, row.true_id, row.group = query["path"], query["true_id"], query["group"]
-                fh.write(json.dumps(row.to_dict(), ensure_ascii=False) + "\n")
+                lines.append(json.dumps(row.to_dict(), ensure_ascii=False) + "\n")
                 written += 1
+            fh.write("".join(lines))
+            fh.flush()
     print(f"записано пар: {written} в {args.out}")
 
 

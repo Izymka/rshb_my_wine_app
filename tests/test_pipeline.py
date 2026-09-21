@@ -1,6 +1,6 @@
 """Проверка логики сборки пайплайна — без единой нейросети.
 
-Тяжёлые блоки (детектор, DINOv2, EasyOCR, XFeat) подменяются заглушками. Смысл в том, чтобы
+Тяжёлые блоки (детектор, DINOv2, PaddleOCR, XFeat) подменяются заглушками. Смысл в том, чтобы
 проверяемым оказалось ровно то, что ломается тихо: порядок кандидатов, состав признаков,
 поведение порога отказа. Ошибка в любом из этих мест не роняет процесс — она просто делает
 ответы хуже, и заметить её на глаз в выдаче почти невозможно.
@@ -388,7 +388,7 @@ def test_twin_guard_refuses_rose_label_on_red_card():
         lines=lines,
         visual_candidates=6,
     )
-    guarded = build_family_scanner(**kwargs).identify(image=None)
+    guarded = build_family_scanner(**kwargs, guard="twin").identify(image=None)
     # Текст может переставить сиблинга наверх («белый Алушта» подтверждён не хуже), но
     # цвет противоречит любому из них — итог в любом случае отказ с пометкой twin.
     assert guarded.best.item_id in {"krasnyy", "belyy"}
@@ -399,6 +399,10 @@ def test_twin_guard_refuses_rose_label_on_red_card():
     unguarded = build_family_scanner(**kwargs, guard="off", sibling=False).identify(image=None)
     assert unguarded.answered is True
     assert unguarded.guard is None
+
+    warned = build_family_scanner(**kwargs, guard="warn").identify(image=None)
+    assert warned.answered is True
+    assert warned.guard == "twin_warning"
 
 
 def test_twin_guard_stays_quiet_when_label_confirms_the_card():

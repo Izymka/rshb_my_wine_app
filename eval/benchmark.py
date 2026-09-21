@@ -23,7 +23,7 @@ import numpy as np
 
 from wine_scanner.burst import fuse_rrf, ranked
 from wine_scanner.catalog import Query, load_own, load_xwines
-from wine_scanner.detect import BottleDetector, CachedCropper, CascadeCropper
+from wine_scanner.detect import CachedCropper, build_cropper
 from wine_scanner.embed import DEFAULT_MODEL, Dinov2Embedder, load_image, pick_device
 from wine_scanner.index import SearchHit, VectorIndex
 from wine_scanner.ocr import DEFAULT_MAX_SIDE, LabelOCR, TextIndex, catalog_document
@@ -102,11 +102,15 @@ def main() -> None:
         "--tag", default="baseline", help="как называется эта конфигурация в ablation"
     )
     parser.add_argument(
-        "--fit", default=None, choices=["center_crop", "squash", "pad"],
+        "--fit",
+        default=None,
+        choices=["center_crop", "squash", "pad"],
         help="как область приводится к квадрату; по умолчанию squash при детекции",
     )
     parser.add_argument(
-        "--weights", type=Path, default=Path("models/label_detector.pt"),
+        "--weights",
+        type=Path,
+        default=Path("models/rtdetr_label"),
         help="веса дообученного детектора этикетки для --detect trained",
     )
     parser.add_argument(
@@ -123,15 +127,7 @@ def main() -> None:
     parser.add_argument("--rerank-max-side", type=int, default=640)
     parser.add_argument("--rerank-points", type=int, default=2048)
     parser.add_argument("--matcher", default="lighterglue", choices=["lighterglue", "descriptors"])
-    parser.add_argument(
-        "--bottle-backbone", default="resnet50", choices=["resnet50", "mobilenet", "mobilenet320"],
-        help="бэкбон первой ступени каскада",
-    )
-    parser.add_argument(
-        "--detect-min-size", type=int, default=None,
-        help="переопределить разрешение входа детектора на инференсе",
-    )
-    parser.add_argument("--errors", type=int, default=10, help="сколько худших случаев показать")
+    parser.add_argument("--errors", type=int, default=10, help="number of errors to display")
     args = parser.parse_args()
 
     own_catalog, queries = load_own()
@@ -144,20 +140,8 @@ def main() -> None:
         f"карточек в индексе: {len(catalog)}"
     )
 
-    cropper = None
-    if args.detect == "cascade":
-        bottle = BottleDetector(device=pick_device(), mode="bottle", backbone=args.bottle_backbone)
-        label = BottleDetector(device=pick_device(), weights_path=args.weights)
-        cropper = CachedCropper(CascadeCropper(bottle, label), CROP_CACHE)
-    elif args.detect:
-        weights = args.weights if args.detect == "trained" else None
-        detector = BottleDetector(
-            device=pick_device(),
-            mode=args.detect,
-            weights_path=weights,
-            infer_min_size=args.detect_min_size,
-        )
-        cropper = CachedCropper(detector, CROP_CACHE)
+    detector = build_cropper(args.detect, args.weights, pick_device())
+    cropper = CachedCropper(detector, CROP_CACHE) if detector else None
 
     embedder = Dinov2Embedder(
         model_name=args.model, descriptor=args.descriptor, cropper=cropper, fit=args.fit
@@ -235,9 +219,7 @@ def main() -> None:
             lines = ocr.read(crop_of(query.path), use_cache=True)
             text_hits = text_index.search(LabelOCR.joined(lines), top_k=RECALL_K)
             text_ids = [h.item_id for h in text_hits]
-            text_ranks.append(
-                text_ids.index(query.true_id) if query.true_id in text_ids else -1
-            )
+            text_ranks.append(text_ids.index(query.true_id) if query.true_id in text_ids else -1)
             # RRF складывает позиции, а не оценки: шкалы косинуса и текстового счёта
             # несопоставимы, приводить их друг к другу пришлось бы подбором коэффициентов.
             fused = fuse_rrf([[h.item_id for h in hits], text_ids])

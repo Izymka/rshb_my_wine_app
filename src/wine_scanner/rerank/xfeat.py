@@ -25,7 +25,7 @@ class MatchFeatures:
     """Признаки одной пары «запрос — кандидат».
 
     Все они пойдут на Э10 в решающий слой, поэтому возвращаем набор, а не одно число:
-    LightGBM сам разберётся, как их взвесить, а мы на этом этапе не угадываем.
+    CatBoost обучается взвешивать эти признаки по размеченным парам.
     """
 
     matches: int  # сколько точек сопоставилось по дескрипторам
@@ -42,6 +42,9 @@ class MatchFeatures:
     # входят не в долях, а в пикселях уменьшенных копий.
     query_size: tuple[int, int] | None = None
     candidate_size: tuple[int, int] | None = None
+    query_coverage: float = 0.0
+    candidate_coverage: float = 0.0
+    normalized_reproj_error: float = 0.0
 
     @property
     def score(self) -> float:
@@ -51,7 +54,7 @@ class MatchFeatures:
 
 EMPTY = MatchFeatures(0, 0, 0.0, 0.0, False)
 
-# Поля, которые не являются признаками: это геометрия для Э8, а не числа для LightGBM.
+# Поля, которые не являются признаками: матрица геометрии для проекции области года.
 GEOMETRY_FIELDS = ("homography", "query_size", "candidate_size")
 
 
@@ -81,6 +84,11 @@ class XFeatMatcher:
         # мы читаем с диска и кладём на `self.device`. Разойдись эти два устройства, и на
         # машине с GPU всё падало бы при первом же сопоставлении, причём далеко от причины.
         self.device = torch.device(device) if device is not None else self.model.dev
+        if self.matcher == "lighterglue" and self.model.lighterglue is None:
+            from importlib import import_module
+
+            package = type(self.model).__module__.rsplit(".", 1)[0]
+            self.model.lighterglue = import_module(f"{package}.lighterglue").LighterGlue()
         if self.device != self.model.dev:
             self.model.dev = self.device
             self.model.net = self.model.net.to(self.device)
@@ -184,6 +192,14 @@ class XFeatMatcher:
         projected = cv2.perspectiveTransform(points_c[mask].reshape(-1, 1, 2), homography)
         error = float(np.linalg.norm(projected.reshape(-1, 2) - points_q[mask], axis=1).mean())
 
+        def coverage(points, size):
+            if not size or min(size) <= 0:
+                return 0.0
+            return min(1.0, float(cv2.contourArea(cv2.convexHull(points))) / (size[0] * size[1]))
+
+        qsize = query.get("image_size", ())
+        csize = candidate.get("image_size", ())
+
         return MatchFeatures(
             matches=n_matches,
             inliers=inliers,
@@ -195,6 +211,9 @@ class XFeatMatcher:
             # ранних выходов выше возвращать нечего — гомографии там нет.
             query_size=tuple(query.get("image_size", ())) or None,
             candidate_size=tuple(candidate.get("image_size", ())) or None,
+            query_coverage=coverage(points_q[mask], qsize),
+            candidate_coverage=coverage(points_c[mask], csize),
+            normalized_reproj_error=error / max(float(np.linalg.norm(qsize)), 1.0),
         )
 
 

@@ -291,13 +291,18 @@ TRAIN_MANIFEST = TRAIN_ROOT / "manifest.csv"
 # детектора (`frames_*`) с вырезками (`labels`) — они изолированы тем же путём.
 # Проверка — по пути файла: это единственное, что есть у любого запроса в любом файле
 # признаков, и подделать её случайно нельзя.
-HOLDOUT_ROOTS = (TEST_ROOT, EVAL_ROOT)
+HOLDOUT_ROOTS = (TEST_ROOT, EVAL_ROOT, Path("data/live"), Path("data/live_labels"))
 
 
 def is_holdout(path: str | Path) -> bool:
     """Кадр из изолированного тестового набора — учиться на нём нельзя."""
-    parts = Path(path).parts
-    return any(parts[: len(root.parts)] == root.parts for root in HOLDOUT_ROOTS)
+    resolved = Path(path).resolve()
+    if any(resolved.is_relative_to(root.resolve()) for root in HOLDOUT_ROOTS):
+        return True
+    derived = Path("data/derived").resolve()
+    return resolved.is_relative_to(derived) and bool(
+        {"test", "eval", "live", "live_labels"} & set(resolved.relative_to(derived).parts)
+    )
 
 
 def load_manifest(manifest: Path = TEST_MANIFEST, include_multi: bool = False) -> list[Query]:

@@ -1,5 +1,9 @@
 # Сканер российских вин для платформы «Своё Вино»
 
+Состояние после переноса с Mac и перехода на RT-DETR: [аудит 20.09.2026](docs/RTDETR_STATUS.md).
+Разбор кропов и разметки: [ноутбук](notebooks/02_rtdetr_crop_audit.ipynb).
+Переобучение, padding и OCR/XFeat: [эксперименты](notebooks/03_pipeline_rebuild_experiments.ipynb).
+
 Фотография этикетки → карточка вина из каталога платформы, калиброванная уверенность, честный
 отказ с похожими и аналогами, если вина в каталоге нет. Хакатон РСХБ, сентябрь 2026.
 
@@ -49,19 +53,19 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 |---|---|---|
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform`) |
 | `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform`) |
-| `WINE_OCR` | `easyocr` | `yandex` — Yandex Vision OCR с откатом на EasyOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
+| `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_VLM` | `0` | `1` — VLM-судья на спорных случаях |
 | `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `yandex`, — | Провайдер судьи и откат: `yandex` (Yandex AI Studio, без VPN) / `openai` (любой OpenAI-совместимый чат: `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) |
 | `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID` | — (ключ OCR), — | Ключ AI Studio: роль `ai.languageModels.user`, область ключа `yc.ai.languageModels.execute`; модели `YANDEX_VLM_MODEL` (`qwen3.6-35b-a3b`) и `YANDEX_LLM_MODEL` (`yandexgpt-5-lite`) |
 | `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`yandex` / `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |
-| `WINE_GUARD` | `twin` | Защита от близнеца: `twin` / `strict` / `off` |
+| `WINE_GUARD` | `warn` | Защита от близнеца: `warn` возвращает карточку с предупреждением; `twin` / `strict` отказывают, `off` выключает правило |
 | `WINE_RERANK_CANDIDATES` | `25` | Окно ре-ранкинга локальными признаками; на видеокарте 50 |
 | `WINE_VISUAL_CANDIDATES`, `WINE_TEXT_CANDIDATES` | `100`, `50` | Ширина визуальной и текстовой веток |
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
 | `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
 | `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес сервиса для интерфейса |
 
-Без единого внешнего ключа сервис полностью работоспособен: EasyOCR локально, судья и
+Без единого внешнего ключа сервис полностью работоспособен: PaddleOCR локально, судья и
 сомелье выключены.
 
 ## Сборка артефактов
@@ -80,7 +84,7 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
   --scenario real --live-weight 30 --out models/decider_platform
 ```
 
-Веса детектора этикетки (`models/label_detector.pt`) обучаются `scripts/train_label_detector.py`.
+Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.
 
 ## Как измеряется
 
@@ -106,13 +110,13 @@ uv run python -m pytest tests/                # 130+ тестов без еди�
 api/            FastAPI: /scan, /v1/eval/predict, /health, /catalog/image/{slug}, /sommelier
 web/            Nuxt 3, mobile-first интерфейс в стилистике портала
 src/wine_scanner/
-  detect/       детекция бутылки и этикетки (каскад Faster R-CNN)
+  detect/       детекция бутылки и этикетки (каскад RT-DETR)
   embed/        SigLIP 2 / DINOv2 (фабрика по config.json) + whitening
   index/        FAISS
-  ocr/          EasyOCR / Yandex Vision, сворачивание алфавитов, n-граммный текстовый индекс, атрибуты
+  ocr/          PaddleOCR / Yandex Vision, сворачивание алфавитов, n-граммный текстовый индекс, атрибуты
   rerank/       XFeat + LighterGlue + RANSAC
   vintage/      год урожая
-  decide/       LightGBM, калибровка, защита от близнеца, VLM-судья
+  decide/       CatBoost, калибровка, защита от близнеца, VLM-судья
   analogues.py  аналоги из других виноделен
   sommelier.py  цифровой сомелье
   pipeline.py   сквозной WineScanner — единственная точка входа

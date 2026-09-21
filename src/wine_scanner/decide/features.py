@@ -44,11 +44,30 @@ FEATURE_NAMES = (
     "style_match",
     "disc_contra",
     "txt_margin",
+    "vis_distance",
+    "vis_available",
+    "vis_top12_gap",
+    "vis_mean",
+    "vis_std",
+    "vis_zscore",
+    "txt_top1_score",
+    "txt_top2_score",
+    "txt_top3_score",
+    "txt_top4_score",
+    "txt_top5_score",
+    "txt_in_top5",
+    "name_levenshtein_distance",
+    "name_jaro_winkler",
+    "name_best_line_jaro",
+    "name_token_set_ratio",
+    "geometry_query_coverage",
+    "geometry_candidate_coverage",
+    "geometry_normalized_error",
 )
 
 # Меняется вместе с FEATURE_NAMES. Пишется в meta решающего слоя и проверяется при загрузке:
 # несовпадение версии — сигнал переобучить, а не молча считать по чужим колонкам.
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 
 
 @dataclass
@@ -116,6 +135,14 @@ class PairFeatures:
     vintage_text: int = 0  # результат одного лишь общего OCR
     vintage_zoom: int = 0  # результат одного лишь увеличения по гомографии
     vintage_ref: str = ""  # по чьей геометрии вырезался участок
+    name_levenshtein_distance: float = 1.0
+    name_jaro_winkler: float = 0.0
+    name_best_line_jaro: float = 0.0
+    name_token_set_ratio: float = 0.0
+    feature_version: int = FEATURE_VERSION
+    geometry_query_coverage: float = 0.0
+    geometry_candidate_coverage: float = 0.0
+    geometry_normalized_error: float = 0.0
 
     @property
     def label(self) -> int:
@@ -138,6 +165,12 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
     случайный сосед. А вот отрыв от лучшего кандидата информативен всегда — он показывает,
     насколько модель колеблется. Это ровно та величина, которой не хватало для порога отказа.
     """
+    import numpy as np
+
+    visual = sorted((r.vis_score for r in rows if r.vis_rank < 999), reverse=True)
+    text_top = sorted((r for r in rows if r.txt_rank < 999), key=lambda r: r.txt_rank)[:5]
+    vis_mean = float(np.mean(visual)) if visual else 0.0
+    vis_std = float(np.std(visual)) if visual else 0.0
     best_vis = max((r.vis_score for r in rows), default=0.0)
     best_inliers = max((r.inliers for r in rows), default=0)
     total_inliers = sum(r.inliers for r in rows) or 1
@@ -149,6 +182,20 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
     out = []
     for row in rows:
         data = row.to_dict()
+        data["vis_available"] = int(row.vis_rank < 999)
+        # IndexFlatIP operates on L2-normalized vectors: score is cosine similarity.
+        # No vector coordinate is included in the feature matrix.
+        data["vis_distance"] = 1.0 - row.vis_score if row.vis_rank < 999 else 2.0
+        data["vis_top12_gap"] = visual[0] - visual[1] if len(visual) > 1 else 0.0
+        data["vis_mean"], data["vis_std"] = vis_mean, vis_std
+        data["vis_zscore"] = (
+            (row.vis_score - vis_mean) / vis_std if vis_std > 1e-8 and row.vis_rank < 999 else 0.0
+        )
+        for rank in range(5):
+            data[f"txt_top{rank + 1}_score"] = (
+                text_top[rank].txt_score if rank < len(text_top) else -1.0
+            )
+        data["txt_in_top5"] = int(row.txt_rank < 5)
         data["vis_gap"] = best_vis - row.vis_score
         data["inliers_gap"] = best_inliers - row.inliers
         # Улика за сиблинга: лучшее подтверждение различающих слов у другой карточки той же
@@ -179,3 +226,29 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
 
 def matrix(rows: list[dict]) -> list[list[float]]:
     return [[float(row[name]) for name in FEATURE_NAMES] for row in rows]
+
+
+def text_pair_features(text: str, name: str, lines: list[str]) -> dict:
+    """Normalized edit distance and string similarities; no ground-truth text is used."""
+    from rapidfuzz import fuzz
+    from rapidfuzz.distance import JaroWinkler, Levenshtein
+
+    from ..ocr.normalize import fold
+
+    query, candidate = fold(text), fold(name)
+    valid = bool(query and candidate)
+    return {
+        "name_levenshtein_distance": Levenshtein.normalized_distance(query, candidate)
+        if valid
+        else 1.0,
+        "name_jaro_winkler": JaroWinkler.normalized_similarity(query, candidate) if valid else 0.0,
+        "name_best_line_jaro": max(
+            (
+                JaroWinkler.normalized_similarity(fold(line), candidate)
+                for line in lines
+                if fold(line) and candidate
+            ),
+            default=0.0,
+        ),
+        "name_token_set_ratio": fuzz.token_set_ratio(query, candidate) / 100 if valid else 0.0,
+    }

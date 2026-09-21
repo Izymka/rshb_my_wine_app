@@ -85,7 +85,7 @@ def check(group: str, side: int, sharp: float, fill: float, cos: float | None) -
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wine", default=None, help="проверить одну папку, иначе весь набор")
-    parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
+    parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument("--sheet", type=Path, default=None, help="куда сохранить лист кропов")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(

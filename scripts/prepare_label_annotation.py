@@ -23,16 +23,11 @@
    `data/train/labels/_annotations.csv` (COCO JSON, если он предложен, тоже подходит —
    `_annotations.coco.json`; загрузчик `detect/dataset.py` понимает оба).
 
-Потом на машине с видеокартой:
-
-    uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels" \\
-        --test data/test/labels --init models/label_detector.pt --eval-only                # до
-    uv run python scripts/train_label_detector.py --data "data/third-party datasets/wine-labels" \\
-        --own data/train/labels --test data/test/labels --init models/label_detector.pt \\
-        --own-repeat 20 --epochs 4 --device cuda --out models/label_detector_v2.pt       # после
-
-Новый детектор меняет кропы, значит индекс и дескрипторы пересобираются (`build_index.py`
-с `--weights models/label_detector_v2.pt`), и только потом — бенчмарк до/после.
+Для переноса уже существующей разметки исходных кадров используйте
+scripts/audit_rtdetr_crops.py: он сохраняет точное преобразование и COCO-разметку кропов.
+Для обучения RT-DETR используйте scripts/train_rtdetr.py на проверенных train/valid;
+тест передаётся только с --eval-only после выбора чекпойнта.
+Новый детектор требует пересборки индекса и дескрипторов, затем сквозного бенчмарка.
 """
 
 import argparse

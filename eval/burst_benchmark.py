@@ -38,7 +38,7 @@ TOP_K = 50
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fps", type=float, default=3.0)
-    parser.add_argument("--weights", type=Path, default=Path("models/label_detector.pt"))
+    parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
     parser.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args()
 

@@ -55,7 +55,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from wine_scanner.catalog import TEST_MANIFEST, Query, load_manifest
-from wine_scanner.detect import BottleDetector, CocoDetectionDataset
+from wine_scanner.detect import CocoDetectionDataset, bottle_detector
 from wine_scanner.embed import load_image, pick_device
 
 CATEGORIES = [{"id": 1, "name": "bottle"}, {"id": 2, "name": "label"}]
@@ -92,7 +92,9 @@ def load_crop_labels(root: Path) -> dict[str, tuple[tuple[int, int], list[tuple]
     if (root / CocoDetectionDataset.COCO_FILE).exists():
         images, annotations = CocoDetectionDataset._read_coco(root / CocoDetectionDataset.COCO_FILE)
     elif (root / CocoDetectionDataset.CSV_FILE).exists():
-        images, annotations = CocoDetectionDataset._read_makesense_csv(root / CocoDetectionDataset.CSV_FILE)
+        images, annotations = CocoDetectionDataset._read_makesense_csv(
+            root / CocoDetectionDataset.CSV_FILE
+        )
     else:
         return {}
     boxes = defaultdict(list)
@@ -106,7 +108,9 @@ def load_crop_labels(root: Path) -> dict[str, tuple[tuple[int, int], list[tuple]
 
 def extra_queries(folder: Path) -> list[Query]:
     """Кадры без манифеста (полки `data/own/shelf_raw`): вино — имя папки."""
-    paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".heic"})
+    paths = sorted(
+        p for p in folder.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".heic"}
+    )
     return [Query(path=p, true_id="", group="shelf", wine_id=folder.name) for p in paths]
 
 
@@ -121,7 +125,9 @@ def merge_annotated(root: Path) -> None:
         raise SystemExit(f"файл {csv_src} пуст")
     done = {r["image_name"] for r in rows}
     dst.mkdir(exist_ok=True)
-    existing = list(csv.DictReader(csv_dst.open(encoding="utf-8", newline=""))) if csv_dst.exists() else []
+    existing = (
+        list(csv.DictReader(csv_dst.open(encoding="utf-8", newline=""))) if csv_dst.exists() else []
+    )
     with csv_dst.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -137,8 +143,12 @@ def merge_annotated(root: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=TEST_MANIFEST)
-    parser.add_argument("--out", type=Path, help="по умолчанию <корень манифеста>/frames_unannotated")
-    parser.add_argument("--max-side", type=int, default=1600, help="ужать кадр для разметки; 0 — оригинал")
+    parser.add_argument(
+        "--out", type=Path, help="по умолчанию <корень манифеста>/frames_unannotated"
+    )
+    parser.add_argument(
+        "--max-side", type=int, default=1600, help="ужать кадр для разметки; 0 — оригинал"
+    )
     parser.add_argument(
         "--sources", default="live,own,eval", help="какие кадры манифеста брать: live, own, eval"
     )
@@ -147,10 +157,13 @@ def main() -> None:
         type=Path,
         help="папка с разметкой вырезок для предразметки (по умолчанию <корень>/labels)",
     )
-    parser.add_argument("--extra", type=Path, action="append", default=[], help="папка кадров без манифеста")
+    parser.add_argument(
+        "--extra", type=Path, action="append", default=[], help="папка кадров без манифеста"
+    )
     parser.add_argument("--no-prefill", action="store_true", help="только кадры, без детектора")
     parser.add_argument(
-        "--merge", action="store_true",
+        "--merge",
+        action="store_true",
         help="вместо подготовки: перенести размеченное из frames_unannotated в frames_annotated",
     )
     args = parser.parse_args()
@@ -161,7 +174,9 @@ def main() -> None:
         return
     args.out = args.out or root / "frames_unannotated"
     annotated = root / "frames_annotated"
-    already = {p.name for folder in (annotated, args.out) if folder.exists() for p in folder.iterdir()}
+    already = {
+        p.name for folder in (annotated, args.out) if folder.exists() for p in folder.iterdir()
+    }
 
     sources = set(args.sources.split(","))
     queries = [q for q in load_manifest(args.manifest, include_multi=True) if q.source in sources]
@@ -174,7 +189,12 @@ def main() -> None:
     if args.labels is None and not args.no_prefill:
         args.labels = root / "labels"
     crop_labels = load_crop_labels(args.labels) if args.labels and args.labels.exists() else {}
-    detector = None if args.no_prefill else BottleDetector(device=pick_device(), mode="bottle")
+    if crop_labels and not args.no_prefill:
+        raise SystemExit(
+            "Legacy crops have no saved crop transform; cannot reconstruct frame annotations "
+            "with a new detector. Use --no-prefill or annotate original frames."
+        )
+    detector = None if args.no_prefill else bottle_detector("rtdetr", pick_device())
     args.out.mkdir(parents=True, exist_ok=True)
 
     names, images, annotations, warnings = [], [], [], []
@@ -190,7 +210,9 @@ def main() -> None:
             thumb.save(target, quality=90)
         names.append(name)
         image_id = len(images)
-        images.append({"id": image_id, "file_name": name, "width": thumb.width, "height": thumb.height})
+        images.append(
+            {"id": image_id, "file_name": name, "width": thumb.width, "height": thumb.height}
+        )
         if detector is None:
             continue
 
@@ -198,9 +220,17 @@ def main() -> None:
         boxes = detector.detect(image)
         for box in boxes:
             annotations.append(
-                _annotation(image_id, BOTTLE, (box.x1 * scale[0], box.y1 * scale[1],
-                                               (box.x2 - box.x1) * scale[0], (box.y2 - box.y1) * scale[1]),
-                            score=box.score)
+                _annotation(
+                    image_id,
+                    BOTTLE,
+                    (
+                        box.x1 * scale[0],
+                        box.y1 * scale[1],
+                        (box.x2 - box.x1) * scale[0],
+                        (box.y2 - box.y1) * scale[1],
+                    ),
+                    score=box.score,
+                )
             )
         if name not in crop_labels:
             continue
@@ -233,14 +263,16 @@ def main() -> None:
                 ann["id"] += ann_shift
             images, annotations = old["images"] + images, old["annotations"] + annotations
         coco = {"images": images, "categories": CATEGORIES, "annotations": annotations}
-        prefill_path.write_text(
-            json.dumps(coco, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        prefill_path.write_text(json.dumps(coco, ensure_ascii=False, indent=1), encoding="utf-8")
         bottles = sum(1 for a in annotations if a["category_id"] == BOTTLE)
-        print(f"предразметка: бутылок {bottles}, этикеток перенесено {transferred} "
-              f"из {sum(len(v[1]) for v in crop_labels.values())} в {args.out}/_prefill.coco.json")
+        print(
+            f"предразметка: бутылок {bottles}, этикеток перенесено {transferred} "
+            f"из {sum(len(v[1]) for v in crop_labels.values())} в {args.out}/_prefill.coco.json"
+        )
         if warnings:
-            (args.out / "_prefill_warnings.txt").write_text("\n".join(warnings) + "\n", encoding="utf-8")
+            (args.out / "_prefill_warnings.txt").write_text(
+                "\n".join(warnings) + "\n", encoding="utf-8"
+            )
             print(f"проверить в первую очередь ({len(warnings)}): {args.out}/_prefill_warnings.txt")
     print(f"кадров для разметки: {len(names)} в {args.out}/ — дальше makesense.ai, см. docstring")
 

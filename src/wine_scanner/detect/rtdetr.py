@@ -13,9 +13,8 @@ Apache 2.0 (LICENSES.md). Интерфейс тот же, что у `BottleDetec
 выбор целевой бутылки и поля вырезки — из общего `BoxCropper`, поэтому смена детектора не
 меняет правило «какую бутылку считать снятой».
 
-Какая ветка используется, определяется весами: папка (`save_pretrained`) — RT-DETR, файл
-`.pt` — Faster R-CNN (`detect.build_cropper`). Индекс хранит путь к весам в `config.json`,
-и запрос режется тем же детектором, что и каталог.
+Используются только папки RT-DETR (`save_pretrained`). Старые `.pt`-индексы необходимо
+пересобрать. Индекс хранит путь к весам в `config.json`; запрос и каталог режутся одинаково.
 """
 
 from pathlib import Path
@@ -29,7 +28,7 @@ COCO_BOTTLE_MODEL = "PekingU/rtdetr_r18vd"
 
 
 class RTDetrDetector(BoxCropper):
-    """RT-DETR: бутылка по весам COCO (`target="bottle"`) или этикетка по своим (`target="label"`)."""
+    """RT-DETR: COCO bottle weights or fine-tuned label weights."""
 
     def __init__(
         self,
@@ -65,23 +64,40 @@ class RTDetrDetector(BoxCropper):
         id2label = {int(k): v for k, v in self.model.config.id2label.items()}
         matches = [i for i, name in id2label.items() if name == target]
         if not matches:
-            raise ValueError(f"{self.source}: нет класса {target!r} среди {sorted(id2label.values())[:5]}…")
+            raise ValueError(f"{self.source}: missing class {target!r}")
         self.target_label = matches[0]
         name = Path(self.source).name
-        self.cache_tag = f"rtdetr:{name}:{target}:{mode}:t{score_threshold}:a{min_area_share}:c{int(require_center)}"
+        self.cache_tag = (
+            f"rtdetr:{name}:{target}:{mode}:t{score_threshold}"
+            f":a{min_area_share}:c{int(require_center)}"
+        )
 
     @torch.inference_mode()
     def detect(self, image: Image.Image) -> list[Box]:
-        rgb = image.convert("RGB")
-        inputs = self.processor(images=rgb, return_tensors="pt")
+        return self.detect_batch([image])[0]
+
+    @torch.inference_mode()
+    def detect_batch(self, images: list[Image.Image]) -> list[list[Box]]:
+        """Batch inference with boxes in each original image's pixel coordinates."""
+        if not images:
+            return []
+        images = [image.convert("RGB") for image in images]
+        inputs = self.processor(images=images, return_tensors="pt")
         outputs = self.model(pixel_values=inputs["pixel_values"].to(self.device))
-        result = self.processor.post_process_object_detection(
+        results = self.processor.post_process_object_detection(
             outputs,
             threshold=self.score_threshold,
-            target_sizes=torch.tensor([[rgb.height, rgb.width]]),
-        )[0]
-        keep = result["labels"] == self.target_label
-        return [
-            Box(*box.tolist(), score=float(score))
-            for box, score in zip(result["boxes"][keep], result["scores"][keep], strict=True)
-        ]
+            target_sizes=torch.tensor([[im.height, im.width] for im in images]),
+        )
+        batches = []
+        for result in results:
+            keep = result["labels"] == self.target_label
+            batches.append(
+                [
+                    Box(*box.tolist(), score=float(score))
+                    for box, score in zip(
+                        result["boxes"][keep], result["scores"][keep], strict=True
+                    )
+                ]
+            )
+        return batches

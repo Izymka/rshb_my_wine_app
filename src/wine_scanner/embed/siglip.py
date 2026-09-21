@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from transformers import AutoModel
 
 from .dinov2 import Dinov2Embedder, pick_device
-from .preprocess import build_transform
+from .preprocess import PadToSquare, build_transform
 
 SIGLIP_MEAN = (0.5, 0.5, 0.5)
 SIGLIP_STD = (0.5, 0.5, 0.5)
@@ -40,15 +40,25 @@ class Siglip2Embedder(Dinov2Embedder):
         cropper=None,
         fit: str | None = None,
         precision: str = "fp32",
+        pad_color: tuple[int, int, int] = (124, 116, 104),
     ):
         # Не зовём родительский __init__: он грузит модель как DINOv2 и ищет register-токены.
         self.device = device or pick_device()
         self.precision = precision
+        self.pad_color = tuple(pad_color)
         self.size = size or siglip_size(model_name)
         self.descriptor = "pooled"
         self.cropper = cropper
         self.fit = fit or ("squash" if cropper is not None else "center_crop")
-        self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
+        dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(precision, torch.float32)
+        full_model = AutoModel.from_pretrained(model_name, dtype=dtype)
+        # Only the vision tower is needed for image retrieval. Keep the exact pooled output
+        # of get_image_features while avoiding the unused text tower in GPU memory.
+        self.model = full_model.vision_model.to(self.device).eval()
+        # Fixed-resolution SigLIP 2 checkpoints reuse the `siglip` architecture/config.
+        # Generation is identified by the official weight source, not this class name.
+        if "siglip2" not in str(model_name).lower():
+            raise ValueError("Use the verified SigLIP 2 checkpoint/source")
         self.num_registers = 0
 
     @property
@@ -58,12 +68,15 @@ class Siglip2Embedder(Dinov2Embedder):
         return int(getattr(config, "projection_dim", None) or vision.hidden_size)
 
     def transform(self):
-        return build_transform(self.size, self.fit, mean=SIGLIP_MEAN, std=SIGLIP_STD)
+        transform = build_transform(self.size, self.fit, mean=SIGLIP_MEAN, std=SIGLIP_STD)
+        if self.fit == "pad":
+            transform.transforms[0] = PadToSquare(self.pad_color)
+        return transform
 
     @torch.inference_mode()
     def encode_batch(self, batch: torch.Tensor) -> torch.Tensor:
         with self._autocast():
-            pixel_values = batch.to(self.device)
+            pixel_values = batch.to(self.device, dtype=next(self.model.parameters()).dtype)
             if hasattr(self.model, "get_image_features"):
                 vectors = self.model.get_image_features(pixel_values=pixel_values)
             else:

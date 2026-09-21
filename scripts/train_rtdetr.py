@@ -1,31 +1,7 @@
-"""Дообучение RT-DETR на один класс «этикетка» — соперник Faster R-CNN из каскада.
+"""Train RT-DETR on label annotations; select checkpoints on validation wines only.
 
-    uv run python scripts/train_rtdetr.py --data "data/third-party datasets/wine-labels" \\
-        --own data/train/labels --test data/test/labels --device cuda --epochs 12 \\
-        --out models/rtdetr_label
-    uv run python scripts/train_rtdetr.py --data ... --test data/test/labels \\
-        --init models/rtdetr_label --eval-only                 # измерить сохранённую модель
-    uv run python scripts/train_rtdetr.py --data ... --limit 8 --epochs 1 --out /tmp/rtdetr-smoke
-                                                               # проверка кода на процессоре
-
-Зачем второй детектор. Faster R-CNN в каскаде режет края этикетки (замер 17.09 на своей
-разметке: IoU 0.818 против 0.882 на чужой валидации). RT-DETR — детектор-трансформер без
-якорей и без NMS, на COCO точнее и быстрее R-CNN того же размера; ТЗ хакатона скорость тоже
-оценивает. Сравниваем по одной и той же метрике на одном и том же изолированном тесте
-(`--test data/test/labels`): IoU лучшей рамки с разметкой и доля кадров с IoU ≥ 0.75 — ровно
-то, что нужно для обрезки. Победитель встаёт в каскад вместо `label_detector.pt`.
-
-Лицензия: реализация из HuggingFace transformers и веса `PekingU/rtdetr_r18vd` — Apache 2.0
-(LICENSES.md). Ultralytics-версия RT-DETR не используется — AGPL.
-
-Сохраняется лучшая по своей валидации модель (папка `--out`, история эпох в `training.json`);
-`--patience N` останавливает обучение после N эпох без роста, `--keep-all` дополнительно
-складывает модель каждой эпохи в `<out>/epoch-NN/`.
-
-Данные и правила те же, что у `train_label_detector.py`: Roboflow wine-labels как основа,
-своя разметка `--own` (деление по винам, повтор `--own-repeat`), тест только измеряется
-(`catalog.is_holdout` не даст передать его как `--own`). Обучение — на видеокарте: R18 на
-640 px на процессоре идёт часами, `--limit` нужен только чтобы убедиться, что код проходит.
+Use scripts/audit_rtdetr_crops.py first to export annotations in bottle-crop coordinates.
+Test data is evaluated only with --eval-only, never after each training epoch.
 """
 
 import argparse
@@ -39,7 +15,7 @@ from torchvision.ops import box_iou
 from tqdm import tqdm
 
 from wine_scanner.catalog import is_holdout
-from wine_scanner.detect import CocoDetectionDataset, split_by_wine
+from wine_scanner.detect import Box, BoxCropper, CocoDetectionDataset, split_by_wine
 
 PRETRAINED = "PekingU/rtdetr_r18vd"
 LABEL_ID = 0
@@ -101,22 +77,29 @@ def collate_for(processor):
 
 
 def evaluate(model, processor, loader, device) -> dict:
-    """Та же метрика, что у Faster R-CNN: IoU лучшей рамки и доля кадров с IoU ≥ 0.75."""
+    """IoU production-selected box at threshold 0.3; missing predictions count as zero."""
     model.eval()
     ious, found, total = [], 0, 0
     with torch.inference_mode():
         for batch in tqdm(loader, desc="валидация", leave=False):
             outputs = model(pixel_values=batch["pixel_values"].to(device))
             results = processor.post_process_object_detection(
-                outputs, threshold=0.0, target_sizes=batch["orig_sizes"]
+                outputs, threshold=0.3, target_sizes=batch["orig_sizes"]
             )
-            for result, gt in zip(results, batch["gt_boxes"], strict=True):
+            for result, gt, size in zip(
+                results, batch["gt_boxes"], batch["orig_sizes"], strict=True
+            ):
                 total += 1
                 if len(result["boxes"]) == 0:
                     ious.append(0.0)
                     continue
                 found += 1
-                best = result["boxes"][result["scores"].argmax()].unsqueeze(0).cpu()
+                boxes = [
+                    Box(*b.tolist(), score=float(score))
+                    for b, score in zip(result["boxes"], result["scores"], strict=True)
+                ]
+                selected = BoxCropper().pick(boxes, (int(size[1]), int(size[0])))
+                best = torch.tensor([[selected.x1, selected.y1, selected.x2, selected.y2]])
                 ious.append(float(box_iou(best, gt).max()))
     return {
         "detection_rate": found / max(total, 1),
@@ -134,12 +117,19 @@ def report(title: str, metrics: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=Path, required=True, help="Roboflow wine-labels (train/, valid/)")
+    parser.add_argument(
+        "--data", type=Path, required=True, help="Roboflow wine-labels (train/, valid/)"
+    )
     parser.add_argument("--out", type=Path, default=Path("models/rtdetr_label"))
-    parser.add_argument("--init", default=PRETRAINED, help="стартовые веса: имя на HF или своя папка")
-    parser.add_argument("--own", type=Path, default=None, help="своя разметка для обучения (data/train/labels)")
-    parser.add_argument("--test", type=Path, default=None, help="изолированный тест (data/test/labels)")
-    parser.add_argument("--include-holdout", action="store_true", help="разрешить --own на тесте (нечестно)")
+    parser.add_argument(
+        "--init", default=PRETRAINED, help="стартовые веса: имя на HF или своя папка"
+    )
+    parser.add_argument(
+        "--own", type=Path, default=None, help="своя разметка для обучения (data/train/labels)"
+    )
+    parser.add_argument(
+        "--test", type=Path, default=None, help="изолированный тест (data/test/labels)"
+    )
     parser.add_argument("--own-repeat", type=int, default=20)
     parser.add_argument("--own-valid-share", type=float, default=0.2)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -157,11 +147,21 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--backbone-lr", type=float, default=1e-5)
+    parser.add_argument("--precision", choices=["fp32", "bf16", "fp16"], default="bf16")
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--min-epochs", type=int, default=5)
     parser.add_argument("--limit", type=int, default=None, help="взять N кадров, для проверки кода")
     parser.add_argument("--eval-only", action="store_true")
     args = parser.parse_args()
+    if is_holdout(args.data) or (args.own is not None and is_holdout(args.own)):
+        raise SystemExit("Holdout data cannot be used for training/validation selection")
+    if args.test is not None and not args.eval_only:
+        raise SystemExit("Use --test only with --eval-only after selecting the checkpoint")
 
     device = torch.device(args.device)
+    torch.manual_seed(args.seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
     processor = load_processor(args.init)
     model = load_model(args.init).to(device)
     collate = collate_for(processor)
@@ -174,22 +174,30 @@ def main() -> None:
 
     own_train = own_valid = None
     if args.own is not None:
-        if is_holdout(args.own) and not args.include_holdout:
+        if is_holdout(args.own):
             raise SystemExit(
                 f"{args.own} — изолированный тестовый набор, учить на нём нельзя; "
                 "передайте его как --test, для обучения размечайте data/train/labels"
             )
         own_train, own_valid = split_by_wine(args.own, args.own_valid_share)
-        print(f"своя разметка: train {len(own_train)}, valid {len(own_valid)} кадров (деление по винам)")
+        print(
+            f"своя разметка: train {len(own_train)}, valid {len(own_valid)} "
+            "кадров (деление по винам)"
+        )
     test_set = CocoDetectionDataset(args.test) if args.test is not None else None
     if test_set is not None:
         if args.limit:
             test_set.ids = test_set.ids[: max(4, args.limit // 4)]
         print(f"тестовый набор: {len(test_set)} кадров из {args.test} — только замер")
-    print(f"train: {len(train_set)}, valid: {len(valid_set)}, устройство: {device}, старт: {args.init}")
+    print(
+        f"train: {len(train_set)}, valid: {len(valid_set)}, "
+        f"устройство: {device}, старт: {args.init}"
+    )
 
     def loader(dataset, shuffle):
-        return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, collate_fn=collate, num_workers=0)
+        return DataLoader(
+            dataset, batch_size=args.batch_size, shuffle=shuffle, collate_fn=collate, num_workers=0
+        )
 
     train_source = train_set
     if own_train is not None and len(own_train):
@@ -208,29 +216,44 @@ def main() -> None:
         return
 
     # Бэкбон уже видел COCO — ему шаг меньше, чем декодеру и голове.
-    backbone_params = [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad]
-    other_params = [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]
+    backbone_params = [
+        p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad
+    ]
+    other_params = [
+        p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad
+    ]
     optimizer = torch.optim.AdamW(
-        [{"params": backbone_params, "lr": args.backbone_lr}, {"params": other_params, "lr": args.lr}],
+        [
+            {"params": backbone_params, "lr": args.backbone_lr},
+            {"params": other_params, "lr": args.lr},
+        ],
         weight_decay=1e-4,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    amp_enabled = device.type == "cuda" and args.precision != "fp32"
+    amp_dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
+    scaler = torch.amp.GradScaler(enabled=amp_enabled and args.precision == "fp16")
 
     best_iou, best_epoch, stale, history = -1.0, 0, 0, []
     for epoch in range(1, args.epochs + 1):
         model.train()
-        started, running = time.time(), 0.0
+        started, running, skipped = time.time(), 0.0, 0
         for batch in tqdm(train_loader, desc=f"эпоха {epoch}", leave=False):
             labels = [{k: v.to(device) for k, v in item.items()} for item in batch["labels"]]
-            with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+            with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=amp_dtype):
                 outputs = model(pixel_values=batch["pixel_values"].to(device), labels=labels)
+            if not torch.isfinite(outputs.loss):
+                raise RuntimeError(f"Non-finite loss in epoch {epoch}")
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(outputs.loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            if not torch.isfinite(grad_norm) and not scaler.is_enabled():
+                raise RuntimeError(f"Non-finite gradient in epoch {epoch}")
+            old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            skipped += scaler.get_scale() < old_scale
             running += float(outputs.loss.detach())
         scheduler.step()
 
@@ -240,21 +263,51 @@ def main() -> None:
             f"IoU {metrics['mean_iou']:.3f}, IoU>=0.75 {metrics['iou@0.75']:.3f}, "
             f"найдено {metrics['detection_rate']:.3f}, {time.time() - started:.0f} с"
         )
-        # Отбор чекпойнта — по своей валидации, если она есть; тест только печатается.
+        external_metrics = dict(metrics)
+        # Checkpoint selection uses validation wines only.
         if own_loader is not None:
             metrics = evaluate(model, processor, own_loader, device)
             report("  свои кадры (valid)", metrics)
-        if test_loader is not None:
-            report("  ТЕСТ (не влияет на отбор)", evaluate(model, processor, test_loader, device))
-        history.append({"epoch": epoch, **metrics})
+        history.append(
+            {
+                "epoch": epoch,
+                **metrics,
+                "external_valid": external_metrics,
+                "loss": running / max(len(train_loader), 1),
+                "skipped_steps": skipped,
+                "gradient_scale": scaler.get_scale(),
+            }
+        )
+        print(f"  skipped optimizer steps: {skipped}, scale: {scaler.get_scale()}", flush=True)
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
 
-        def save(where: Path) -> None:
+        def save(where: Path, saved_epoch: int, selected_epoch: int) -> None:
             where.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(where)
             processor.save_pretrained(where)
             (where / "training.json").write_text(
                 json.dumps(
-                    {"init": args.init, "epoch": epoch, "best_epoch": best_epoch, "history": history},
+                    {
+                        "init": args.init,
+                        "seed": args.seed,
+                        "precision": args.precision,
+                        "hyperparameters": {
+                            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+                        },
+                        "epoch": saved_epoch,
+                        "best_epoch": selected_epoch,
+                        "data": str(args.data),
+                        "own": str(args.own) if args.own else None,
+                        "evaluation": "production-pick-threshold-0.3",
+                        "own_train_files": [own_train.images[i]["file_name"] for i in own_train.ids]
+                        if own_train
+                        else [],
+                        "own_valid_files": [own_valid.images[i]["file_name"] for i in own_valid.ids]
+                        if own_valid
+                        else [],
+                        "history": history,
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -262,14 +315,14 @@ def main() -> None:
             )
 
         if args.keep_all:
-            save(args.out / f"epoch-{epoch:02d}")
+            save(args.out / f"epoch-{epoch:02d}", epoch, best_epoch)
         if metrics["mean_iou"] > best_iou:
             best_iou, best_epoch, stale = metrics["mean_iou"], epoch, 0
-            save(args.out)
+            save(args.out, epoch, best_epoch)
             print(f"  сохранено: {args.out} (IoU {best_iou:.3f})")
         else:
             stale += 1
-            if args.patience and stale >= args.patience:
+            if args.patience and stale >= args.patience and epoch >= args.min_epochs:
                 print(f"  ранняя остановка: {stale} эпох без роста, лучшая — {best_epoch}")
                 break
 
