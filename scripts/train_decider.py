@@ -19,6 +19,7 @@
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -226,6 +227,91 @@ def pick_threshold(
     return {"threshold": 1.0, "coverage": 0.0, "precision": 0.0, "false_answer_rate": 0.0}
 
 
+def live_stratum(known: bool, group: str) -> str:
+    """Слой стратификации живого кадра: знакомое / лёгкий импорт / трудная российская полка."""
+    if known:
+        return "known"
+    return "unknown-easy" if group.endswith("unknown-easy") else "unknown-hard"
+
+
+def split_key(wine: str, known: bool, group: str) -> str:
+    """Единица разбиения — винодельня внутри слоя, а не кадр и даже не вино.
+
+    Близнецы одной винодельни — самый трудный случай отказа. Окажись они по разные стороны,
+    группа порога получила бы в пару к своему вину подсказку из группы калибровки, и порог
+    выглядел бы надёжнее, чем есть. У незнакомых вин винодельня — первое слово wine_id.
+    """
+    stratum = live_stratum(known, group)
+    if known:
+        return f"{stratum}:{FAMILIES.get(wine) or wine}"
+    # wine_id бывают вида unknown-org-fanagoriya-…, import-crispy-…, Ladofoods_Vang_Dalat_….
+    words = [w for w in re.split(r"[-_]", wine.removeprefix(UNKNOWN_PREFIX).lower()) if w]
+    words = [w for w in words if w not in {"unknown", "org", "import"}] or [wine]
+    return f"{stratum}:{words[0]}"
+
+
+def split_live(
+    wines: list[str], known: np.ndarray, groups: list[str], seed: int
+) -> np.ndarray:
+    """Разделить живые кадры на калибровку (K) и порог (P) по винодельням, 50/50 по кадрам.
+
+    Синтетика в обе группы не входит (роль ""): её уверенность распределена иначе, чем у
+    живого кадра, и ровно это сломало порог в ноутбуке 06. Внутри каждого слоя винодельни
+    перемешиваются и по одной отдаются группе, у которой сейчас меньше кадров этого слоя.
+    """
+    rng = np.random.default_rng(seed)
+    roles = np.full(len(wines), "", dtype=object)
+    live = [i for i, g in enumerate(groups) if g.startswith("live-")]
+    by_key: dict[str, list[int]] = defaultdict(list)
+    for i in live:
+        by_key[split_key(wines[i], bool(known[i]), groups[i])].append(i)
+    strata = sorted({key.split(":", 1)[0] for key in by_key})
+    for stratum in strata:
+        keys = [key for key in sorted(by_key) if key.startswith(f"{stratum}:")]
+        rng.shuffle(keys)
+        sizes = {"K": 0, "P": 0}
+        # Крупные винодельни раскладываем первыми, иначе последняя перекосит баланс.
+        for key in sorted(keys, key=lambda k: -len(by_key[k])):
+            side = "K" if sizes["K"] < sizes["P"] or (
+                sizes["K"] == sizes["P"] and rng.random() < 0.5) else "P"
+            roles[by_key[key]] = side
+            sizes[side] += len(by_key[key])
+    return roles
+
+
+def calibrate_on(raw: np.ndarray, correct: np.ndarray) -> tuple[float, float]:
+    """Калибровка Платта по логиту сырой оценки (см. Decider.calibrate)."""
+    calibrator = LogisticRegression(C=1e6).fit(logit(raw).reshape(-1, 1), correct.astype(int))
+    return float(calibrator.coef_[0][0]), float(calibrator.intercept_[0])
+
+
+def split_calibration(
+    raw: np.ndarray,
+    correct: np.ndarray,
+    known: np.ndarray,
+    roles: np.ndarray,
+    budget: float,
+) -> dict:
+    """Платт на K, порог на P; метрики порога — на P, данных, которых калибровка не видела."""
+    k, p = roles == "K", roles == "P"
+    weight, bias = calibrate_on(raw[k], correct[k])
+    probe = Decider(booster=None, calib_weight=weight, calib_bias=bias, threshold=0.0)
+    picked = pick_threshold(
+        probe.calibrate(raw[p & known]), correct[p & known], probe.calibrate(raw[p & ~known]),
+        budget,
+    )
+    return {
+        "calib_weight": weight,
+        "calib_bias": bias,
+        **picked,
+        "k_queries": int(k.sum()),
+        "k_known": int((k & known).sum()),
+        "p_queries": int(p.sum()),
+        "p_known": int((p & known).sum()),
+        "p_unknown": int((p & ~known).sum()),
+    }
+
+
 def precision_at_prior(picked: dict, unknown_share: float) -> float:
     """Какой окажется точность среди отвеченных, если незнакомых вин в потоке доля p.
 
@@ -272,6 +358,20 @@ def main() -> None:
         type=float,
         default=3.0,
         help="вес живых кадров (group live-*) относительно псевдофото при обучении",
+    )
+    parser.add_argument(
+        "--calibration",
+        choices=["all", "live-split"],
+        default="all",
+        help="all — Платт и порог на всех OOF-запросах (как раньше); live-split — только живые "
+        "кадры, винодельни поровну в калибровку (K) и порог (P), синтетика не участвует",
+    )
+    parser.add_argument("--split-seed", type=int, default=2026)
+    parser.add_argument(
+        "--split-repeats",
+        type=int,
+        default=20,
+        help="сколько случайных разбиений K/P прогнать, чтобы показать разброс порога",
     )
     parser.add_argument(
         "--no-augment-unknown",
@@ -369,11 +469,35 @@ def main() -> None:
     # переобучаться, зато прижимает наклон к нулю и сплющивает ту же шкалу ещё раз.
     # Живые незнакомцы участвуют в калибровке как отрицательные примеры: их лучший кандидат
     # неверен по построению, и это ровно тот случай, который калибровка должна прижать к нулю.
-    calibrator = LogisticRegression(C=1e6).fit(
-        logit(oof_raw).reshape(-1, 1), oof_correct.astype(int)
-    )
-    weight = float(calibrator.coef_[0][0])
-    bias = float(calibrator.intercept_[0])
+    weight, bias = calibrate_on(oof_raw, oof_correct)
+    split = None
+    if args.calibration == "live-split":
+        groups = [groups_of[q] for q in queries]
+        repeats = [
+            split_calibration(
+                oof_raw, oof_correct, known, split_live(wines, known, groups, seed), args.budget
+            )
+            for seed in range(args.split_seed, args.split_seed + args.split_repeats)
+        ]
+        split = repeats[0]
+        weight, bias = split["calib_weight"], split["calib_bias"]
+        thresholds = np.array([r["threshold"] for r in repeats])
+        false_answers = np.array([r["false_answer_rate"] for r in repeats])
+        print(
+            f"\nK/P по винодельням (seed {args.split_seed}): K {split['k_queries']} запросов "
+            f"(знакомых {split['k_known']}), P {split['p_queries']} "
+            f"(знакомых {split['p_known']}, незнакомых {split['p_unknown']})"
+        )
+        print(
+            f"  порог {split['threshold']:.2f}: покрытие на P {split['coverage']:.3f}, "
+            f"точность {split['precision']:.3f}, ложные ответы {split['false_answer_rate']:.3f}"
+        )
+        print(
+            f"  {len(repeats)} разбиений: порог медиана {np.median(thresholds):.2f} "
+            f"[{thresholds.min():.2f}; {thresholds.max():.2f}], ложные ответы на P "
+            f"медиана {np.median(false_answers):.3f} [{false_answers.min():.3f}; "
+            f"{false_answers.max():.3f}]"
+        )
 
     # Сценарии незнакомого вина: два смоделированных (как раньше) и, если в признаках есть
     # живые незнакомые запросы, третий — по ним. Он единственный, где незнакомец настоящий:
@@ -410,10 +534,14 @@ def main() -> None:
     for name, value in auroc.items():
         print(f"AUROC отказа, {name:9s} {value:.3f}")
 
-    picked = None
+    picked = (
+        {k: split[k] for k in ("threshold", "coverage", "precision", "false_answer_rate")}
+        if split
+        else None
+    )
     for name, row in scenarios.items():
         current = pick_threshold(calibrated_known, known_correct, probe.calibrate(row), args.budget)
-        if name == args.scenario:
+        if name == args.scenario and split is None:
             picked = current
         print(f"\nсценарий «{name}», бюджет ошибок на незнакомых {args.budget:.2f}:")
         if current["coverage"] == 0.0:
@@ -460,6 +588,8 @@ def main() -> None:
             "family_map": str(args.family_map) if args.family_map else None,
             "auroc_unknown": auroc,
             "scenario": args.scenario,
+            "calibration": args.calibration,
+            "live_split": split,
             "budget": args.budget,
             "augment_unknown": args.augment_unknown,
             "live_weight": args.live_weight,
