@@ -332,13 +332,16 @@ class WineScanner:
             "index": digest(
                 [index_dir / "vectors.faiss", index_dir / "meta.json", config_path, whitening_path]
             ),
-            "decider": digest([decider_dir / "model.cbm", decider_dir / "meta.json"]),
+            "decider": digest(
+                [decider_dir / "model.cbm", decider_dir / "ranker.cbm", decider_dir / "meta.json"]
+            ),
         }
 
         # Веса детектора этикетки — те же, что резали каталог при сборке индекса: иначе запрос и
         # эталон кропаются по-разному, и сравнение детекторов на бенчмарке ничего не значит.
         if weights is None:
-            weights = Path(self.config.get("weights", LABEL_WEIGHTS))
+            # Index artifacts may have been built on Windows and deployed on Linux.
+            weights = Path(str(self.config.get("weights", LABEL_WEIGHTS)).replace("\\", "/"))
         self.weights = weights
         if embedder is None:
             expected_hash = self.config.get("label_sha256")
@@ -385,7 +388,7 @@ class WineScanner:
         self.matched_pairs = 0
 
         self.path_by_id = {
-            item_id: payload.get("image_path")
+            item_id: payload["image_path"].replace("\\", "/") if payload.get("image_path") else None
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
         }
         self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
@@ -698,6 +701,8 @@ class WineScanner:
                         " ".join(line.text for line in lines),
                         str(self.payload_by_id.get(item_id, {}).get("name", "")),
                         [line.text for line in lines],
+                        winery=str(self.payload_by_id.get(item_id, {}).get("winery", "")),
+                        grapes=str(self.payload_by_id.get(item_id, {}).get("grapes", "")),
                     ),
                 )
             )

@@ -134,6 +134,41 @@ def test_best_candidate_wins_by_inliers():
     assert [c.item_id for c in result.candidates][0] == "wine_b"
 
 
+def test_windows_catalog_path_can_be_opened_on_linux(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "catalog" / "wine.png"
+    image_path.parent.mkdir()
+    Image.new("RGB", (16, 16)).save(image_path)
+    scanner = build_scanner(
+        vector=[1, 0, 0, 0, 0, 0, 0, 0],
+        inliers={},
+        extra={"image_path": str(image_path).replace("/", "\\")},
+    )
+    with Image.open(scanner.path_by_id["wine_a"]) as image:
+        assert image.size == (16, 16)
+
+
+def test_windows_label_weights_path_can_be_opened_on_linux(tmp_path):
+    import json
+
+    weights = tmp_path / "models" / "label"
+    weights.mkdir(parents=True)
+    (weights / "model.safetensors").write_bytes(b"test weights")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"weights": str(weights).replace("/", "\\")}), encoding="utf-8"
+    )
+    scanner = WineScanner(
+        index_dir=tmp_path,
+        index=build_index(),
+        embedder=FakeEmbedder([1, 0, 0, 0, 0, 0, 0, 0]),
+        ocr=FakeOCR([]),
+        matcher=FakeMatcher({}),
+        decider=Decider(FakeBooster(), calib_weight=1.0, calib_bias=0.0, threshold=0.5),
+    )
+    assert (scanner.weights / "model.safetensors").read_bytes() == b"test weights"
+
+
 def test_refuses_when_probability_below_threshold():
     """Ни один кандидат не подтверждён геометрией — отвечать нельзя, хотя лучший всё равно есть."""
     scanner = build_scanner(vector=[1, 0, 0, 0, 0, 0, 0, 0], inliers={}, threshold=0.9)

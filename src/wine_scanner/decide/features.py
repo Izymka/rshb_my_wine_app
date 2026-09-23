@@ -63,11 +63,29 @@ FEATURE_NAMES = (
     "geometry_query_coverage",
     "geometry_candidate_coverage",
     "geometry_normalized_error",
+    # Версия 4: признаки сравнения именно с конкурентами. Они не требуют нового OCR или
+    # дескрипторов, поэтому совместимы с уже собранными сырыми парами версии 3.
+    "rrf_margin",
+    "geometry_support",
+    "geometry_margin",
+    "family_size",
+    "family_vis_margin",
+    "family_txt_margin",
+    "family_inliers_margin",
+    "family_name_cover_margin",
+    "winery_jaro_winkler",
+    "winery_token_set_ratio",
+    "grapes_token_set_ratio",
 )
 
 # Меняется вместе с FEATURE_NAMES. Пишется в meta решающего слоя и проверяется при загрузке:
 # несовпадение версии — сигнал переобучить, а не молча считать по чужим колонкам.
-FEATURE_VERSION = 3
+FEATURE_VERSION = 4
+# В v4 добавлены только производные признаки ``derive``. Сырым записям v3 не нужны новые
+# поля: при обучении и инференсе они вычисляются одним и тем же кодом. Это позволяет честно
+# переобучить ranker на уже сохранённых train-парах, но старая модель всё равно не загрузится:
+# список FEATURE_NAMES в meta.json изменился.
+RAW_FEATURE_VERSIONS = frozenset({3, FEATURE_VERSION})
 
 
 @dataclass
@@ -143,6 +161,9 @@ class PairFeatures:
     geometry_query_coverage: float = 0.0
     geometry_candidate_coverage: float = 0.0
     geometry_normalized_error: float = 0.0
+    winery_jaro_winkler: float = 0.0
+    winery_token_set_ratio: float = 0.0
+    grapes_token_set_ratio: float = 0.0
 
     @property
     def label(self) -> int:
@@ -219,6 +240,43 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
         # Доля инлаеров кандидата среди всех: если один кандидат забрал их почти все,
         # это гораздо убедительнее, чем просто большое абсолютное число.
         data["inliers_share"] = row.inliers / total_inliers
+        data["rrf_margin"] = min((r.rrf_rank for r in others), default=row.rrf_rank) - row.rrf_rank
+        # RANSAC хорош только при согласованной гомографии, приличной доле инлаеров и их
+        # пространственном покрытии. Это компактный scalar, а не сырые точки/матрица.
+        geometry = (
+            row.inliers
+            * row.inlier_ratio
+            * min(row.geometry_query_coverage, row.geometry_candidate_coverage)
+            / (1.0 + row.geometry_normalized_error)
+            if row.homography_ok
+            else 0.0
+        )
+        other_geometry = [
+            other.inliers
+            * other.inlier_ratio
+            * min(other.geometry_query_coverage, other.geometry_candidate_coverage)
+            / (1.0 + other.geometry_normalized_error)
+            if other.homography_ok
+            else 0.0
+            for other in others
+        ]
+        data["geometry_support"] = geometry
+        data["geometry_margin"] = geometry - max(other_geometry, default=0.0)
+        family_rows = by_family.get(row.family, []) if row.family else []
+        family_others = [other for other in family_rows if other is not row]
+        data["family_size"] = len(family_rows)
+        data["family_vis_margin"] = row.vis_score - max(
+            (other.vis_score for other in family_others), default=row.vis_score
+        )
+        data["family_txt_margin"] = row.txt_score - max(
+            (other.txt_score for other in family_others), default=row.txt_score
+        )
+        data["family_inliers_margin"] = row.inliers - max(
+            (other.inliers for other in family_others), default=row.inliers
+        )
+        data["family_name_cover_margin"] = row.name_cover - max(
+            (other.name_cover for other in family_others), default=row.name_cover
+        )
         data["label"] = row.label
         out.append(data)
     return out
@@ -228,7 +286,13 @@ def matrix(rows: list[dict]) -> list[list[float]]:
     return [[float(row[name]) for name in FEATURE_NAMES] for row in rows]
 
 
-def text_pair_features(text: str, name: str, lines: list[str]) -> dict:
+def text_pair_features(
+    text: str,
+    name: str,
+    lines: list[str],
+    winery: str = "",
+    grapes: str = "",
+) -> dict:
     """Normalized edit distance and string similarities; no ground-truth text is used."""
     from rapidfuzz import fuzz
     from rapidfuzz.distance import JaroWinkler, Levenshtein
@@ -236,7 +300,19 @@ def text_pair_features(text: str, name: str, lines: list[str]) -> dict:
     from ..ocr.normalize import fold
 
     query, candidate = fold(text), fold(name)
+    folded_winery, folded_grapes = fold(winery), fold(grapes)
     valid = bool(query and candidate)
+
+    def similarity(value: str) -> tuple[float, float]:
+        if not query or not value:
+            return 0.0, 0.0
+        return (
+            JaroWinkler.normalized_similarity(query, value),
+            fuzz.token_set_ratio(query, value) / 100,
+        )
+
+    winery_jaro, winery_token = similarity(folded_winery)
+    _, grapes_token = similarity(folded_grapes)
     return {
         "name_levenshtein_distance": Levenshtein.normalized_distance(query, candidate)
         if valid
@@ -251,4 +327,7 @@ def text_pair_features(text: str, name: str, lines: list[str]) -> dict:
             default=0.0,
         ),
         "name_token_set_ratio": fuzz.token_set_ratio(query, candidate) / 100 if valid else 0.0,
+        "winery_jaro_winkler": winery_jaro,
+        "winery_token_set_ratio": winery_token,
+        "grapes_token_set_ratio": grapes_token,
     }

@@ -23,14 +23,14 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from catboost import CatBoostClassifier
+from catboost import CatBoostClassifier, CatBoostRanker, Pool
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
 from wine_scanner.catalog import is_holdout
 from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures, derive, logit, matrix
-from wine_scanner.decide.features import FEATURE_VERSION
+from wine_scanner.decide.features import RAW_FEATURE_VERSIONS
 
 FEATURES_PATH = Path("eval/results/features.jsonl")
 OUT_DIR = Path("models/decider")
@@ -62,8 +62,11 @@ def load_queries(path: Path) -> dict[str, list[PairFeatures]]:
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             payload = json.loads(line)
-            if payload.get("feature_version") != FEATURE_VERSION:
-                raise ValueError("Rebuild candidate features with the current pipeline")
+            if payload.get("feature_version") not in RAW_FEATURE_VERSIONS:
+                raise ValueError(
+                    "Raw candidate features are incompatible with the current pipeline; "
+                    "rebuild them"
+                )
             row = PairFeatures.from_dict(payload)
             grouped[row.query].append(row)
     return grouped
@@ -100,7 +103,7 @@ def training_rows(
     return rows, labels, weights
 
 
-def make_model() -> CatBoostClassifier:
+def make_confidence_model() -> CatBoostClassifier:
     return CatBoostClassifier(
         iterations=400,
         learning_rate=0.05,
@@ -114,6 +117,75 @@ def make_model() -> CatBoostClassifier:
         # при длинном списке в сотню с лишним строк.
         auto_class_weights="Balanced",
         verbose=False,
+    )
+
+
+def make_ranker() -> CatBoostRanker:
+    """Модель порядка внутри одного запроса, а не независимой вероятности пары."""
+    return CatBoostRanker(
+        iterations=500,
+        learning_rate=0.05,
+        depth=6,
+        l2_leaf_reg=6,
+        loss_function="PairLogitPairwise",
+        random_seed=2026,
+        thread_count=4,
+        allow_writing_files=False,
+        verbose=False,
+    )
+
+
+def ranking_pool(groups: list[list[PairFeatures]], live_weight: float = 1.0) -> tuple[Pool, dict]:
+    """Сформировать пары «истинная карточка лучше трудного соседа» для ranker.
+
+    Случайные далёкие вина не участвуют: в каждом запросе уже лежат сильные FAISS/OCR-соседи
+    и расширение той же винодельни. Пары с ними получают тройной вес, чтобы ranker учился
+    именно различать близнецов, а не повторять лёгкое отделение чужой бутылки.
+    """
+    rows: list[list[float]] = []
+    labels: list[int] = []
+    group_ids: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    pair_weights: list[float] = []
+    included = 0
+    for query_id, candidates in enumerate(groups):
+        if not candidates or is_unknown(candidates[0].true_id):
+            continue
+        derived = derive(candidates)
+        positive = [index for index, row in enumerate(derived) if row["label"]]
+        if not positive:
+            # Верный slug не попал в long-list: это задача retrieval, ranker его не создаст.
+            continue
+        offset = len(rows)
+        rows.extend(matrix(derived))
+        labels.extend(row["label"] for row in derived)
+        group_ids.extend([query_id] * len(derived))
+        live = live_weight if candidates[0].group.startswith("live-") else 1.0
+        true_family = family_key(candidates[positive[0]].true_id, candidates[positive[0]])
+        for winner in positive:
+            for loser, candidate in enumerate(candidates):
+                if loser == winner:
+                    continue
+                hard = (
+                    family_key(candidate.item_id, candidate) == true_family
+                    or candidate.vis_rank < 5
+                    or candidate.txt_rank < 5
+                    or candidate.rrf_rank < 5
+                )
+                pairs.append((offset + winner, offset + loser))
+                pair_weights.append(live * (3.0 if hard else 1.0))
+        included += 1
+    if not pairs:
+        raise ValueError("No positive candidate pairs for CatBoostRanker")
+    return (
+        Pool(
+            np.asarray(rows),
+            label=np.asarray(labels),
+            group_id=np.asarray(group_ids),
+            pairs=pairs,
+            pairs_weight=np.asarray(pair_weights),
+        ),
+        {"queries": included, "pairs": len(pairs), "hard_pair_weight": 3.0},
     )
 
 
@@ -235,43 +307,58 @@ def main() -> None:
 
     splitter = GroupKFold(n_splits=args.folds)
     oof_raw = np.zeros(len(queries))
+    oof_rank = np.zeros(len(queries))
     oof_correct = np.zeros(len(queries), dtype=bool)
     oof_item_ids = [""] * len(queries)
     oof_unknown = np.full((2, len(queries)), np.nan)  # 0 — с роднёй, 1 — без родни
 
     for train_idx, test_idx in splitter.split(queries, groups=wines):
-        rows, labels, weights = training_rows(
-            [by_query[queries[i]] for i in train_idx], args.augment_unknown, args.live_weight
+        train_groups = [by_query[queries[i]] for i in train_idx]
+        confidence_rows, labels, weights = training_rows(
+            train_groups, args.augment_unknown, args.live_weight
         )
-        model = make_model().fit(
-            np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights)
+        confidence = make_confidence_model().fit(
+            np.asarray(confidence_rows), np.asarray(labels), sample_weight=np.asarray(weights)
         )
+        rank_pool, _ = ranking_pool(train_groups, args.live_weight)
+        ranker = make_ranker().fit(rank_pool)
 
-        def predict(candidates: list[PairFeatures], model=model) -> np.ndarray:
-            return model.predict_proba(np.asarray(matrix(derive(candidates))))[:, 1]
+        def select(candidates: list[PairFeatures], ranker=ranker, confidence=confidence) -> tuple:
+            values = np.asarray(matrix(derive(candidates)))
+            ranking = np.asarray(ranker.predict(values), dtype=float).ravel()
+            confidence_raw = np.asarray(confidence.predict_proba(values)[:, 1], dtype=float)
+            best = int(np.argmax(ranking))
+            return best, confidence_raw[best], ranking[best]
 
         for i in test_idx:
             candidates = by_query[queries[i]]
-            probs = predict(candidates)
-            best = int(np.argmax(probs))
-            oof_raw[i] = probs[best]
+            best, confidence_raw, rank_score = select(candidates)
+            oof_raw[i] = confidence_raw
+            oof_rank[i] = rank_score
             oof_correct[i] = bool(candidates[best].label)
             oof_item_ids[i] = candidates[best].item_id
             if not known[i]:
                 # Живой незнакомец: его лучший кандидат — то, что сервис ответил бы мимо.
                 continue
 
-            # Незнакомое вино моделируем удалением правильного ответа из кандидатов: для
-            # решающего слоя это в точности ситуация «вина нет в каталоге».
+            # Незнакомое вино моделируем удалением правильного ответа. Важно сначала
+            # переупорядочить список ranker'ом и только потом брать confidence победителя:
+            # именно так работает production-пайплайн.
             without_true = [c for c in candidates if not c.label]
             if without_true:
-                oof_unknown[0, i] = predict(without_true).max()
+                _, unknown_confidence, _ = select(without_true)
+                oof_unknown[0, i] = unknown_confidence
 
             true_row = next((c for c in candidates if c.label), None)
             family = family_key(candidates[0].true_id, true_row)
             without_family = [c for c in candidates if family_key(c.item_id, c) != family]
             if without_family:
-                oof_unknown[1, i] = predict(without_family).max()
+                _, unknown_confidence, _ = select(without_family)
+                oof_unknown[1, i] = unknown_confidence
+
+        # ``confidence`` остаётся classifier'ом для порога. Ranker обучен на парах и его
+        # числа несопоставимы между запросами, поэтому калибровать их как вероятность нельзя.
+        del confidence, ranker
 
     # Калибровка Платта: сырой выход бустера монотонно связан с правильностью, но числом
     # вероятности не является. Логистическая регрессия по одному признаку делает его таковым.
@@ -346,18 +433,23 @@ def main() -> None:
                 f"{precision_at_prior(current, share):.3f}"
             )
 
-    final = make_model()
+    final_confidence = make_confidence_model()
     rows, labels, weights = training_rows(
         [by_query[q] for q in queries], args.augment_unknown, args.live_weight
     )
-    final.fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
+    final_confidence.fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
+    final_rank_pool, ranker_stats = ranking_pool(
+        [by_query[q] for q in queries], args.live_weight
+    )
+    final_ranker = make_ranker().fit(final_rank_pool)
 
     decider = Decider(
-        booster=final,
+        booster=final_confidence,
         calib_weight=weight,
         calib_bias=bias,
         threshold=picked["threshold"],
         feature_names=FEATURE_NAMES,
+        ranker=final_ranker,
         meta={
             "trained_on": str(args.features),
             "holdout_isolated": True,
@@ -375,8 +467,27 @@ def main() -> None:
             "coverage": picked["coverage"],
             "precision": picked["precision"],
             "false_answer_rate": picked["false_answer_rate"],
-            "feature_importance": dict(
-                zip(FEATURE_NAMES, map(float, final.get_feature_importance()), strict=True)
+            "ranking": {
+                "objective": "PairLogitPairwise",
+                "hard_negatives": "same_family_or_top5_visual_text_rrf",
+                **ranker_stats,
+            },
+            "ranker_feature_importance": dict(
+                zip(
+                    FEATURE_NAMES,
+                    map(
+                        float,
+                        final_ranker.get_feature_importance(type="PredictionValuesChange"),
+                    ),
+                    strict=True,
+                )
+            ),
+            "confidence_feature_importance": dict(
+                zip(
+                    FEATURE_NAMES,
+                    map(float, final_confidence.get_feature_importance()),
+                    strict=True,
+                )
             ),
         },
     )
@@ -392,7 +503,8 @@ def main() -> None:
                         "known": bool(known[i]),
                         "best_id": oof_item_ids[i],
                         "correct": bool(oof_correct[i]),
-                        "raw": float(oof_raw[i]),
+                        "confidence_raw": float(oof_raw[i]),
+                        "rank_score": float(oof_rank[i]),
                         "calibrated": float(probabilities[i]),
                         "note": "OOF base model; calibration/threshold fitted on these OOF scores",
                     },
