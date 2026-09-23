@@ -20,6 +20,7 @@ from tqdm import tqdm
 from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
 from wine_scanner.detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper, detector_kind
 from wine_scanner.embed import build_embedder, load_image, pick_device
+from wine_scanner.image_preprocess import LABEL_PREPROCESS_VERSION
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import LabelOCR
 from wine_scanner.rerank import DescriptorStore, XFeatMatcher
@@ -229,7 +230,7 @@ def main() -> None:
                 "detector": detector_kind(args.weights),
                 "bottle_model": COCO_BOTTLE_MODEL,
                 "fit": "pad" if prepared_labels else args.fit,
-                "preprocessing_version": "label-rgb-v1" if prepared_labels else None,
+                "preprocessing_version": LABEL_PREPROCESS_VERSION if prepared_labels else None,
                 "weights": str(args.weights),
                 "catalog": args.catalog,
                 "items": len(items),
@@ -256,11 +257,11 @@ def main() -> None:
                 record = IndexBuild(
                     build_id=args.out.name,
                     storage_path=str(args.out),
-                    preprocessing_version="label-rgb-v1",
+                    preprocessing_version=LABEL_PREPROCESS_VERSION,
                 )
                 session.add(record)
             record.storage_path = str(args.out)
-            record.preprocessing_version = "label-rgb-v1" if prepared_labels else "legacy"
+            record.preprocessing_version = LABEL_PREPROCESS_VERSION if prepared_labels else "legacy"
             record.config = json.loads((args.out / "config.json").read_text(encoding="utf-8"))
     print(f"индекс сохранён: {args.out} ({index.index.ntotal} векторов)")
 

@@ -1,58 +1,86 @@
 """Versioned, deterministic label-image preparation shared by indexing and inference."""
 
-from dataclasses import dataclass
-
 import numpy as np
 from PIL import Image
 
-LABEL_PREPROCESS_VERSION = "label-rgb-v1"
+# v2: the square is cut from the source frame (not from the bottle crop), fallbacks stay square,
+# nothing is resized with a changed aspect ratio, and there is no colour correction.
+# v3: out-of-frame padding takes the frame background (median of its border), not the crop's.
+LABEL_PREPROCESS_VERSION = "label-square-v3"
 LABEL_SIZE = 512
 
 
-@dataclass(frozen=True)
-class PhotometricParameters:
-    """Parameters persisted with a derivative so its pixels are reproducible."""
+def square_rect(
+    center: tuple[float, float], side: float, size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """Integer square of `side` around `center`, shifted to stay inside a `size` frame.
 
-    white_balance: tuple[float, float, float]
-    luminance_low: float
-    luminance_high: float
-
-
-def normalize_label_rgb(image: Image.Image) -> tuple[Image.Image, PhotometricParameters]:
-    """Robust gray-world white balance plus percentile brightness/contrast normalization.
-
-    Percentiles deliberately ignore the darkest shadows and specular highlights.  The transform
-    is global and deterministic: it does not depend on a model, GPU, or surrounding images.
+    The square is translated rather than shrunk, so the label keeps its proportional border and
+    the extra room is filled with real background.  Only when the frame itself is smaller than
+    the square along an axis does the rectangle leave the frame, symmetrically around it.
     """
-    pixels = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    flat = pixels.reshape(-1, 3)
-    low, high = np.quantile(flat, (0.05, 0.95), axis=0)
-    central = np.clip(flat, low, high)
-    means = central.mean(axis=0)
-    target = float(means.mean())
-    gains = np.clip(target / np.maximum(means, 1e-4), 0.70, 1.40)
-    balanced = np.clip(pixels * gains, 0.0, 1.0)
+    width, height = size
+    side_px = max(1, int(round(side)))
 
-    luminance = 0.2126 * balanced[..., 0] + 0.7152 * balanced[..., 1] + 0.0722 * balanced[..., 2]
-    lum_low, lum_high = (float(v) for v in np.quantile(luminance, (0.02, 0.98)))
-    span = max(lum_high - lum_low, 1e-4)
-    target_luminance = np.clip((luminance - lum_low) / span * 0.84 + 0.08, 0.0, 1.0)
-    ratio = target_luminance / np.maximum(luminance, 1e-4)
-    result = np.clip(balanced * ratio[..., None], 0.0, 1.0)
-    return (
-        Image.fromarray(np.rint(result * 255).astype(np.uint8), mode="RGB"),
-        PhotometricParameters(tuple(float(v) for v in gains), lum_low, lum_high),
-    )
+    def start(middle: float, dim: int) -> int:
+        low, high = min(0, dim - side_px), max(0, dim - side_px)
+        return int(round(min(max(middle - side_px / 2, low), high)))
+
+    x1, y1 = start(center[0], width), start(center[1], height)
+    return x1, y1, x1 + side_px, y1 + side_px
 
 
-def prepare_label_image(
-    image: Image.Image, size: int = LABEL_SIZE
-) -> tuple[Image.Image, PhotometricParameters]:
-    """Normalize a square label crop and make the persisted 512px RGB PNG."""
-    normalized, parameters = normalize_label_rgb(image)
-    if normalized.size != (size, size):
-        normalized = normalized.resize((size, size), Image.Resampling.LANCZOS)
-    return normalized, parameters
+def centered_square(size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Largest square in the middle of the frame: the photographer aims at the target."""
+    width, height = size
+    return square_rect((width / 2, height / 2), min(width, height), size)
+
+
+def border_color(image: Image.Image) -> tuple[int, int, int]:
+    """Median colour of the frame's outer one-pixel ring: a deterministic stand-in for background.
+
+    The median, not the mean: a bottle touching the frame edge must not tint the fill.
+    """
+    pixels = np.asarray(image.convert("RGB"))
+    ring = np.concatenate([pixels[0], pixels[-1], pixels[:, 0], pixels[:, -1]])
+    return tuple(int(v) for v in np.median(ring, axis=0))
+
+
+def crop_square(image: Image.Image, rect: tuple[int, int, int, int]) -> Image.Image:
+    """Crop `rect`; parts outside the frame get the whole frame's background colour.
+
+    Catalogue shots are often cropped tight to the bottle, so a label square is wider than the
+    frame; the fill must match the photo's background, not the bottle inside the crop.
+    """
+    x1, y1, x2, y2 = rect
+    width, height = image.size
+    if x1 >= 0 and y1 >= 0 and x2 <= width and y2 <= height:
+        return image.crop(rect)
+    inside = image.crop((max(x1, 0), max(y1, 0), min(x2, width), min(y2, height)))
+    canvas = Image.new("RGB", (x2 - x1, y2 - y1), border_color(image))
+    canvas.paste(inside.convert("RGB"), (max(-x1, 0), max(-y1, 0)))
+    return canvas
+
+
+def pad_to_square(image: Image.Image) -> Image.Image:
+    """Safety net for non-square inputs: extend the short side, never distort the label."""
+    width, height = image.size
+    if width == height:
+        return image
+    rect = square_rect((width / 2, height / 2), max(width, height), (width, height))
+    return crop_square(image, rect)
+
+
+def prepare_label_image(image: Image.Image, size: int = LABEL_SIZE) -> Image.Image:
+    """Make the persisted 512px RGB label: pad to a square, then scale uniformly.
+
+    Colours are left as captured; SiglipImageProcessor applies the model's own normalization.
+    A non-square input is padded, not squashed: uniform scaling is the only geometric change.
+    """
+    prepared = pad_to_square(image.convert("RGB"))
+    if prepared.size != (size, size):
+        prepared = prepared.resize((size, size), Image.Resampling.LANCZOS)
+    return prepared
 
 
 class PreparedLabelCropper:
@@ -64,8 +92,7 @@ class PreparedLabelCropper:
         self.mode = "prepared-label"
 
     def crop(self, image: Image.Image) -> Image.Image:
-        prepared, _ = prepare_label_image(self.detector.crop(image))
-        return prepared
+        return prepare_label_image(self.detector.crop(image))
 
     def __call__(self, path, image: Image.Image) -> Image.Image:
         return self.crop(image)

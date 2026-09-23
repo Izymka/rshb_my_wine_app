@@ -18,7 +18,9 @@ def file_hash(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=Path, default=Path("models/rtdetr_label"))
-    parser.add_argument("--out", type=Path, default=Path("data/media/labels/v1"))
+    parser.add_argument(
+        "--out", type=Path, default=Path("data/media/labels") / LABEL_PREPROCESS_VERSION
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     device = pick_device()
@@ -40,23 +42,19 @@ def main() -> None:
             if existing and target.exists() and not args.force:
                 continue
             try:
-                # cropper includes the geometric square; apply photometry explicitly here to
-                # retain the exact coefficients in the database.
+                # Both boxes are frame pixels; label_box is the cut square and may extend
+                # past the frame (padded area).
                 square, bottle_box, label_box = cropper.detector.crop_with_metadata(
                     load_image(image.storage_path)
                 )
-                prepared, photo = prepare_label_image(square)
+                prepared = prepare_label_image(square)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 prepared.save(target, format="PNG", compress_level=1)
                 values = {
                     "storage_path": str(target),
                     "sha256": file_hash(target),
                     "status": "ready",
-                    "photometric": {
-                        "white_balance": photo.white_balance,
-                        "luminance_low": photo.luminance_low,
-                        "luminance_high": photo.luminance_high,
-                    },
+                    "photometric": {},
                     "bottle_box": list(bottle_box) if bottle_box else None,
                     "label_box": list(label_box) if label_box else None,
                 }

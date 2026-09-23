@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from ..image_preprocess import centered_square, crop_square, square_rect
+
 
 @dataclass
 class Box:
@@ -102,14 +104,12 @@ class BoxCropper:
             return self.label_window(box, size)
 
         if self.square_label:
-            # Keep the detected label and a proportional border, then translate the square
-            # inside its source instead of inventing padding pixels.
-            width, height = size
-            desired = max(box.x2 - box.x1, box.y2 - box.y1) * (1 + 2 * self.margin)
-            side = min(desired, width, height)
-            x1 = min(max((box.x1 + box.x2 - side) / 2, 0), width - side)
-            y1 = min(max((box.y1 + box.y2 - side) / 2, 0), height - side)
-            return (int(round(x1)), int(round(y1)), int(round(x1 + side)), int(round(y1 + side)))
+            # Square by the label's long side plus a proportional border, translated inside the
+            # frame so the extra room is real background. The side is never clamped to the
+            # frame: a label cut by the frame edge keeps its full extent, padded if needed.
+            side = max(box.x2 - box.x1, box.y2 - box.y1) * (1 + 2 * self.margin)
+            center = ((box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2)
+            return square_rect(center, side, size)
 
         width, height = size
         dx = (box.x2 - box.x1) * self.margin
@@ -129,12 +129,25 @@ class BoxCropper:
     def crop_with_box(
         self, image: Image.Image
     ) -> tuple[Image.Image, tuple[int, int, int, int] | None]:
-        """Crop plus its source coordinates for auditable derivative provenance."""
-        box = self.pick(self.detect(image), image.size)
+        """Crop plus its source coordinates for auditable derivative provenance.
+
+        A square-label detector always returns a square: without a box it falls back to the
+        central square of the frame (the coordinates are then still reported).
+        """
+        box = self.locate(image)
         if box is None:
-            return image, None
+            if not self.square_label:
+                return image, None
+            rect = centered_square(image.size)
+            return crop_square(image, rect), rect
         rect = self.crop_rect(box, image.size)
+        if self.square_label:
+            return crop_square(image, rect), rect
         return image.crop(rect), rect
+
+    def locate(self, image: Image.Image) -> Box | None:
+        """The target box in `image` coordinates, or None."""
+        return self.pick(self.detect(image), image.size)
 
 
 class CachedCropper:
@@ -208,12 +221,40 @@ class CascadeCropper:
         self.mode = "cascade"
 
     def crop(self, image: Image.Image) -> Image.Image:
-        return self.label.crop(self.bottle.crop(image))
+        return self.crop_with_metadata(image)[0]
 
     def crop_with_metadata(
         self, image: Image.Image
     ) -> tuple[Image.Image, tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
-        """Return the final crop and both stage rectangles for database provenance."""
-        bottle, bottle_rect = self.bottle.crop_with_box(image)
-        label, label_rect = self.label.crop_with_box(bottle)
-        return label, bottle_rect, label_rect
+        """Return the final crop, the bottle rectangle and the label square, all in frame pixels.
+
+        The label is searched inside the bottle crop (that is what the detector was trained on),
+        but a square-label stage cuts its square from the original frame: the bottle crop is too
+        narrow for a square around a wide label and would cut its edges or leave no background.
+        """
+        bottle_box = self.bottle.locate(image)
+        bottle_rect = self.bottle.crop_rect(bottle_box, image.size) if bottle_box else None
+        source = image.crop(bottle_rect) if bottle_rect else image
+        box = self.label.locate(source)
+        if not self.label.square_label:
+            if box is None:
+                return source, bottle_rect, None
+            rect = self.label.crop_rect(box, source.size)
+            return source.crop(rect), bottle_rect, rect
+        if box is not None:
+            dx, dy = bottle_rect[:2] if bottle_rect else (0, 0)
+            frame_box = Box(box.x1 + dx, box.y1 + dy, box.x2 + dx, box.y2 + dy, box.score)
+            label_rect = self.label.crop_rect(frame_box, image.size)
+        elif bottle_box is not None:
+            label_rect = self.estimated_label_square(bottle_box, image.size)
+        else:
+            label_rect = centered_square(image.size)
+        return crop_square(image, label_rect), bottle_rect, label_rect
+
+    def estimated_label_square(
+        self, bottle: Box, size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Bottle found, label not: the label usually spans the width around 58% of the height."""
+        side = (bottle.x2 - bottle.x1) * (1 + 2 * self.label.margin)
+        center = ((bottle.x1 + bottle.x2) / 2, bottle.y1 + (bottle.y2 - bottle.y1) * 0.58)
+        return square_rect(center, side, size)
