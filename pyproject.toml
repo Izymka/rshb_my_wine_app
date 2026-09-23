@@ -18,6 +18,8 @@ dependencies = [
     "pandas>=2.2",
     "tqdm>=4.66",
     "pillow-heif>=1.5.0",
+    "SQLAlchemy>=2.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +63,7 @@ api = [
 # Инструменты разработки. Отдельно от project.dependencies, потому что в продакшен-образ
 # они не нужны — uv ставит их локально и не тянет в сборку.
 dev = [
+    "alembic>=1.14",
     "jupyterlab>=4.2",
     "ipykernel>=6.29",
     "matplotlib>=3.9",

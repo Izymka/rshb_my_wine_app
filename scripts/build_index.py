@@ -11,6 +11,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -129,15 +130,18 @@ def main() -> None:
     print(f"карточек в каталоге: {len(items)}")
 
     device = pick_device()
+    # PostgreSQL catalogue records point at already materialized canonical labels.  Sending
+    # those through RT-DETR again would make index and online query use different pixels.
+    prepared_labels = bool(items) and all(item.payload.get("prepared_label") for item in items)
     embedder = build_embedder(
         model_name=args.model,
         device=device,
         cropper=(
             CachedCropper(build_cropper(args.detect, args.weights, device), CROP_CACHE)
-            if args.detect
+            if args.detect and not prepared_labels
             else None
         ),
-        fit=args.fit,
+        fit="pad" if prepared_labels else args.fit,
         precision=args.precision,
         pad_color=tuple(map(int, args.pad_color.split(","))),
     )
@@ -224,7 +228,8 @@ def main() -> None:
                 "detect": args.detect,
                 "detector": detector_kind(args.weights),
                 "bottle_model": COCO_BOTTLE_MODEL,
-                "fit": args.fit,
+                "fit": "pad" if prepared_labels else args.fit,
+                "preprocessing_version": "label-rgb-v1" if prepared_labels else None,
                 "weights": str(args.weights),
                 "catalog": args.catalog,
                 "items": len(items),
@@ -241,6 +246,22 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
+    if os.environ.get("DATABASE_URL"):
+        from wine_scanner.db import IndexBuild, session_factory
+
+        factory = session_factory()
+        with factory.begin() as session:
+            record = session.query(IndexBuild).filter_by(build_id=args.out.name).one_or_none()
+            if record is None:
+                record = IndexBuild(
+                    build_id=args.out.name,
+                    storage_path=str(args.out),
+                    preprocessing_version="label-rgb-v1",
+                )
+                session.add(record)
+            record.storage_path = str(args.out)
+            record.preprocessing_version = "label-rgb-v1" if prepared_labels else "legacy"
+            record.config = json.loads((args.out / "config.json").read_text(encoding="utf-8"))
     print(f"индекс сохранён: {args.out} ({index.index.ntotal} векторов)")
 
 

@@ -3,6 +3,7 @@ from pathlib import Path
 from .bottle import Box, BoxCropper, CachedCropper, CascadeCropper
 from .dataset import CocoDetectionDataset, collate, split_by_wine
 from .rtdetr import COCO_BOTTLE_MODEL, RTDetrDetector
+from ..image_preprocess import PreparedLabelCropper
 
 __all__ = [
     "COCO_BOTTLE_MODEL",
@@ -54,7 +55,7 @@ def build_cropper(
     if detect not in {"cascade", "trained"}:
         raise ValueError(f"Unknown crop mode: {detect}")
     detector_kind(weights)
-    label = RTDetrDetector(Path(weights), target="label", device=device)
+    label = RTDetrDetector(Path(weights), target="label", device=device, square_label=True)
     if detect == "trained":
-        return label
-    return CascadeCropper(bottle_detector("rtdetr", device, "bottle", bottle_model), label)
+        return PreparedLabelCropper(label)
+    return PreparedLabelCropper(CascadeCropper(bottle_detector("rtdetr", device, "bottle", bottle_model), label))

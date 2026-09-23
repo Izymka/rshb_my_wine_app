@@ -1,0 +1,25 @@
+-- Apply with: psql "$DATABASE_URL" -f migrations/0001_postgresql_catalog.sql
+CREATE TABLE IF NOT EXISTS wines (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    slug VARCHAR(255) NOT NULL UNIQUE,
+    producer VARCHAR(500) NOT NULL DEFAULT '', name VARCHAR(1000) NOT NULL,
+    region VARCHAR(500) NOT NULL DEFAULT '', vintage INTEGER NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS grape_varieties (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(255) NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS wine_grapes (wine_id BIGINT NOT NULL REFERENCES wines(id) ON DELETE CASCADE, grape_id BIGINT NOT NULL REFERENCES grape_varieties(id), PRIMARY KEY (wine_id, grape_id));
+CREATE TABLE IF NOT EXISTS wine_images (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, wine_id BIGINT NOT NULL REFERENCES wines(id) ON DELETE CASCADE,
+    storage_path TEXT NOT NULL UNIQUE, sha256 CHAR(64) NOT NULL, mime_type VARCHAR(100) NOT NULL DEFAULT 'image/png',
+    width INTEGER NOT NULL, height INTEGER NOT NULL, role VARCHAR(50) NOT NULL DEFAULT 'catalog'
+);
+CREATE TABLE IF NOT EXISTS image_derivatives (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, source_image_id BIGINT NOT NULL REFERENCES wine_images(id) ON DELETE CASCADE,
+    kind VARCHAR(50) NOT NULL DEFAULT 'label_square', pipeline_version VARCHAR(100) NOT NULL, storage_path TEXT NOT NULL UNIQUE,
+    sha256 CHAR(64) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'ready', bottle_box JSONB, label_box JSONB,
+    photometric JSONB NOT NULL DEFAULT '{}'::jsonb, UNIQUE(source_image_id, kind, pipeline_version)
+);
+CREATE TABLE IF NOT EXISTS index_builds (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, build_id VARCHAR(100) NOT NULL UNIQUE, storage_path TEXT NOT NULL,
+    preprocessing_version VARCHAR(100) NOT NULL, config JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

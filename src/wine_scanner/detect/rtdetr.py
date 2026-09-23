@@ -40,6 +40,7 @@ class RTDetrDetector(BoxCropper):
         require_center: bool = False,
         margin: float = 0.08,
         mode: str = "bottle",
+        square_label: bool = False,
     ):
         from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 
@@ -56,6 +57,7 @@ class RTDetrDetector(BoxCropper):
         self.require_center = require_center
         self.margin = margin
         self.mode = mode
+        self.square_label = square_label
         self.source = str(source)
         self.processor = RTDetrImageProcessor.from_pretrained(self.source)
         self.model = RTDetrForObjectDetection.from_pretrained(self.source).to(self.device).eval()

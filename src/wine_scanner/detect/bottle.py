@@ -37,6 +37,7 @@ class BoxCropper:
     # рамка сбоку — сосед по полке. Если такой нет — кадр целиком, дальше решает детектор
     # этикетки (так каскад вёл себя и раньше, когда бутылка не находилась). Faster R-CNN: выкл.
     require_center: bool = False
+    square_label: bool = False
 
     def detect(self, image: Image.Image) -> list[Box]:
         raise NotImplementedError
@@ -100,6 +101,16 @@ class BoxCropper:
         if self.mode == "label":
             return self.label_window(box, size)
 
+        if self.square_label:
+            # Keep the detected label and a proportional border, then translate the square
+            # inside its source instead of inventing padding pixels.
+            width, height = size
+            desired = max(box.x2 - box.x1, box.y2 - box.y1) * (1 + 2 * self.margin)
+            side = min(desired, width, height)
+            x1 = min(max((box.x1 + box.x2 - side) / 2, 0), width - side)
+            y1 = min(max((box.y1 + box.y2 - side) / 2, 0), height - side)
+            return (int(round(x1)), int(round(y1)), int(round(x1 + side)), int(round(y1 + side)))
+
         width, height = size
         dx = (box.x2 - box.x1) * self.margin
         dy = (box.y2 - box.y1) * self.margin
@@ -112,10 +123,18 @@ class BoxCropper:
 
     def crop(self, image: Image.Image) -> Image.Image:
         """Обрезать кадр по найденной бутылке. Если бутылки нет — вернуть кадр как есть."""
+        cropped, _ = self.crop_with_box(image)
+        return cropped
+
+    def crop_with_box(
+        self, image: Image.Image
+    ) -> tuple[Image.Image, tuple[int, int, int, int] | None]:
+        """Crop plus its source coordinates for auditable derivative provenance."""
         box = self.pick(self.detect(image), image.size)
         if box is None:
-            return image
-        return image.crop(self.crop_rect(box, image.size))
+            return image, None
+        rect = self.crop_rect(box, image.size)
+        return image.crop(rect), rect
 
 
 class CachedCropper:
@@ -135,6 +154,9 @@ class CachedCropper:
     @staticmethod
     def _model_fingerprint(detector) -> str:
         """Invalidate crops after retraining even when the checkpoint folder is unchanged."""
+        if hasattr(detector, "detector"):
+            fingerprint = CachedCropper._model_fingerprint(detector.detector)
+            return f"{getattr(detector, 'cache_tag', '')}:{fingerprint}"
         if hasattr(detector, "bottle") and hasattr(detector, "label"):
             return ":".join(
                 CachedCropper._model_fingerprint(d) for d in (detector.bottle, detector.label)
@@ -187,3 +209,11 @@ class CascadeCropper:
 
     def crop(self, image: Image.Image) -> Image.Image:
         return self.label.crop(self.bottle.crop(image))
+
+    def crop_with_metadata(
+        self, image: Image.Image
+    ) -> tuple[Image.Image, tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
+        """Return the final crop and both stage rectangles for database provenance."""
+        bottle, bottle_rect = self.bottle.crop_with_box(image)
+        label, label_rect = self.label.crop_with_box(bottle)
+        return label, bottle_rect, label_rect

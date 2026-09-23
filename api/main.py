@@ -297,7 +297,8 @@ async def predict(image: Annotated[UploadFile, File()], request: Request) -> dic
 def catalog_image(slug: str) -> FileResponse:
     """Эталон карточки — для интерфейса: показать, с чем сравнили, и похожие вина картинками."""
     engine = scanner()
-    path = engine.path_by_id.get(slug)
+    payload = engine.payload_by_id.get(slug, {})
+    path = payload.get("source_image_path") or engine.path_by_id.get(slug)
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="нет такой карточки или её картинки")
     return FileResponse(path)
