@@ -5,6 +5,7 @@ from PIL import Image
 
 import wine_scanner.detect as detect
 from wine_scanner.detect import Box, BoxCropper, CascadeCropper, build_cropper, detector_kind
+from wine_scanner.image_preprocess import PreparedLabelCropper
 
 
 class FakeDetector(BoxCropper):
@@ -44,7 +45,9 @@ def test_build_cropper_picks_architecture(monkeypatch, tmp_path):
 
     FakeDetector.made.clear()
     cascade = build_cropper("cascade", weights_dir, device="cpu")
-    assert isinstance(cascade, CascadeCropper)
+    # Каталог, API и бенчмарк получают одну и ту же подготовленную этикетку поверх каскада.
+    assert isinstance(cascade, PreparedLabelCropper)
+    assert isinstance(cascade.detector, CascadeCropper)
     label, bottle = FakeDetector.made
     # RT-DETR: первая ступень — COCO-модель с целью bottle, вторая — свои веса с целью label.
     assert bottle.args[0] == detect.COCO_BOTTLE_MODEL and bottle.kwargs["target"] == "bottle"
@@ -59,7 +62,8 @@ def test_build_cropper_picks_architecture(monkeypatch, tmp_path):
     assert build_cropper(None, weights_pt, device="cpu") is None
     FakeDetector.made.clear()
     only_label = build_cropper("trained", weights_dir, device="cpu")
-    assert only_label is FakeDetector.made[0] and len(FakeDetector.made) == 1
+    assert isinstance(only_label, PreparedLabelCropper)
+    assert only_label.detector is FakeDetector.made[0] and len(FakeDetector.made) == 1
 
 
 def test_box_cropper_picks_central_large_bottle_and_crops_with_margin():

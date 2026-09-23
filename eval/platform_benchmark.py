@@ -346,7 +346,7 @@ def main() -> None:
     parser.add_argument("--index", type=Path, default=Path("models/index_platform"))
     parser.add_argument(
         "--decider",
-        default="models/decider_platform",
+        default="models/decider_platform_paddle",
         help="папка решающего слоя или `none` — только порядок слияния веток",
     )
     parser.add_argument(

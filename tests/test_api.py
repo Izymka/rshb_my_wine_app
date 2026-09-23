@@ -50,6 +50,7 @@ class FakeScanner:
     path_by_id = {"wine_a": "/нет/такого/a.png"}
 
     def __init__(self):
+        self.payload_by_id: dict[str, dict] = {"wine_a": {"name": "Chateau Alpha"}}
         self.calls: list[str] = []
         self.answered = True
 
@@ -204,6 +205,18 @@ def test_catalog_image_404_for_unknown_slug(client):
     assert client.get("/catalog/image/nope").status_code == 404
     # Есть slug, но файла на диске нет — тоже 404, а не 500.
     assert client.get("/catalog/image/wine_a").status_code == 404
+
+
+def test_catalog_image_prefers_source_image_from_database(client, tmp_path):
+    """Карточка из PostgreSQL указывает исходный файл — он главнее вырезки из индекса."""
+    source = tmp_path / "source.png"
+    source.write_bytes(frame())
+    client.engine.payload_by_id["wine_a"]["source_image_path"] = str(source)
+
+    response = client.get("/catalog/image/wine_a")
+
+    assert response.status_code == 200
+    assert response.content == source.read_bytes()
 
 
 def test_sommelier_is_404_when_not_configured(client, monkeypatch):

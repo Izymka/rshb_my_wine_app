@@ -81,7 +81,7 @@ uv run python scripts/synthesize_queries.py --n 300         # псевдофот
 uv run python scripts/import_live_photos.py                  # новые съёмки из data/incoming -> data/test | data/train
 uv run python scripts/build_platform_features.py --sources synthetic,train,test
 uv run python scripts/train_decider.py --features eval/results/features_platform.jsonl \
-  --scenario real --live-weight 30 --out models/decider_platform
+  --scenario real --live-weight 30 --out models/decider_platform_paddle
 ```
 
 Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.
