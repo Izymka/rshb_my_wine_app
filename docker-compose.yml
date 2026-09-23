@@ -8,10 +8,24 @@
 # (data/eval/participant_test.sh, endpoint http://127.0.0.1:8080/v1/eval/predict).
 #
 # Первое, что надо посмотреть в /health после переезда, — поле devices. Оно показывает, на чём
-# считается каждый блок по отдельности. XFeat и EasyOCR выбирают устройство сами, и остаться
-# на процессоре здесь легче лёгкого: сервис при этом работает, просто в двадцать раз медленнее.
+# считается каждый блок по отдельности. XFeat должен работать на GPU;
+# PaddleOCR в текущем адаптере намеренно работает на CPU.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wine_scanner
+      POSTGRES_USER: wine_scanner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wine_scanner}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wine_scanner -d wine_scanner"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   scanner:
     build: .
     ports:
@@ -21,14 +35,16 @@ services:
       - ./models:/app/models
       # Эталоны каталога — их отдаёт GET /catalog/image/{slug} для интерфейса.
       - ./data/catalog:/app/data/catalog:ro
+      - ./data/media:/app/data/media:ro
       # Кэш чужих весов переживает пересборку образа.
       - torch-cache:/opt/torch
-      - easyocr-cache:/opt/easyocr
+      - paddle-cache:/root/.paddlex
     environment:
+      DATABASE_URL: postgresql+psycopg://wine_scanner:${POSTGRES_PASSWORD:-wine_scanner}@postgres:5432/wine_scanner
       WINE_INDEX: /app/models/index_platform
-      WINE_DECIDER: /app/models/decider_platform
-      # Облачный OCR (yandex) с откатом на EasyOCR; без ключей оставить easyocr.
-      WINE_OCR: ${WINE_OCR:-easyocr}
+      WINE_DECIDER: /app/models/decider_platform_paddle
+      # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.
+      WINE_OCR: ${WINE_OCR:-paddle}
       YANDEX_OCR_API_KEY: ${YANDEX_OCR_API_KEY:-}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
       # VLM-судья на спорных случаях: Yandex AI Studio (без VPN) или OpenAI-совместимый чат.
@@ -61,6 +77,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
       # Модели поднимаются десятки секунд, и до этого сервис отвечать не обязан.
@@ -83,5 +102,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   torch-cache:
-  easyocr-cache:
+  paddle-cache:

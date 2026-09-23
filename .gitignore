@@ -11,6 +11,7 @@ __pycache__/
 # Исключение — splits/: сплит должен быть в истории, иначе метрики невоспроизводимы.
 data/*
 !data/splits/
+!data/splits/**
 models/
 rtdetr_data.tgz
 *.faiss

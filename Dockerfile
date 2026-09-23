@@ -24,7 +24,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
     TORCH_HOME=/opt/torch \
-    EASYOCR_MODULE_PATH=/opt/easyocr \
     # Без этих двух переменных nvidia-container-toolkit не прокинет драйвер в контейнер:
     # образы nvidia/cuda задают их сами, обычная Ubuntu — нет.
     NVIDIA_VISIBLE_DEVICES=all \
@@ -51,14 +50,14 @@ COPY scripts/ ./scripts/
 COPY eval/ ./eval/
 RUN uv sync --frozen --extra api --extra rerank --extra ocr --extra decide
 
-# Чужие веса выкачиваются при первом обращении: XFeat через torch.hub, EasyOCR — свои модели
+# Чужие веса выкачиваются при первом обращении: XFeat через torch.hub, PaddleOCR — свои модели
 # распознавания. Если этого не сделать на сборке, первый запуск контейнера пойдёт в интернет,
 # займёт минуты и упадёт там, где сети нет.
 RUN uv run python -c "\
-import torch, easyocr; \
+import torch; \
+from wine_scanner.ocr.paddle import PaddleOCR; \
 torch.hub.load('verlab/accelerated_features', 'XFeat', pretrained=True, trust_repo=True); \
-easyocr.Reader(['ru','en'], gpu=False, verbose=False); \
-easyocr.Reader(['fr','en'], gpu=False, verbose=False)"
+PaddleOCR()._get_engine()"
 
 EXPOSE 8000
 

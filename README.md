@@ -20,7 +20,7 @@
 ```bash
 cp .env.example .env          # ключи облачного OCR и LLM, если используются; без них тоже работает
 docker compose up --build     # сервис на :8080, интерфейс на :3000
-curl -s localhost:8080/health | jq .devices   # все блоки должны быть на cuda
+curl -s localhost:8080/health | jq .devices   # визуальные модели — cuda, PaddleOCR — cpu
 ```
 
 В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
@@ -29,7 +29,7 @@ curl -s localhost:8080/health | jq .devices   # все блоки должны �
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform WINE_DECIDER=models/decider_platform \
+WINE_INDEX=models/index_platform WINE_DECIDER=models/decider_platform_paddle \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -52,7 +52,7 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform`) |
-| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_paddle`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_VLM` | `0` | `1` — VLM-судья на спорных случаях |
 | `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `yandex`, — | Провайдер судьи и откат: `yandex` (Yandex AI Studio, без VPN) / `openai` (любой OpenAI-совместимый чат: `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) |
