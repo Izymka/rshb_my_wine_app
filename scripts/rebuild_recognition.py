@@ -119,7 +119,7 @@ def main():
     color = ",".join(map(str, padding["results"][padding["selection"]]["fill"]))
     index = "models/index_platform"
     features = "eval/results/features_platform_recrop.jsonl"
-    decider = "models/decider_platform"
+    decider = "models/decider_platform_paddle"
     run(
         "index",
         [
