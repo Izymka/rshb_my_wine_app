@@ -51,7 +51,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from wine_scanner.catalog import TEST_MANIFEST, Query, load_manifest
+from wine_scanner.catalog import TEST_MANIFEST, Query, load_equivalences, load_manifest
 from wine_scanner.decide.guard import DEFAULT_MODE as DEFAULT_GUARD
 from wine_scanner.decide.guard import GUARD_MODES
 from wine_scanner.embed import load_image
@@ -69,6 +69,7 @@ from wine_scanner.pipeline import (
 
 RESULTS = Path("eval/results/platform_runs.jsonl")
 CROP_CACHE = Path("models/crop_cache")
+EQUIVALENCES = load_equivalences()
 VISUAL_K = (1, 5, 10, 25, 50, 100)
 TEXT_K = (1, 5, 10, 25, 50)
 MISSING_RANK = 10**6
@@ -97,7 +98,10 @@ class Outcome:
     in_window: bool = False
     rerank_top1: bool = False
     guard: str | None = None
+    # С учётом дублей каталога из data/splits/catalog_slug_equivalences.csv: выбрать вторую
+    # карточку того же вина — не ошибка модели. Строгое совпадение slug — final_top1_strict.
     final_top1: bool = False
+    final_top1_strict: bool = False
     answered: bool = False
     verdict: str = (
         ""  # correct / twin / other / refused (известные); accepted / refused (незнакомые)
@@ -169,7 +173,8 @@ def evaluate(scanner: WineScanner, query: Query, result: ScanResult) -> Outcome:
     if window:
         leader = max(window, key=lambda item_id: inliers.get(item_id, 0))
         out.rerank_top1 = leader == true_id and inliers.get(leader, 0) > 0
-    out.final_top1 = bool(best and best.item_id == true_id)
+    out.final_top1_strict = bool(best and best.item_id == true_id)
+    out.final_top1 = bool(best and EQUIVALENCES.same(true_id, best.item_id))
 
     if not result.answered:
         out.verdict = "refused"
@@ -199,6 +204,7 @@ def summarize(outcomes: list[Outcome]) -> dict:
         "sibling_swaps_unknown": sum(bool(o.guard and "sibling" in o.guard) for o in unknown),
         "rerank_top1": rate(sum(o.rerank_top1 for o in known), n),
         "final_top1": rate(sum(o.final_top1 for o in known), n),
+        "final_top1_strict": rate(sum(o.final_top1_strict for o in known), n),
         "verdicts": dict(Counter(o.verdict for o in known)),
         "answered_precision": rate(
             sum(o.verdict == "correct" for o in known), sum(o.answered for o in known)
@@ -505,6 +511,7 @@ def main() -> None:
             "text_fields": args.text_fields,
             "sources": sorted(sources),
             "manifest": str(args.manifest),
+            "equivalence_groups": len(set(EQUIVALENCES.group_of.values())),
             "cached": not args.no_cache,
             "parallel": not args.sequential,
             "devices": scanner.devices(),
@@ -537,6 +544,7 @@ def main() -> None:
                             "guard": o.guard,
                             "rerank_top1": o.rerank_top1,
                             "final_top1": o.final_top1,
+                            "final_top1_strict": o.final_top1_strict,
                             "verdict": o.verdict,
                             "best_id": o.best_id,
                             "probability": o.probability,

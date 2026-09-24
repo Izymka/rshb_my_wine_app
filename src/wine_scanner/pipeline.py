@@ -45,6 +45,7 @@ from PIL import Image
 
 from .analogues import Analogues
 from .burst import fuse_rrf, ranked, sharpness
+from .catalog import load_equivalences
 from .decide import Decider, PairFeatures, Scored, derive
 from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
@@ -221,6 +222,22 @@ class RetrievalOnlyDecider:
         return scored
 
 
+def canonicalize(candidates: list[Candidate], canonical: dict, payload_by_id: dict) -> list:
+    """Лидер — дубль каталога: на его место встаёт канонический slug той же позиции.
+
+    Модель могла выбрать любую из двух карточек одного вина; заказчик засчитывает только
+    каноническую (у второй, например, страница 404). Если каноническая карточка уже среди
+    кандидатов, она поднимается наверх, дубль убирается; иначе лидер получает её slug и payload.
+    """
+    best = candidates[0]
+    target = canonical[best.item_id]
+    existing = next((c for c in candidates if c.item_id == target), None)
+    if existing is None:
+        existing = Candidate(target, best.probability, payload_by_id.get(target, {}), best.features)
+    existing.probability = max(existing.probability, best.probability)
+    return [existing] + [c for c in candidates if c is not best and c is not existing]
+
+
 def confidence_of(candidates: list[Candidate]) -> dict | None:
     """Уверенность для API из калиброванных вероятностей кандидатов.
 
@@ -392,6 +409,8 @@ class WineScanner:
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
         }
         self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
+        # Дубли каталога по решению человека: дубль с каноническим slug отдаётся каноническим.
+        self.equivalences = load_equivalences()
         # Где на карточке напечатан год. Считается при сборке индекса тем же распознавателем,
         # что и всё остальное, — на запросе это лишний вызов OCR по каждому кандидату.
         # Индекс, собранный до Э8, поля не содержит: тогда год читается только из общего
@@ -758,6 +777,10 @@ class WineScanner:
                     crop, candidates, answered, self.threshold, self.text_index.family_of
                 )
                 best = candidates[0]
+
+        if best is not None and best.item_id in self.equivalences.canonical:
+            candidates = canonicalize(candidates, self.equivalences.canonical, self.payload_by_id)
+            best = candidates[0]
 
         # Не сумма этапов, а настоящее время запроса: этапы теперь идут внахлёст, и их сумма
         # больше того, что ждёт пользователь. Ровно эту величину и требует Э11.
