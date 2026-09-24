@@ -6,6 +6,7 @@
 """
 
 import io
+import os
 
 import pytest
 
@@ -155,9 +156,10 @@ def test_eval_endpoint_returns_a_flat_slug(client):
     assert client.engine.calls == ["single"]
 
 
-def test_eval_endpoint_refuses_honestly_with_similar_wines(client):
-    """Незнакомое вино: slug строго null (скрипт запишет отказ), рядом — похожие, по ТЗ п. 5."""
+def test_eval_endpoint_refuses_honestly_with_similar_wines(client, monkeypatch):
+    """WINE_EVAL_REFUSE=1: незнакомое вино — slug строго null, рядом похожие, по ТЗ п. 5."""
     client.engine.answered = False
+    monkeypatch.setattr(main, "EVAL_REFUSE", True)
     response = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
 
     body = response.json()
@@ -190,9 +192,14 @@ def test_eval_endpoint_carries_confidence_beside_slug(client):
     assert body["confidence"]["top1"] == pytest.approx(0.9)
 
 
+def test_eval_endpoint_answers_by_default():
+    """Проверка заказчика — вина каталога, null засчитывается ошибкой: по умолчанию отвечаем."""
+    if "WINE_EVAL_REFUSE" not in os.environ:
+        assert main.EVAL_REFUSE is False
+
+
 def test_eval_endpoint_can_be_told_to_always_answer(client, monkeypatch):
-    """WINE_EVAL_REFUSE=0: ниже порога всё равно отдаём лучшего — на случай, если null в ключе
-    не засчитывается никогда. found при этом честно false."""
+    """WINE_EVAL_REFUSE=0: ниже порога всё равно отдаём лучшего. found при этом честно false."""
     client.engine.answered = False
     monkeypatch.setattr(main, "EVAL_REFUSE", False)
     body = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")}).json()

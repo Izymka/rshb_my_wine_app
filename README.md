@@ -29,7 +29,7 @@ curl -s localhost:8080/health | jq .devices   # визуальные модел�
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform WINE_DECIDER=models/decider_platform_paddle \
+WINE_INDEX=models/index_platform_sq_v3 WINE_DECIDER=models/decider_platform_sq_v3_slug \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -51,8 +51,8 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
-| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform`) |
-| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_paddle`) |
+| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_slug`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_VLM` | `0` | `1` — VLM-судья на спорных случаях |
 | `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `yandex`, — | Провайдер судьи и откат: `yandex` (Yandex AI Studio, без VPN) / `openai` (любой OpenAI-совместимый чат: `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) |
@@ -75,13 +75,17 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 ```bash
 uv run python scripts/build_catalog.py                      # data/catalog/: catalog.csv + originals/<slug>.png
 uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad \
-  --model google/siglip2-so400m-patch16-384 --out models/index_platform      # ~20 мин на ноутбуке
-uv run python scripts/fit_whitening.py --index models/index_platform --dim 256
+  --model models/siglip2 --weights models/rtdetr_label_recrop_bf16 --local-preprocess clahe2 \
+  --out models/index_platform_sq_v3                          # ~1 ч на RTX 4060 Ti
+uv run python scripts/fit_whitening.py --index models/index_platform_sq_v3 --dim 256
 uv run python scripts/synthesize_queries.py --n 300         # псевдофото из вырезок каталога
 uv run python scripts/import_live_photos.py                  # новые съёмки из data/incoming -> data/test | data/train
-uv run python scripts/build_platform_features.py --sources synthetic,train,test
-uv run python scripts/train_decider.py --features eval/results/features_platform.jsonl \
-  --scenario real --live-weight 30 --out models/decider_platform_paddle
+uv run python scripts/import_organizer_photos.py            # organizer_100 -> data/train по таблице проверки
+uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3 \
+  --sources synthetic,train --out eval/results/features_platform_sq_v3.jsonl
+uv run python scripts/build_decider_training_notebook.py    # ноутбук 06: EDA, CV, подбор, K/P
+uv run jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 \
+  notebooks/06_decider_eda_and_training.ipynb               # -> models/decider_platform_sq_v3_slug
 ```
 
 Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.
