@@ -112,6 +112,23 @@ def test_vlm_judge_errors_are_verdicts(handler):
     assert judge.errors == 1
 
 
+def test_consult_report_keeps_answer_before_judge():
+    """Отчёт хранит прежнего лидера — по нему бенчмарк считает, помог ли судья."""
+    response = completion('{"choice": 2, "confidence": 0.95}')
+    judge = VlmJudge(
+        "https://api.example/v1", "vlm", client=transport(lambda r: httpx.Response(200, json=response))
+    )
+    fam = {"a": "Массандра", "b": "Массандра"}
+    candidates, answered, report = judge.consult(
+        Image.new("RGB", (10, 10)), [cand("a", 0.6), cand("b", 0.3)], True, 0.5, fam
+    )
+    assert candidates[0].item_id == "b" and answered
+    assert report["reason"] == "same_family" and report["applied"] == "choose"
+    assert report["before_id"] == "a"
+    assert report["before_probability"] == pytest.approx(0.6)
+    assert report["before_answered"] is True
+
+
 def test_from_env_disabled_by_default(monkeypatch):
     monkeypatch.delenv("WINE_VLM", raising=False)
     assert VlmJudge.from_env() is None

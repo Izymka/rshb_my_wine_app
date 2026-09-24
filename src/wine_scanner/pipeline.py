@@ -482,7 +482,12 @@ class WineScanner:
         started = time.perf_counter()
         from .embed.branches import branch_image
 
-        lines = self.ocr.read(branch_image(crop, self.ocr_preprocess), use_cache=use_cache)
+        image = branch_image(crop, self.ocr_preprocess)
+        # Подменные OCR в тестах умеют только read(); маршрута у них нет.
+        if hasattr(self.ocr, "read_with_route"):
+            lines, route = self.ocr.read_with_route(image, use_cache=use_cache)
+        else:
+            lines, route = self.ocr.read(image, use_cache=use_cache), None
         text = LabelOCR.joined(lines)
         timings["ocr"] = time.perf_counter() - started
 
@@ -502,6 +507,7 @@ class WineScanner:
         confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
         return {
             "lines": lines,
+            "route": route,
             "text": text,
             "confidence": confidence,
             "hits": hits,
@@ -786,6 +792,11 @@ class WineScanner:
                         if item_id in window_set
                     },
                     "ocr_lines": [line.text for line in lines],
+                    # Кто прочитал строку (paddle / yandex) и насколько уверенно — по этому
+                    # бенчмарк видит, на каких кадрах hybrid ходил в облако.
+                    "ocr_sources": [line.source for line in lines],
+                    "ocr_confidences": [line.confidence for line in lines],
+                    "ocr_route": text_result.get("route"),
                     "ocr_tokens": list(ocr_tokens),
                 }
                 if trace

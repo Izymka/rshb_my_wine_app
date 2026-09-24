@@ -105,6 +105,13 @@ class Outcome:
     best_id: str = ""
     probability: float = 0.0
     timings: dict = field(default_factory=dict)
+    # Источники строк OCR: {"paddle": 5} или {"yandex": 7}; облако в hybrid видно по "yandex".
+    ocr_sources: dict = field(default_factory=dict)
+    ocr_conf_max: float = 0.0
+    # Маршрут OCR: звали ли облако и почему (LabelOCR._route).
+    ocr_route: dict | None = None
+    # Отчёт VLM-судьи (reason, choice, applied, before_id…), None — судью не звали.
+    judge: dict | None = None
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -142,6 +149,10 @@ def evaluate(scanner: WineScanner, query: Query, result: ScanResult) -> Outcome:
     out.guard = result.guard
     out.best_id = best.item_id if best else ""
     out.probability = best.probability if best else 0.0
+    out.ocr_sources = dict(Counter(trace.get("ocr_sources", [])))
+    out.ocr_conf_max = max(trace.get("ocr_confidences", []), default=0.0)
+    out.ocr_route = trace.get("ocr_route")
+    out.judge = result.judge
 
     if not query.known:
         out.verdict = "accepted" if result.answered else "refused"
@@ -220,6 +231,19 @@ def summarize(outcomes: list[Outcome]) -> dict:
     metrics["false_accept"]["all"] = {
         "n": len(unknown),
         "rate": rate(sum(o.answered for o in unknown), len(unknown)),
+    }
+    # Облачные шаги: сколько кадров прочитал Yandex Vision и сколько раз звали судью.
+    judged = [o for o in outcomes if o.judge]
+    metrics["cloud"] = {
+        "ocr_cloud_frames": sum(bool(o.ocr_sources.get("yandex")) for o in outcomes),
+        "ocr_cloud_reasons": dict(
+            Counter(o.ocr_route["reason"] for o in outcomes if o.ocr_route and o.ocr_route["cloud"])
+        ),
+        "ocr_cloud_fallbacks": sum(bool(o.ocr_route and o.ocr_route["fallback"]) for o in outcomes),
+        "judge_calls": len(judged),
+        "judge_reasons": dict(Counter(o.judge["reason"] for o in judged)),
+        "judge_applied": dict(Counter(o.judge["applied"] for o in judged)),
+        "judge_errors": sum(bool(o.judge.get("error")) for o in judged),
     }
     return metrics
 
@@ -516,6 +540,11 @@ def main() -> None:
                             "verdict": o.verdict,
                             "best_id": o.best_id,
                             "probability": o.probability,
+                            "source": o.query.source,
+                            "ocr_sources": o.ocr_sources,
+                            "ocr_conf_max": o.ocr_conf_max,
+                            "ocr_route": o.ocr_route,
+                            "judge": o.judge,
                         },
                         ensure_ascii=False,
                     )

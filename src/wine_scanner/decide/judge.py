@@ -197,6 +197,9 @@ class VlmJudge:
         if reason is None:
             return candidates, answered, None
         options = [describe(c) for c in candidates[: self.max_options]]
+        # Что было до судьи: без этого не сказать, помог он или испортил ответ.
+        before_id, before_probability = candidates[0].item_id, candidates[0].probability
+        answered_before = answered
         verdict = self.judge(crop, options)
         candidates, answered, applied = apply_verdict(candidates, verdict, threshold)
         report = {
@@ -206,5 +209,8 @@ class VlmJudge:
             "read_text": verdict.read_text,
             "error": verdict.error or None,
             "applied": applied,
+            "before_id": before_id,
+            "before_probability": before_probability,
+            "before_answered": answered_before,
         }
         return candidates, answered, report

@@ -3,6 +3,8 @@
 Состояние после переноса с Mac и перехода на RT-DETR: [аудит 20.09.2026](docs/RTDETR_STATUS.md).
 Разбор кропов и разметки: [ноутбук](notebooks/02_rtdetr_crop_audit.ipynb).
 Переобучение, padding и OCR/XFeat: [эксперименты](notebooks/03_pipeline_rebuild_experiments.ipynb).
+Разбор ошибок действующего решающего слоя: [ноутбук 04](notebooks/04_catboost_importance_and_errors.ipynb).
+Облачные шаги (hybrid OCR, VLM-судья) на тесте: [ноутбук 07](notebooks/07_cloud_steps_hybrid_ocr_and_vlm_judge.ipynb).
 
 Фотография этикетки → карточка вина из каталога платформы, калиброванная уверенность, честный
 отказ с похожими и аналогами, если вина в каталоге нет. Хакатон РСХБ, сентябрь 2026.

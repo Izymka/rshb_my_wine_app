@@ -119,6 +119,63 @@ def test_hybrid_calls_cloud_only_for_weak_local_text(tmp_path, image, monkeypatc
     assert cloud.calls == 1
 
 
+STRONG = [TextLine(t, 0.9, "paddle") for t in ("МАССАНДРА", "ПОРТВЕЙН", "АЛУШТА")]
+
+
+@pytest.mark.parametrize(
+    ("local", "cloud_expected", "reason"),
+    [
+        ([TextLine("коротко", 0.9, "paddle")], True, "few_lines"),
+        ([TextLine(t, 0.4, "paddle") for t in "абв"], True, "low_conf"),
+        (STRONG, False, None),
+    ],
+)
+def test_hybrid_route_says_why(tmp_path, image, monkeypatch, local, cloud_expected, reason):
+    ocr = LabelOCR(cache_dir=tmp_path, backend="hybrid", cloud=FakeCloud(STRONG[:1]))
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: local)
+    _, route = ocr.read_with_route(image)
+    assert route["cloud"] is cloud_expected
+    assert route["reason"] == reason
+    assert route["local_lines"] == len(local)
+    assert route["local_conf_max"] == pytest.approx(max(line.confidence for line in local))
+
+
+def test_hybrid_route_marks_fallback(tmp_path, image, monkeypatch):
+    ocr = LabelOCR(cache_dir=tmp_path, backend="hybrid", cloud=FakeCloud(fail=True))
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: [TextLine("x", 0.9, "paddle")])
+    lines, route = ocr.read_with_route(image)
+    assert [line.source for line in lines] == ["paddle"]
+    assert route["cloud"] and route["fallback"]
+
+
+def test_cloud_failure_is_not_cached(tmp_path, image, monkeypatch):
+    cloud = FakeCloud([TextLine("облако", 0.9, "yandex")], fail=True)
+    ocr = LabelOCR(cache_dir=tmp_path, backend="hybrid", cloud=cloud)
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: [TextLine("x", 0.9, "paddle")])
+    assert ocr.read_with_route(image, use_cache=True)[1]["fallback"]
+    cloud.fail = False
+    lines, route = ocr.read_with_route(image, use_cache=True)
+    assert [line.text for line in lines] == ["облако"] and not route["fallback"]
+    assert cloud.calls == 2
+
+
+def test_route_survives_cache_without_second_cloud_call(tmp_path, image, monkeypatch):
+    cloud = FakeCloud([TextLine("облако", 0.9, "yandex")])
+    ocr = LabelOCR(cache_dir=tmp_path, backend="hybrid", cloud=cloud)
+    monkeypatch.setattr(ocr, "_read_paddle", lambda img: [TextLine("x", 0.9, "paddle")])
+    first = ocr.read_with_route(image, use_cache=True)
+    second = ocr.read_with_route(image, use_cache=True)
+    assert cloud.calls == 1
+    assert second[1] == first[1]
+    # Кэш, записанный до маршрутов: маршрут восстанавливается локально, облако не зовётся.
+    for sidecar in tmp_path.glob("*.route.json"):
+        sidecar.unlink()
+    lines, route = ocr.read_with_route(image, use_cache=True)
+    assert cloud.calls == 1
+    assert [line.text for line in lines] == ["облако"]
+    assert route["cloud"] and route["reason"] == "few_lines"
+
+
 def transport(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
