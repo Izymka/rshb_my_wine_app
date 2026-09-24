@@ -47,6 +47,13 @@ def logit(p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
+def is_ordered_subset(names: tuple[str, ...], reference: tuple[str, ...]) -> bool:
+    """Все имена известны, не повторяются и идут в том же порядке, что в reference."""
+    positions = {name: i for i, name in enumerate(reference)}
+    indices = [positions.get(name, -1) for name in names]
+    return all(i >= 0 for i in indices) and indices == sorted(set(indices))
+
+
 class Decider:
     """Ranker для порядка кандидатов и classifier с калибровкой для решения об отказе.
 
@@ -74,13 +81,13 @@ class Decider:
         self.meta = meta or {}
         self.ranker = ranker
 
-        # New derived features can be appended without changing the meaning of old columns.
-        # Keep old validated classifier artefacts usable until a ranker passes evaluation;
-        # a reordered or altered prefix is still unsafe and is rejected.
-        if self.feature_names != FEATURE_NAMES[: len(self.feature_names)]:
+        # Столбцы выбираются по именам (см. score), поэтому модели можно учить на любом
+        # подмножестве признаков: старый префикс v3 или v3 без признаков домена съёмки.
+        # Незнакомое имя или перестановка — признак модели от другой версии кода: отказ.
+        if not is_ordered_subset(self.feature_names, FEATURE_NAMES):
             raise ValueError(
                 "порядок признаков в сохранённой модели не совпадает с кодом: "
-                f"{self.feature_names} не является началом {FEATURE_NAMES}. "
+                f"{self.feature_names} не является упорядоченным подмножеством {FEATURE_NAMES}. "
                 "Модель надо переобучить "
                 "(scripts/build_platform_features.py, затем scripts/train_decider.py) — "
                 "иначе бустер получит колонки не на своих местах и молча начнёт врать."

@@ -285,6 +285,15 @@ def test_decider_rejects_reordered_features():
         Decider(FakeBooster(), 1.0, 0.0, 0.5, feature_names=("inliers", "vis_score"))
 
 
+def test_decider_accepts_ordered_subset_of_features():
+    """Подмножество в исходном порядке (v3 без признаков домена) — законная модель."""
+    names = tuple(n for n in FEATURE_NAMES[:47] if n not in {"vis_std", "vis_mean", "ocr_lines"})
+    decider = Decider(FakeBooster(), 1.0, 0.0, 0.5, feature_names=names)
+    assert decider.feature_names == names
+    with pytest.raises(ValueError, match="порядок признаков"):
+        Decider(FakeBooster(), 1.0, 0.0, 0.5, feature_names=("vis_score", "no_such_feature"))
+
+
 def test_calibration_spreads_the_scale():
     """Калибровка по логиту обязана растягивать шкалу, а не сплющивать её у единицы."""
     decider = Decider(FakeBooster(), calib_weight=1.0, calib_bias=0.0, threshold=0.5)
