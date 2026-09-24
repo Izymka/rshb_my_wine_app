@@ -2,6 +2,7 @@
 
     uv run python scripts/import_live_photos.py                 # всё из data/incoming
     uv run python scripts/import_live_photos.py --dest test     # незнакомцев тоже в тест
+    uv run python scripts/import_live_photos.py --known-dest train --source web  # фото из сети
 
 Раскладка с 18.09.2026 (до этого все кадры лежали в одном `data/live`, он ушёл в `data/archive`):
 
@@ -33,6 +34,10 @@
 50 незнакомцами, и раздувать его без нужды не стоит). Кадр с несколькими бутылками — в
 подпапку `multi/`. HEIC переписывается в JPEG полного разрешения: скрипт оценки шлёт
 JPEG/WebP, и мерить надо ровно то, что уйдёт по сети; MP4 от Live Photo не трогаются.
+`--known-dest train` кладёт известные вина в train — для кадров, которые мерить нельзя
+(например, чужие фото из интернета, `--source web`). Вино, которое уже есть в тесте, так
+импортировать нельзя: скрипт остановится со списком, ничего не записав. Группа известного
+вина в train — значение `--source` (`web`), чтобы такие кадры отделялись от своих съёмок.
 Папка после импорта переезжает в `data/archive/incoming/`, чтобы не импортироваться дважды;
 манифест дописывается, уже известные пути пропускаются.
 
@@ -72,7 +77,14 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def import_folder(folder: Path, slugs: set[str], unknown_dest: str, force: bool) -> tuple[Path, list[dict]]:
+def import_folder(
+    folder: Path,
+    slugs: set[str],
+    unknown_dest: str,
+    force: bool,
+    known_dest: str = "test",
+    source: str = "live",
+) -> tuple[Path, list[dict]]:
     """Папка одного вина из data/incoming → (корень назначения, строки манифеста)."""
     wine_id = folder.name
     if wine_id.startswith("unknown-"):
@@ -80,7 +92,8 @@ def import_folder(folder: Path, slugs: set[str], unknown_dest: str, force: bool)
     elif wine_id.startswith("import-"):
         slug, group, root = "", "unknown-easy", ROOTS[unknown_dest]
     elif wine_id in slugs:
-        slug, group, root = wine_id, "live", TEST_ROOT
+        group = "live" if known_dest == "test" else source
+        slug, root = wine_id, ROOTS[known_dest]
     else:
         raise SystemExit(
             f"папка {folder}: это не slug каталога и не unknown-/import- — проверьте имя "
@@ -102,7 +115,7 @@ def import_folder(folder: Path, slugs: set[str], unknown_dest: str, force: bool)
                 "wine_id": wine_id,
                 "true_slug": slug,
                 "group": "multi" if multi else group,
-                "source": "live",
+                "source": source,
                 "note": "несколько бутылок" if multi else "",
             }
         )
@@ -127,6 +140,11 @@ def main() -> None:
         "--dest", choices=("test", "train"), default="train",
         help="куда класть незнакомцев (известные вина всегда в test)",
     )
+    parser.add_argument(
+        "--known-dest", choices=("test", "train"), default="test",
+        help="куда класть известные вина; train — только для вин, которых нет в тесте",
+    )
+    parser.add_argument("--source", default="live", help="происхождение кадров: live, web …")
     parser.add_argument("--force", action="store_true", help="перезаписать уже сконвертированные JPEG")
     parser.add_argument("--keep", action="store_true", help="не переносить папки в data/archive/incoming")
     args = parser.parse_args()
@@ -140,9 +158,17 @@ def main() -> None:
             report(root)
         return
 
+    if args.known_dest == "train":
+        in_test = {r["true_slug"] for r in read_manifest(TEST_ROOT / "manifest.csv")}
+        clash = sorted(f.name for f in folders if f.name in slugs and f.name in in_test)
+        if clash:
+            raise SystemExit("эти вина уже в тесте, в train их брать нельзя: " + ", ".join(clash))
+
     added: dict[Path, list[dict]] = {root: [] for root in ROOTS.values()}
     for folder in folders:
-        root, rows = import_folder(folder, slugs, args.dest, args.force)
+        root, rows = import_folder(
+            folder, slugs, args.dest, args.force, args.known_dest, args.source
+        )
         added[root] += rows
         if not args.keep:
             ARCHIVE.mkdir(parents=True, exist_ok=True)
