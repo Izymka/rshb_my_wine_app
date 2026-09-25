@@ -53,17 +53,24 @@ state: dict[str, object] = {}
 # вернёт честный отказ (ТЗ п. 5). Продуктовый /scan это не трогает: там отказ остаётся отказом.
 EVAL_REFUSE = os.environ.get("WINE_EVAL_REFUSE", "0") == "1"
 
+# VLM-судья (WINE_VLM=1) с 25.09.2026 работает только в eval-ручке. Там он исправляет
+# близнецов одной винодельни (тест: 85 → 91 из 93), а в /scan почти не говорит «нет» и
+# поднимает ложные приёмы незнакомых вин с 0.07 до 0.34. WINE_VLM_SCAN=1 вернёт его в /scan.
+SCAN_JUDGE = os.environ.get("WINE_VLM_SCAN", "0") == "1"
+
 # Пайплайн не потокобезопасен по замыслу (одна видеокарта, одни модели) и занимает секунды.
 # Считаем его в рабочем потоке под замком: цикл событий остаётся отзывчивым — /health отвечает
 # во время скана, — а запросы всё равно идут по одному, как и раньше.
 scan_lock = asyncio.Lock()
 
 
-async def run_identify(engine: WineScanner, images: list[Image.Image]) -> ScanResult:
+async def run_identify(
+    engine: WineScanner, images: list[Image.Image], use_judge: bool
+) -> ScanResult:
     async with scan_lock:
         if len(images) == 1:
-            return await asyncio.to_thread(engine.identify, images[0])
-        return await asyncio.to_thread(engine.identify_burst, images)
+            return await asyncio.to_thread(engine.identify, images[0], use_judge=use_judge)
+        return await asyncio.to_thread(engine.identify_burst, images, use_judge)
 
 
 def warm_up(engine: WineScanner) -> float:
@@ -222,7 +229,7 @@ async def scan(files: Annotated[list[UploadFile], File()], request: Request) -> 
 
     images = await collect(files)
     engine = scanner()
-    result = await run_identify(engine, images)
+    result = await run_identify(engine, images, use_judge=SCAN_JUDGE)
 
     log.info(
         "%s кадров=%d ответ=%s вино=%s p=%.3f %.0f мс",
@@ -273,14 +280,15 @@ def eval_answer(result: ScanResult) -> dict:
 async def predict(image: Annotated[UploadFile, File()], request: Request) -> dict:
     """Один кадр — один slug. Endpoint для participant_test.sh организаторов.
 
-    Тот же пайплайн, что и в /scan, отличается только форма ответа: скрипт шлёт одно
-    multipart-поле `image` и разбирает плоский объект. Своей логики здесь нет намеренно —
-    иначе цифры контрольного прогона перестанут описывать то, что видит пользователь.
+    Тот же пайплайн, что и в /scan, отличается форма ответа и судья: скрипт шлёт одно
+    multipart-поле `image` и разбирает плоский объект, а VLM-судья (если WINE_VLM=1) здесь
+    зовётся всегда — каталог закрыт, и выбрать верного близнеца важнее, чем отказать.
+    Скрипт ждёт ответа 10 с; судья с таймаутом 4 с укладывается в p95 ~3 с на запрос.
     """
     number = request.state.request_id
     images = await collect([image])
     engine = scanner()
-    result = await run_identify(engine, images)
+    result = await run_identify(engine, images, use_judge=True)
     log.info(
         "%s eval ответ=%s slug=%s p=%.3f %.0f мс",
         number,

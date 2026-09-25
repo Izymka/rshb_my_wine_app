@@ -356,6 +356,54 @@ def load_manifest(manifest: Path = TEST_MANIFEST, include_multi: bool = False) -
 load_live = load_manifest  # прежнее имя, до раскладки 18.09 манифест был один — data/live
 
 
+EQUIVALENCES = Path("data/splits/catalog_slug_equivalences.csv")
+# Карточки с ошибкой контента, которые нельзя отдавать вовсе: например, фото чужой бутылки.
+# Подменить их каноническим slug нельзя — картинка притягивает кадры другого вина.
+EXCLUDED = Path("data/splits/catalog_excluded_slugs.csv")
+
+
+@dataclass
+class Equivalences:
+    """Решения человека о дублях каталога (`data/splits/catalog_slug_equivalences.csv`).
+
+    Очередь на проверку собирает `scripts/audit_catalog_equivalences.py`; сюда попадают только
+    пары с `decision == equivalent` — одно вино, заведённое дважды. `canonical` — какой slug
+    отдавать вместо дубля (у второго, например, страница 404); у пары без канонического slug
+    сервис отвечает как есть, а метрика засчитывает любой из двух.
+    """
+
+    canonical: dict[str, str] = field(default_factory=dict)
+    group_of: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Slug, которые сервис не отдаёт никогда (`data/splits/catalog_excluded_slugs.csv`).
+    excluded: frozenset[str] = frozenset()
+
+    def same(self, a: str, b: str) -> bool:
+        return a == b or b in self.group_of.get(a, ())
+
+
+def load_equivalences(path: Path = EQUIVALENCES, excluded: Path = EXCLUDED) -> Equivalences:
+    result = Equivalences()
+    if excluded.exists():
+        table = pd.read_csv(excluded, dtype=str, keep_default_na=False)
+        result.excluded = frozenset(table.slug) - {""}
+    if not path.exists():
+        return result
+    table = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for row in table.itertuples(index=False):
+        if row.decision != "equivalent":
+            continue
+        group = frozenset({row.slug_a, row.slug_b} | set(result.group_of.get(row.slug_a, ()))
+                          | set(result.group_of.get(row.slug_b, ())))
+        for slug in group:
+            result.group_of[slug] = group
+        if row.canonical_slug:
+            if row.canonical_slug not in group:
+                raise ValueError(f"canonical_slug {row.canonical_slug} не из пары {row.slug_a}")
+            for slug in group - {row.canonical_slug}:
+                result.canonical[slug] = row.canonical_slug
+    return result
+
+
 def load_eval_queries(root: Path = EVAL_ROOT) -> list[Path]:
     """Кадры публичного набора организаторов в порядке queries.tsv.
 

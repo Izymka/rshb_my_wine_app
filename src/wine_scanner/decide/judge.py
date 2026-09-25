@@ -32,10 +32,17 @@ import httpx
 from PIL import Image
 
 from ..llm import ChatError, OpenAICompatibleChat, chat_from_env, jpeg_bytes
+from ..ocr.normalize import fold_tokens
 
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_MAX_SIDE = 1024
 DEFAULT_MAX_OPTIONS = 8
+DEFAULT_MAX_FAMILY = 4
+# Какие карточки показывать: `all` — первые max_options; `family` — лидер и соседи по винодельне.
+OPTION_MODES = ("all", "family")
+# Когда звать: `reasons` — judge_reason (отказ при сильной геометрии, сосед вторым, малый
+# разрыв); `family` — всегда, когда у лидера есть сосед по винодельне среди кандидатов.
+TRIGGERS = ("reasons", "family")
 MARGIN_TRIGGER = 0.2
 STRONG_INLIERS = 30
 REFUSE_CONFIDENCE = 0.7
@@ -102,23 +109,70 @@ def judge_reason(candidates, answered: bool, threshold: float, family_of: dict) 
 
 
 def describe(candidate) -> str:
+    """Строка карточки для судьи. Сорта нужны: у «Азюр» Рислинг и «Азюр» Вионье одно название."""
     payload = candidate.payload
     parts = [payload.get("winery"), payload.get("name"), payload.get("category")]
+    grapes = payload.get("grapes")
+    if grapes:
+        parts.append(f"сорта: {grapes}")
     vintage = payload.get("vintage")
     if vintage:
         parts.append(str(vintage))
-    return " — ".join(str(p) for p in parts if p)
+    return " — ".join(" ".join(str(p).split()) for p in parts if p)
 
 
-def apply_verdict(candidates: list, verdict: Verdict, threshold: float) -> tuple[list, bool, str]:
-    """Применить вердикт к списку кандидатов. Возвращает (кандидаты, answered, что сделано)."""
+def family_options(candidates: list, family_of: dict, max_options: int, max_family: int) -> list:
+    """Лидер и его соседи по винодельне из первых `max_options` кандидатов.
+
+    Далёкие карточки судье только мешают: без рассуждений он охотно выбирает шестую-седьмую
+    карточку чужой линейки. Пусто, если соседей нет — рассуживать нечего.
+    """
+    leader = candidates[0]
+    family = family_of.get(leader.item_id)
+    if not family:
+        return []
+    siblings = [
+        c for c in candidates[1:max_options] if family_of.get(c.item_id) == family
+    ][: max_family - 1]
+    return [leader, *siblings] if siblings else []
+
+
+def _stems(text: str) -> set[str]:
+    # Пять букв свёрнутой формы: «красный» и «красное», «полусладкое» и «полусладкий» — одно.
+    return {token[:5] for token in fold_tokens(text) if len(token) > 2}
+
+
+def supports_switch(read_text: str, chosen, leader) -> bool:
+    """Подтверждает ли прочитанный судьёй текст выбор `chosen` вместо `leader`.
+
+    Смотрим только на слова, которыми карточки различаются: хотя бы одно слово выбранной
+    карточки, которого нет у лидера, должно быть в тексте этикетки. Если различий в словах нет
+    (дубль каталога), текст ничего не подтверждает.
+    """
+    def words(candidate) -> str:
+        payload = candidate.payload
+        return " ".join(
+            str(payload.get(key) or "") for key in ("name", "category", "grapes", "vintage")
+        )
+
+    distinct = _stems(words(chosen)) - _stems(words(leader))
+    return bool(distinct & _stems(read_text))
+
+
+def apply_verdict(
+    candidates: list, verdict: Verdict, threshold: float, options: list | None = None
+) -> tuple[list, bool, str]:
+    """Применить вердикт к списку кандидатов. Возвращает (кандидаты, answered, что сделано).
+
+    `options` — карточки в том порядке, в каком их видел судья (по умолчанию первые кандидаты).
+    """
+    if options is None:
+        options = candidates[:DEFAULT_MAX_OPTIONS]
     if verdict.error:
         best = candidates[0]
         return candidates, best.probability >= threshold, "none"
-    if verdict.choice is not None and 1 <= verdict.choice <= min(
-        len(candidates), DEFAULT_MAX_OPTIONS
-    ):
-        chosen = candidates[verdict.choice - 1]
+    if verdict.choice is not None and 1 <= verdict.choice <= len(options):
+        chosen = options[verdict.choice - 1]
         chosen.probability = max(chosen.probability, verdict.confidence)
         reordered = [chosen] + [c for c in candidates if c is not chosen]
         return reordered, chosen.probability >= threshold, "choose"
@@ -142,7 +196,13 @@ class VlmJudge:
         json_mode: bool = True,
         client: httpx.Client | None = None,
         llm=None,
+        options: str = "all",
+        trigger: str = "reasons",
+        verify: bool = False,
+        max_family: int = DEFAULT_MAX_FAMILY,
     ):
+        if options not in OPTION_MODES or trigger not in TRIGGERS:
+            raise ValueError(f"VlmJudge: options из {OPTION_MODES}, trigger из {TRIGGERS}")
         # Либо готовый чат-клиент (llm.py: OpenAI-совместимый, Yandex, цепочка с откатом),
         # либо параметры OpenAI-совместимого — из них клиент собирается здесь.
         if llm is None:
@@ -155,6 +215,11 @@ class VlmJudge:
         self.max_side = max_side
         self.max_options = max_options
         self.json_mode = json_mode
+        self.options = options
+        self.trigger = trigger
+        # Смену лидера принимать, только если текст этикетки её подтверждает (supports_switch).
+        self.verify = verify
+        self.max_family = max_family
         self.calls = 0
         self.errors = 0
 
@@ -167,7 +232,27 @@ class VlmJudge:
             llm=chat_from_env("WINE_VLM", timeout=timeout),
             timeout=timeout,
             json_mode=os.environ.get("WINE_VLM_JSON_MODE", "1") == "1",
+            # По умолчанию — вариант family-verify: выбран на живых кадрах train без вин теста
+            # (eval/judge_validation.py), на тесте 85 → 91 из 93 без единой поломки top-1.
+            options=os.environ.get("WINE_VLM_OPTIONS", "family"),
+            trigger=os.environ.get("WINE_VLM_TRIGGER", "family"),
+            verify=os.environ.get("WINE_VLM_VERIFY", "1") == "1",
         )
+
+    def select(self, candidates: list, answered: bool, threshold: float, family_of: dict):
+        """Звать ли судью и какие карточки показать: (причина, карточки) или (None, [])."""
+        if not candidates:
+            return None, []
+        family = family_options(candidates, family_of, self.max_options, self.max_family)
+        if self.trigger == "family":
+            reason = "family" if family else None
+        else:
+            reason = judge_reason(candidates, answered, threshold, family_of)
+        if reason is None:
+            return None, []
+        if self.options == "family":
+            return (reason, family) if family else (None, [])
+        return reason, candidates[: self.max_options]
 
     @property
     def provider(self) -> str:
@@ -193,18 +278,38 @@ class VlmJudge:
         self, crop: Image.Image, candidates: list, answered: bool, threshold: float, family_of: dict
     ):
         """Полный шаг судьи для пайплайна: решить, звать ли, позвать, применить."""
-        reason = judge_reason(candidates, answered, threshold, family_of)
+        reason, shown = self.select(candidates, answered, threshold, family_of)
         if reason is None:
             return candidates, answered, None
-        options = [describe(c) for c in candidates[: self.max_options]]
-        verdict = self.judge(crop, options)
-        candidates, answered, applied = apply_verdict(candidates, verdict, threshold)
+        # Что было до судьи: без этого не сказать, помог он или испортил ответ.
+        leader = candidates[0]
+        before_id, before_probability = leader.item_id, leader.probability
+        answered_before = answered
+        verdict = self.judge(crop, [describe(c) for c in shown])
+        chosen = (
+            shown[verdict.choice - 1]
+            if not verdict.error and verdict.choice and 1 <= verdict.choice <= len(shown)
+            else None
+        )
+        if (
+            self.verify
+            and chosen is not None
+            and chosen is not leader
+            and not supports_switch(verdict.read_text, chosen, leader)
+        ):
+            applied = "unverified"
+        else:
+            candidates, answered, applied = apply_verdict(candidates, verdict, threshold, shown)
         report = {
             "reason": reason,
+            "options": len(shown),
             "choice": verdict.choice,
             "confidence": verdict.confidence,
             "read_text": verdict.read_text,
             "error": verdict.error or None,
             "applied": applied,
+            "before_id": before_id,
+            "before_probability": before_probability,
+            "before_answered": answered_before,
         }
         return candidates, answered, report

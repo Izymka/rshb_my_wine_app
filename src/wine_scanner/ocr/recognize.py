@@ -37,6 +37,9 @@ BACKENDS = ("paddle", "yandex", "hybrid")
 DEFAULT_BACKEND = os.environ.get("WINE_OCR", "paddle")
 # Облаку платим за запрос, а не за пиксели, и читает оно мелкий текст лучше на большем кадре.
 CLOUD_MAX_SIDE = 1024
+# Когда локальное чтение в hybrid считается слабым: меньше строк или лучшая строка неувереннее.
+HYBRID_MIN_LINES = 3
+HYBRID_MIN_CONF = 0.6
 
 
 @dataclass
@@ -141,42 +144,106 @@ class LabelOCR:
         В сервисе кэшировать нечего: каждый снимок пользователя уникален, а файлы копились бы
         без ограничений.
         """
+        return self.read_with_route(image, use_cache)[0]
+
+    def read_with_route(
+        self, image: Image.Image, use_cache: bool = False
+    ) -> tuple[list[TextLine], dict]:
+        """То же, что `read`, плюс маршрут: звали ли облако и почему (см. `_route`).
+
+        Маршрут возвращается, а не хранится в атрибуте: сервис читает кадры параллельно.
+        """
         image = self._prepare(image)
 
         cached = self._cache_path(image) if use_cache else None
         if cached is not None and cached.exists():
             data = json.loads(cached.read_text(encoding="utf-8"))
-            return [TextLine(**line) for line in data]
+            lines = [TextLine(**line) for line in data]
+            # Маршрут лежит рядом, а не внутри: так старый кэш остаётся валидным без смены
+            # CACHE_VERSION. Для записи без маршрута он восстанавливается локальным PaddleOCR —
+            # облако повторно не зовётся.
+            sidecar = cached.with_suffix(".route.json")
+            if sidecar.exists():
+                route = json.loads(sidecar.read_text(encoding="utf-8"))
+            else:
+                route = self._restore_route(image, lines)
+                sidecar.write_text(json.dumps(route), encoding="utf-8")
+            return lines, route
 
-        lines = self._read_backend(image)
+        lines, route = self._read_backend(image)
 
-        if cached is not None:
+        # Откат из-за сбоя облака не кэшируется: иначе разовая ошибка сети или ключа навсегда
+        # подменила бы чтение Vision локальным в каждом следующем прогоне.
+        if cached is not None and not route["fallback"]:
             cached.write_text(
                 json.dumps([line.__dict__ for line in lines], ensure_ascii=False),
                 encoding="utf-8",
             )
-        return lines
+            cached.with_suffix(".route.json").write_text(json.dumps(route), encoding="utf-8")
+        return lines, route
 
-    def _read_backend(self, image: Image.Image) -> list[TextLine]:
+    def _read_backend(self, image: Image.Image) -> tuple[list[TextLine], dict]:
         if self.backend == "paddle" or self.cloud is None:
-            return self._read_paddle(image)
+            lines = self._read_paddle(image)
+            return lines, self._route(lines, cloud=False)
         from .yandex import OCRBackendError
 
         local = self._read_paddle(image) if self.backend == "hybrid" else None
         if local is not None and not self._needs_cloud(local):
-            return local
+            return local, self._route(local, cloud=False)
         try:
             self.cloud_calls += 1
             cloud = self.cloud.read(image)
-            return cloud or (local or [])
+            return cloud or (local or []), self._route(local, cloud=True, empty=not cloud)
         except OCRBackendError:
             self.fallbacks += 1
-            return local if local is not None else self._read_paddle(image)
+            lines = local if local is not None else self._read_paddle(image)
+            return lines, self._route(local, cloud=True, fallback=True)
+
+    def _restore_route(self, image: Image.Image, lines: list[TextLine]) -> dict:
+        """Маршрут для кэша, записанного до появления маршрутов."""
+        cloud = any(line.source != "paddle" for line in lines)
+        if self.backend == "hybrid":
+            return self._route(self._read_paddle(image), cloud=cloud)
+        return self._route(None, cloud=cloud)
+
+    def _route(
+        self,
+        local: list[TextLine] | None,
+        cloud: bool,
+        fallback: bool = False,
+        empty: bool = False,
+    ) -> dict:
+        """Почему кадр ушёл (или не ушёл) в облако.
+
+        `reason`: `backend` — облако выбрано целиком (`WINE_OCR=yandex`); в hybrid —
+        `few_lines` (локально меньше 3 строк) или `low_conf` (лучшая строка слабее 0.6).
+        `local_*` — локальное чтение PaddleOCR, по которому hybrid принимал решение.
+        """
+        reason = None
+        if self.backend == "yandex":
+            reason = "backend"
+        elif self.backend == "hybrid" and local is not None and self._needs_cloud(local):
+            reason = "few_lines" if len(local) < HYBRID_MIN_LINES else "low_conf"
+        return {
+            "backend": self.backend,
+            "cloud": cloud,
+            "reason": reason,
+            "fallback": fallback,
+            "cloud_empty": empty,
+            "local_lines": None if local is None else len(local),
+            "local_conf_max": None
+            if local is None
+            else max((line.confidence for line in local), default=0.0),
+        }
 
     @staticmethod
     def _needs_cloud(lines: list[TextLine]) -> bool:
         """Only weak local evidence pays for a Vision request in hybrid mode."""
-        return len(lines) < 3 or max((line.confidence for line in lines), default=0.0) < 0.6
+        return (
+            len(lines) < HYBRID_MIN_LINES
+            or max((line.confidence for line in lines), default=0.0) < HYBRID_MIN_CONF
+        )
 
     def _read_paddle(self, image: Image.Image) -> list[TextLine]:
         return self._paddle().read(image)

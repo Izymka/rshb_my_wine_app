@@ -24,7 +24,9 @@ GigaChat пробовали 17.09: на любую картинку этикет
   сервис языковых моделей не знает; если переменной нет, берётся `YANDEX_OCR_API_KEY`),
   `YANDEX_FOLDER_ID`, `YANDEX_VLM_MODEL` (судья, `qwen3.6-35b-a3b`), `YANDEX_LLM_MODEL`
   (сомелье, `yandexgpt-5-lite`), `YANDEX_LLM_BASE_URL` (`https://ai.api.cloud.yandex.net/v1`;
-  прежний адрес `https://llm.api.cloud.yandex.net/v1` тоже отвечает).
+  прежний адрес `https://llm.api.cloud.yandex.net/v1` тоже отвечает);
+  `WINE_VLM_REASONING` / `WINE_LLM_REASONING` — `reasoning_effort` (по умолчанию `none`,
+  пусто — поле не отправляется).
 """
 
 import base64
@@ -99,8 +101,13 @@ class OpenAICompatibleChat:
         except ValueError as error:
             raise ChatError(f"{self.name}: ответ не JSON") from error
 
+    def _extra_body(self) -> dict:
+        """Поля запроса, специфичные для провайдера."""
+        return {}
+
     def chat(self, messages: list[dict], temperature: float = 0.4, json_mode: bool = False) -> str:
         body = {"model": self.model, "temperature": temperature, "messages": messages}
+        body.update(self._extra_body())
         if json_mode and self.supports_json_mode:
             body["response_format"] = {"type": "json_object"}
         return self._post(body)
@@ -133,6 +140,10 @@ class YandexChat(OpenAICompatibleChat):
     Отличия от чистого OpenAI: ключ в заголовке `Api-Key`, папка — в `OpenAI-Project`,
     модель — `gpt://<папка>/<модель>` (короткое имя дописывается само). `response_format`
     у Yandex — только `json_schema`, поэтому `json_object` не шлём: судья просит JSON словами.
+
+    Рассуждения выключены по умолчанию (`reasoning_effort="none"`). `qwen3.6-35b-a3b` иначе
+    перед ответом думает: замер 24.09 на кадрах train — ~6400 токенов и 29 с медианы на вызов
+    судьи против 39 токенов и 0.9 с без рассуждений. Организатор ждёт ответ не дольше 10 с.
     """
 
     base_url: str = YANDEX_LLM_BASE_URL
@@ -140,6 +151,11 @@ class YandexChat(OpenAICompatibleChat):
     folder_id: str | None = None
     name: str = "yandex"
     supports_json_mode: bool = False
+    # `none` | `low` | `medium` | `high`; None — поле не отправляется (решает модель).
+    reasoning_effort: str | None = "none"
+
+    def _extra_body(self) -> dict:
+        return {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -203,6 +219,7 @@ def yandex_from_env(prefix: str, timeout: float = DEFAULT_TIMEOUT) -> YandexChat
         api_key=api_key,
         folder_id=folder_id,
         timeout=timeout,
+        reasoning_effort=os.environ.get(f"{prefix}_REASONING", "none") or None,
     )
 
 

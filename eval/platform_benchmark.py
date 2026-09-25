@@ -51,7 +51,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from wine_scanner.catalog import TEST_MANIFEST, Query, load_manifest
+from wine_scanner.catalog import TEST_MANIFEST, Query, load_equivalences, load_manifest
 from wine_scanner.decide.guard import DEFAULT_MODE as DEFAULT_GUARD
 from wine_scanner.decide.guard import GUARD_MODES
 from wine_scanner.embed import load_image
@@ -69,6 +69,7 @@ from wine_scanner.pipeline import (
 
 RESULTS = Path("eval/results/platform_runs.jsonl")
 CROP_CACHE = Path("models/crop_cache")
+EQUIVALENCES = load_equivalences()
 VISUAL_K = (1, 5, 10, 25, 50, 100)
 TEXT_K = (1, 5, 10, 25, 50)
 MISSING_RANK = 10**6
@@ -97,7 +98,10 @@ class Outcome:
     in_window: bool = False
     rerank_top1: bool = False
     guard: str | None = None
+    # С учётом дублей каталога из data/splits/catalog_slug_equivalences.csv: выбрать вторую
+    # карточку того же вина — не ошибка модели. Строгое совпадение slug — final_top1_strict.
     final_top1: bool = False
+    final_top1_strict: bool = False
     answered: bool = False
     verdict: str = (
         ""  # correct / twin / other / refused (известные); accepted / refused (незнакомые)
@@ -105,6 +109,13 @@ class Outcome:
     best_id: str = ""
     probability: float = 0.0
     timings: dict = field(default_factory=dict)
+    # Источники строк OCR: {"paddle": 5} или {"yandex": 7}; облако в hybrid видно по "yandex".
+    ocr_sources: dict = field(default_factory=dict)
+    ocr_conf_max: float = 0.0
+    # Маршрут OCR: звали ли облако и почему (LabelOCR._route).
+    ocr_route: dict | None = None
+    # Отчёт VLM-судьи (reason, choice, applied, before_id…), None — судью не звали.
+    judge: dict | None = None
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -142,6 +153,10 @@ def evaluate(scanner: WineScanner, query: Query, result: ScanResult) -> Outcome:
     out.guard = result.guard
     out.best_id = best.item_id if best else ""
     out.probability = best.probability if best else 0.0
+    out.ocr_sources = dict(Counter(trace.get("ocr_sources", [])))
+    out.ocr_conf_max = max(trace.get("ocr_confidences", []), default=0.0)
+    out.ocr_route = trace.get("ocr_route")
+    out.judge = result.judge
 
     if not query.known:
         out.verdict = "accepted" if result.answered else "refused"
@@ -158,7 +173,8 @@ def evaluate(scanner: WineScanner, query: Query, result: ScanResult) -> Outcome:
     if window:
         leader = max(window, key=lambda item_id: inliers.get(item_id, 0))
         out.rerank_top1 = leader == true_id and inliers.get(leader, 0) > 0
-    out.final_top1 = bool(best and best.item_id == true_id)
+    out.final_top1_strict = bool(best and best.item_id == true_id)
+    out.final_top1 = bool(best and EQUIVALENCES.same(true_id, best.item_id))
 
     if not result.answered:
         out.verdict = "refused"
@@ -188,6 +204,7 @@ def summarize(outcomes: list[Outcome]) -> dict:
         "sibling_swaps_unknown": sum(bool(o.guard and "sibling" in o.guard) for o in unknown),
         "rerank_top1": rate(sum(o.rerank_top1 for o in known), n),
         "final_top1": rate(sum(o.final_top1 for o in known), n),
+        "final_top1_strict": rate(sum(o.final_top1_strict for o in known), n),
         "verdicts": dict(Counter(o.verdict for o in known)),
         "answered_precision": rate(
             sum(o.verdict == "correct" for o in known), sum(o.answered for o in known)
@@ -220,6 +237,19 @@ def summarize(outcomes: list[Outcome]) -> dict:
     metrics["false_accept"]["all"] = {
         "n": len(unknown),
         "rate": rate(sum(o.answered for o in unknown), len(unknown)),
+    }
+    # Облачные шаги: сколько кадров прочитал Yandex Vision и сколько раз звали судью.
+    judged = [o for o in outcomes if o.judge]
+    metrics["cloud"] = {
+        "ocr_cloud_frames": sum(bool(o.ocr_sources.get("yandex")) for o in outcomes),
+        "ocr_cloud_reasons": dict(
+            Counter(o.ocr_route["reason"] for o in outcomes if o.ocr_route and o.ocr_route["cloud"])
+        ),
+        "ocr_cloud_fallbacks": sum(bool(o.ocr_route and o.ocr_route["fallback"]) for o in outcomes),
+        "judge_calls": len(judged),
+        "judge_reasons": dict(Counter(o.judge["reason"] for o in judged)),
+        "judge_applied": dict(Counter(o.judge["applied"] for o in judged)),
+        "judge_errors": sum(bool(o.judge.get("error")) for o in judged),
     }
     return metrics
 
@@ -481,6 +511,7 @@ def main() -> None:
             "text_fields": args.text_fields,
             "sources": sorted(sources),
             "manifest": str(args.manifest),
+            "equivalence_groups": len(set(EQUIVALENCES.group_of.values())),
             "cached": not args.no_cache,
             "parallel": not args.sequential,
             "devices": scanner.devices(),
@@ -513,9 +544,15 @@ def main() -> None:
                             "guard": o.guard,
                             "rerank_top1": o.rerank_top1,
                             "final_top1": o.final_top1,
+                            "final_top1_strict": o.final_top1_strict,
                             "verdict": o.verdict,
                             "best_id": o.best_id,
                             "probability": o.probability,
+                            "source": o.query.source,
+                            "ocr_sources": o.ocr_sources,
+                            "ocr_conf_max": o.ocr_conf_max,
+                            "ocr_route": o.ocr_route,
+                            "judge": o.judge,
                         },
                         ensure_ascii=False,
                     )

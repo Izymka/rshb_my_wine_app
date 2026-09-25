@@ -45,6 +45,7 @@ from PIL import Image
 
 from .analogues import Analogues
 from .burst import fuse_rrf, ranked, sharpness
+from .catalog import load_equivalences
 from .decide import Decider, PairFeatures, Scored, derive
 from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
@@ -221,6 +222,22 @@ class RetrievalOnlyDecider:
         return scored
 
 
+def canonicalize(candidates: list[Candidate], canonical: dict, payload_by_id: dict) -> list:
+    """Лидер — дубль каталога: на его место встаёт канонический slug той же позиции.
+
+    Модель могла выбрать любую из двух карточек одного вина; заказчик засчитывает только
+    каноническую (у второй, например, страница 404). Если каноническая карточка уже среди
+    кандидатов, она поднимается наверх, дубль убирается; иначе лидер получает её slug и payload.
+    """
+    best = candidates[0]
+    target = canonical[best.item_id]
+    existing = next((c for c in candidates if c.item_id == target), None)
+    if existing is None:
+        existing = Candidate(target, best.probability, payload_by_id.get(target, {}), best.features)
+    existing.probability = max(existing.probability, best.probability)
+    return [existing] + [c for c in candidates if c is not best and c is not existing]
+
+
 def confidence_of(candidates: list[Candidate]) -> dict | None:
     """Уверенность для API из калиброванных вероятностей кандидатов.
 
@@ -392,6 +409,8 @@ class WineScanner:
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
         }
         self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
+        # Дубли каталога по решению человека: дубль с каноническим slug отдаётся каноническим.
+        self.equivalences = load_equivalences()
         # Где на карточке напечатан год. Считается при сборке индекса тем же распознавателем,
         # что и всё остальное, — на запросе это лишний вызов OCR по каждому кандидату.
         # Индекс, собранный до Э8, поля не содержит: тогда год читается только из общего
@@ -482,7 +501,12 @@ class WineScanner:
         started = time.perf_counter()
         from .embed.branches import branch_image
 
-        lines = self.ocr.read(branch_image(crop, self.ocr_preprocess), use_cache=use_cache)
+        image = branch_image(crop, self.ocr_preprocess)
+        # Подменные OCR в тестах умеют только read(); маршрута у них нет.
+        if hasattr(self.ocr, "read_with_route"):
+            lines, route = self.ocr.read_with_route(image, use_cache=use_cache)
+        else:
+            lines, route = self.ocr.read(image, use_cache=use_cache), None
         text = LabelOCR.joined(lines)
         timings["ocr"] = time.perf_counter() - started
 
@@ -502,6 +526,7 @@ class WineScanner:
         confidence = sum(line.confidence for line in lines) / len(lines) if lines else 0.0
         return {
             "lines": lines,
+            "route": route,
             "text": text,
             "confidence": confidence,
             "hits": hits,
@@ -532,6 +557,11 @@ class WineScanner:
                 for item_id in self.text_index.family_rank(family, scores, seen, FAMILY_CAP):
                     added.append(item_id)
                     seen.add(item_id)
+        # Карточки с ошибкой контента по решению человека в ответ не попадают вовсе.
+        excluded = self.equivalences.excluded
+        if excluded:
+            base = [item_id for item_id in base if item_id not in excluded]
+            added = [item_id for item_id in added if item_id not in excluded]
         return base + added, added
 
     def _window(self, long_list: list[str], signals: dict[str, dict]) -> list[str]:
@@ -583,9 +613,18 @@ class WineScanner:
         return self.vintage.zoom(crop, projected) if projected else reading
 
     def identify(
-        self, image: Image.Image, image_key: str | None = None, trace: bool = False
+        self,
+        image: Image.Image,
+        image_key: str | None = None,
+        trace: bool = False,
+        use_judge: bool = True,
     ) -> ScanResult:
-        """Опознать вино по одному кадру. `trace` — сохранить внутренности для измерителя."""
+        """Опознать вино по одному кадру. `trace` — сохранить внутренности для измерителя.
+
+        `use_judge=False` — не звать VLM-судью, даже если он настроен: продуктовый /scan
+        обходится без него, потому что судья почти не говорит «нет» и поднимает ложные
+        приёмы незнакомых вин (0.07 → 0.34 на тесте).
+        """
         timings: dict[str, float] = {}
         wall_started = time.perf_counter()
 
@@ -746,12 +785,16 @@ class WineScanner:
         answered = bool(best and best.probability >= self.threshold)
 
         judge_report = None
-        if self.judge is not None and candidates:
+        if use_judge and self.judge is not None and candidates:
             with stage("judge"):
                 candidates, answered, judge_report = self.judge.consult(
                     crop, candidates, answered, self.threshold, self.text_index.family_of
                 )
                 best = candidates[0]
+
+        if best is not None and best.item_id in self.equivalences.canonical:
+            candidates = canonicalize(candidates, self.equivalences.canonical, self.payload_by_id)
+            best = candidates[0]
 
         # Не сумма этапов, а настоящее время запроса: этапы теперь идут внахлёст, и их сумма
         # больше того, что ждёт пользователь. Ровно эту величину и требует Э11.
@@ -786,6 +829,11 @@ class WineScanner:
                         if item_id in window_set
                     },
                     "ocr_lines": [line.text for line in lines],
+                    # Кто прочитал строку (paddle / yandex) и насколько уверенно — по этому
+                    # бенчмарк видит, на каких кадрах hybrid ходил в облако.
+                    "ocr_sources": [line.source for line in lines],
+                    "ocr_confidences": [line.confidence for line in lines],
+                    "ocr_route": text_result.get("route"),
                     "ocr_tokens": list(ocr_tokens),
                 }
                 if trace
@@ -797,7 +845,7 @@ class WineScanner:
         path = Path(path)
         return self.identify(load_image(path), image_key=str(path))
 
-    def identify_burst(self, images: list[Image.Image]) -> ScanResult:
+    def identify_burst(self, images: list[Image.Image], use_judge: bool = True) -> ScanResult:
         """Опознать вино по серии кадров.
 
         Из серии берётся самый резкий кадр, а не объединяются результаты по всем. Так решено
@@ -810,7 +858,7 @@ class WineScanner:
         best_frame = max(images, key=sharpness)
         picked = time.perf_counter() - start
 
-        result = self.identify(best_frame)
+        result = self.identify(best_frame, use_judge=use_judge)
         result.frames = len(images)
         result.timings["pick_frame"] = picked
         result.timings["total"] += picked

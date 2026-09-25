@@ -47,6 +47,41 @@ def test_yandex_text_and_image_flow():
     assert image_body["model"] == "gpt://b1gfolder/qwen3.6-35b-a3b"
 
 
+def test_yandex_disables_reasoning_by_default(monkeypatch):
+    """Без этого qwen думает ~30 с на вызов судьи — дольше лимита организатора в 10 с."""
+    log = []
+    chat = YandexChat(api_key="key", folder_id="b1gfolder", client=yandex_transport(log))
+    chat.chat_with_image("что это?", b"\xff\xd8jpeg")
+    assert log[-1]["reasoning_effort"] == "none"
+
+    chat = YandexChat(
+        api_key="key", folder_id="b1gfolder", client=yandex_transport(log), reasoning_effort=None
+    )
+    chat.chat([{"role": "user", "content": "к чему?"}])
+    assert "reasoning_effort" not in log[-1]
+
+    monkeypatch.setenv("YANDEX_LLM_API_KEY", "key")
+    monkeypatch.setenv("YANDEX_FOLDER_ID", "b1gfolder")
+    monkeypatch.setenv("WINE_VLM_REASONING", "low")
+    assert chat_from_env("WINE_VLM").reasoning_effort == "low"
+    monkeypatch.setenv("WINE_VLM_REASONING", "")
+    assert chat_from_env("WINE_VLM").reasoning_effort is None
+
+
+def test_openai_compatible_sends_no_reasoning_field():
+    log = []
+
+    def handler(request):
+        log.append(json.loads(request.content))
+        return httpx.Response(200, json=completion("ok"))
+
+    chat = OpenAICompatibleChat(
+        "https://api.example/v1", "m", client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    chat.chat([{"role": "user", "content": "x"}])
+    assert "reasoning_effort" not in log[-1]
+
+
 def test_yandex_keeps_full_model_uri():
     chat = YandexChat(
         model="gpt://other/yandexgpt-5-lite/latest", api_key="k", folder_id="f",
