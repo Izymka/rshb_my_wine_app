@@ -53,14 +53,17 @@ class FakeScanner:
     def __init__(self):
         self.payload_by_id: dict[str, dict] = {"wine_a": {"name": "Chateau Alpha"}}
         self.calls: list[str] = []
+        self.judged: list[bool] = []
         self.answered = True
 
-    def identify(self, image, image_key=None) -> ScanResult:
+    def identify(self, image, image_key=None, use_judge=True) -> ScanResult:
         self.calls.append("single")
+        self.judged.append(use_judge)
         return answer(answered=self.answered)
 
-    def identify_burst(self, images) -> ScanResult:
+    def identify_burst(self, images, use_judge=True) -> ScanResult:
         self.calls.append("burst")
+        self.judged.append(use_judge)
         return answer(frames=len(images))
 
 
@@ -243,3 +246,14 @@ def test_sommelier_answers_from_card(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["answer"].startswith("К Chateau Alpha")
     assert client.post("/sommelier", json={"item_id": "nope", "question": "?"}).status_code == 404
+
+
+def test_judge_only_on_the_eval_endpoint(monkeypatch, client):
+    """Судья исправляет близнецов для проверки организатора, но в /scan поднимает ложные
+    приёмы незнакомых вин — поэтому там он выключен, пока не попросят WINE_VLM_SCAN=1."""
+    client.post("/scan", files={"files": ("a.png", frame(), "image/png")})
+    client.post("/v1/eval/predict", files={"image": ("a.png", frame(), "image/png")})
+    monkeypatch.setattr(main, "SCAN_JUDGE", True)
+    client.post("/scan", files={"files": ("a.png", frame(), "image/png")})
+
+    assert client.engine.judged == [False, True, True]

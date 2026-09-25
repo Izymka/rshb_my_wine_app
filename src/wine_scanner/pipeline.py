@@ -613,9 +613,18 @@ class WineScanner:
         return self.vintage.zoom(crop, projected) if projected else reading
 
     def identify(
-        self, image: Image.Image, image_key: str | None = None, trace: bool = False
+        self,
+        image: Image.Image,
+        image_key: str | None = None,
+        trace: bool = False,
+        use_judge: bool = True,
     ) -> ScanResult:
-        """Опознать вино по одному кадру. `trace` — сохранить внутренности для измерителя."""
+        """Опознать вино по одному кадру. `trace` — сохранить внутренности для измерителя.
+
+        `use_judge=False` — не звать VLM-судью, даже если он настроен: продуктовый /scan
+        обходится без него, потому что судья почти не говорит «нет» и поднимает ложные
+        приёмы незнакомых вин (0.07 → 0.34 на тесте).
+        """
         timings: dict[str, float] = {}
         wall_started = time.perf_counter()
 
@@ -776,7 +785,7 @@ class WineScanner:
         answered = bool(best and best.probability >= self.threshold)
 
         judge_report = None
-        if self.judge is not None and candidates:
+        if use_judge and self.judge is not None and candidates:
             with stage("judge"):
                 candidates, answered, judge_report = self.judge.consult(
                     crop, candidates, answered, self.threshold, self.text_index.family_of
@@ -836,7 +845,7 @@ class WineScanner:
         path = Path(path)
         return self.identify(load_image(path), image_key=str(path))
 
-    def identify_burst(self, images: list[Image.Image]) -> ScanResult:
+    def identify_burst(self, images: list[Image.Image], use_judge: bool = True) -> ScanResult:
         """Опознать вино по серии кадров.
 
         Из серии берётся самый резкий кадр, а не объединяются результаты по всем. Так решено
@@ -849,7 +858,7 @@ class WineScanner:
         best_frame = max(images, key=sharpness)
         picked = time.perf_counter() - start
 
-        result = self.identify(best_frame)
+        result = self.identify(best_frame, use_judge=use_judge)
         result.frames = len(images)
         result.timings["pick_frame"] = picked
         result.timings["total"] += picked

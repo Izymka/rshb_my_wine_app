@@ -47,9 +47,15 @@ services:
       WINE_OCR: ${WINE_OCR:-paddle}
       YANDEX_OCR_API_KEY: ${YANDEX_OCR_API_KEY:-}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
-      # VLM-судья на спорных случаях: Yandex AI Studio (без VPN) или OpenAI-совместимый чат.
-      # Выключен без WINE_VLM=1; ключи — см. .env.example.
-      WINE_VLM: ${WINE_VLM:-0}
+      # VLM-судья между близнецами одной винодельни: Yandex AI Studio (без VPN) или
+      # OpenAI-совместимый чат. Включён только в /v1/eval/predict; в /scan — WINE_VLM_SCAN=1.
+      # Без ключа YANDEX_LLM_API_KEY поставьте WINE_VLM=0; ключи — см. .env.example.
+      WINE_VLM: ${WINE_VLM:-1}
+      WINE_VLM_SCAN: ${WINE_VLM_SCAN:-0}
+      WINE_VLM_TIMEOUT: ${WINE_VLM_TIMEOUT:-4}
+      WINE_VLM_OPTIONS: ${WINE_VLM_OPTIONS:-family}
+      WINE_VLM_TRIGGER: ${WINE_VLM_TRIGGER:-family}
+      WINE_VLM_VERIFY: ${WINE_VLM_VERIFY:-1}
       WINE_VLM_PROVIDER: ${WINE_VLM_PROVIDER:-yandex}
       WINE_VLM_FALLBACK: ${WINE_VLM_FALLBACK:-}
       YANDEX_LLM_API_KEY: ${YANDEX_LLM_API_KEY:-}

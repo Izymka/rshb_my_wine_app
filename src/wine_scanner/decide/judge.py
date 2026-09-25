@@ -232,9 +232,11 @@ class VlmJudge:
             llm=chat_from_env("WINE_VLM", timeout=timeout),
             timeout=timeout,
             json_mode=os.environ.get("WINE_VLM_JSON_MODE", "1") == "1",
-            options=os.environ.get("WINE_VLM_OPTIONS", "all"),
-            trigger=os.environ.get("WINE_VLM_TRIGGER", "reasons"),
-            verify=os.environ.get("WINE_VLM_VERIFY", "0") == "1",
+            # По умолчанию — вариант family-verify: выбран на живых кадрах train без вин теста
+            # (eval/judge_validation.py), на тесте 85 → 91 из 93 без единой поломки top-1.
+            options=os.environ.get("WINE_VLM_OPTIONS", "family"),
+            trigger=os.environ.get("WINE_VLM_TRIGGER", "family"),
+            verify=os.environ.get("WINE_VLM_VERIFY", "1") == "1",
         )
 
     def select(self, candidates: list, answered: bool, threshold: float, family_of: dict):
