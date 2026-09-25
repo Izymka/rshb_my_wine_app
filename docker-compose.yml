@@ -53,6 +53,10 @@ services:
       WINE_VLM: ${WINE_VLM:-1}
       WINE_VLM_SCAN: ${WINE_VLM_SCAN:-0}
       WINE_VLM_TIMEOUT: ${WINE_VLM_TIMEOUT:-4}
+      # Фолбэк на решающий слой: предел судьи от начала запроса и пауза после сбоев облака.
+      WINE_VLM_DEADLINE: ${WINE_VLM_DEADLINE:-7}
+      WINE_VLM_COOLDOWN: ${WINE_VLM_COOLDOWN:-60}
+      WINE_VLM_MAX_FAILURES: ${WINE_VLM_MAX_FAILURES:-2}
       WINE_VLM_OPTIONS: ${WINE_VLM_OPTIONS:-family}
       WINE_VLM_TRIGGER: ${WINE_VLM_TRIGGER:-family}
       WINE_VLM_VERIFY: ${WINE_VLM_VERIFY:-1}

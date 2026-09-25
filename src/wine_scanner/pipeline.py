@@ -796,6 +796,7 @@ class WineScanner:
                     self.text_index.family_of,
                     ocr_lines=[line.text for line in lines],
                     text_index=self.text_index,
+                    elapsed=time.perf_counter() - wall_started,
                 )
                 best = candidates[0]
 

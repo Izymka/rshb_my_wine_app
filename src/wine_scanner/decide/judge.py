@@ -26,6 +26,9 @@
 import json
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as WaitTimeout
 from dataclasses import dataclass, replace
 
 import httpx
@@ -35,6 +38,17 @@ from ..llm import ChatError, OpenAICompatibleChat, chat_from_env, jpeg_bytes
 from ..ocr.normalize import fold_tokens
 
 DEFAULT_TIMEOUT = 4.0
+# Защита предела организатора (participant_test.sh: --max-time 10, без повторов). Судья
+# отвечает только до DEFAULT_DEADLINE с от начала запроса, иначе ответ за решающим слоем:
+# 25.09 с молчащим облаком запросы шли 7.4–9.5 с — пайплайн на тяжёлом кадре сам идёт ~5 с,
+# и полный таймаут судьи сверху оставлял до края полсекунды.
+DEFAULT_DEADLINE = 7.0
+# Меньше этого остатка звать судью бессмысленно: ответ не успеет прийти.
+MIN_WAIT = 1.0
+# Облако недоступно (ошибка сети или HTTP, таймаут) MAX_FAILURES раз подряд — судья молчит
+# COOLDOWN с и не тратит время запросов, потом одна пробная попытка.
+DEFAULT_COOLDOWN = 60.0
+DEFAULT_MAX_FAILURES = 2
 DEFAULT_MAX_SIDE = 1024
 DEFAULT_MAX_OPTIONS = 8
 DEFAULT_MAX_FAMILY = 4
@@ -275,6 +289,10 @@ class VlmJudge:
         max_family: int = DEFAULT_MAX_FAMILY,
         ocr: str = "off",
         check: bool = False,
+        deadline: float | None = DEFAULT_DEADLINE,
+        cooldown: float = DEFAULT_COOLDOWN,
+        max_failures: int = DEFAULT_MAX_FAILURES,
+        clock=time.monotonic,
     ):
         if options not in OPTION_MODES or trigger not in TRIGGERS or ocr not in OCR_MODES:
             raise ValueError(
@@ -300,8 +318,20 @@ class VlmJudge:
         self.ocr = ocr
         # Сверять выбор судьи с его же прочитанным текстом (consistent_pick).
         self.check = check
+        # Предел на весь запрос (с его начала); None или 0 — ждать, сколько даст таймаут.
+        self.deadline = deadline or None
+        self.cooldown = cooldown
+        self.max_failures = max_failures
+        self.clock = clock
         self.calls = 0
         self.errors = 0
+        # Сколько раз судью не позвали: облако на паузе (cooldown) или не хватило времени.
+        self.skipped = {"cooldown": 0, "deadline": 0}
+        self.failures_in_row = 0
+        self.paused_until = 0.0
+        # Вызов в своём потоке, чтобы бросить его по дедлайну: таймаут httpx считается от
+        # начала вызова, а не от начала запроса. Брошенный поток доживёт до своего таймаута.
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="judge")
 
     @classmethod
     def from_env(cls) -> "VlmJudge | None":
@@ -321,6 +351,9 @@ class VlmJudge:
             # Сверка выбора с текстом судьи: на стенде 87 → 89 из 91, стресс 68 → 70 из 85,
             # 7 замен из 7 верные. Строки OCR в промпт (WINE_VLM_OCR) не помогли: 87 → 84–85.
             check=os.environ.get("WINE_VLM_CHECK", "1") == "1",
+            deadline=float(os.environ.get("WINE_VLM_DEADLINE", DEFAULT_DEADLINE)),
+            cooldown=float(os.environ.get("WINE_VLM_COOLDOWN", DEFAULT_COOLDOWN)),
+            max_failures=int(os.environ.get("WINE_VLM_MAX_FAILURES", DEFAULT_MAX_FAILURES)),
         )
 
     def select(self, candidates: list, answered: bool, threshold: float, family_of: dict):
@@ -343,25 +376,56 @@ class VlmJudge:
         return getattr(self.llm, "name", "?")
 
     def judge(
-        self, crop: Image.Image, options: list[str], ocr_lines: list[str] | None = None
+        self,
+        crop: Image.Image,
+        options: list[str],
+        ocr_lines: list[str] | None = None,
+        wait: float | None = None,
     ) -> Verdict:
+        """Спросить судью. `wait` — сколько секунд ждать ответа (None — сколько даст таймаут)."""
         self.calls += 1
         listing = "\n".join(f"{i}. {text}" for i, text in enumerate(options, start=1))
         prompt = f"{PROMPT}\n\nКарточки:\n{listing}"
         hint = ocr_block(ocr_lines) if self.ocr != "off" else ""
         if hint:
             prompt = f"{prompt}\n\n{OCR_HINT}\nСтроки OCR:\n{hint}"
+        image = jpeg_bytes(crop, self.max_side)
         try:
-            text = self.llm.chat_with_image(
-                prompt, jpeg_bytes(crop, self.max_side), temperature=0.0, json_mode=self.json_mode
-            )
-        except ChatError as error:
+            if wait is None:
+                text = self._ask(prompt, image)
+            else:
+                text = self._pool.submit(self._ask, prompt, image).result(timeout=wait)
+        except (ChatError, WaitTimeout) as error:
             self.errors += 1
-            return Verdict(None, 0.0, "", error=str(error))
+            self._failed()
+            message = str(error) if isinstance(error, ChatError) else f"дедлайн {wait:.1f} с"
+            return Verdict(None, 0.0, "", error=message)
+        # Облако ответило — даже непонятный ответ значит, что оно живо.
+        self.failures_in_row = 0
         verdict = parse_verdict(text)
         if verdict.error:
             self.errors += 1
         return verdict
+
+    def _ask(self, prompt: str, image: bytes) -> str:
+        return self.llm.chat_with_image(prompt, image, temperature=0.0, json_mode=self.json_mode)
+
+    def _failed(self) -> None:
+        self.failures_in_row += 1
+        if self.failures_in_row >= self.max_failures:
+            self.paused_until = self.clock() + self.cooldown
+            self.failures_in_row = 0
+
+    def availability(self, elapsed: float | None) -> tuple[str | None, float | None]:
+        """Можно ли звать судью сейчас: (почему нельзя или None, сколько ждать ответа)."""
+        if self.clock() < self.paused_until:
+            return "cooldown", None
+        if self.deadline is None or elapsed is None:
+            return None, None
+        wait = self.deadline - elapsed
+        if wait < MIN_WAIT:
+            return "deadline", None
+        return None, wait
 
     def verification_text(self, read_text: str, ocr_lines: list[str] | None) -> str:
         """Текст, которым подтверждается смена лидера: прочитанное судьёй, а в `hint-verify`
@@ -408,11 +472,14 @@ class VlmJudge:
         family_of: dict,
         ocr_lines: list[str] | None = None,
         text_index=None,
+        elapsed: float | None = None,
     ):
         """Полный шаг судьи для пайплайна: решить, звать ли, позвать, применить.
 
         `ocr_lines` — строки локального OCR; судье они уходят только при `ocr != "off"`.
         `text_index` — для сверки выбора с текстом судьи (`check`); без него сверки нет.
+        `elapsed` — сколько секунд запрос уже идёт; по нему судья укладывается в `deadline`.
+        Без ответа судьи (пауза, дедлайн, ошибка) остаётся ответ решающего слоя.
         """
         reason, shown = self.select(candidates, answered, threshold, family_of)
         if reason is None:
@@ -421,7 +488,27 @@ class VlmJudge:
         leader = candidates[0]
         before_id, before_probability = leader.item_id, leader.probability
         answered_before = answered
-        verdict = self.judge(crop, [describe(c) for c in shown], ocr_lines)
+        before = {
+            "before_id": before_id,
+            "before_probability": before_probability,
+            "before_answered": answered_before,
+        }
+        skip, wait = self.availability(elapsed)
+        if skip:
+            self.skipped[skip] += 1
+            report = {
+                "reason": reason,
+                "options": len(shown),
+                "ocr": self.ocr,
+                "choice": None,
+                "confidence": 0.0,
+                "read_text": "",
+                "error": skip,
+                "applied": "skipped",
+                **before,
+            }
+            return candidates, answered, report
+        verdict = self.judge(crop, [describe(c) for c in shown], ocr_lines, wait=wait)
         chosen, outcome = self.settle(verdict, shown, leader, ocr_lines, text_index)
         if outcome == "unverified":
             applied = "unverified"
@@ -440,8 +527,6 @@ class VlmJudge:
             "read_text": verdict.read_text,
             "error": verdict.error or None,
             "applied": applied,
-            "before_id": before_id,
-            "before_probability": before_probability,
-            "before_answered": answered_before,
+            **before,
         }
         return candidates, answered, report

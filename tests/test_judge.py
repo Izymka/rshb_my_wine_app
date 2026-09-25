@@ -227,3 +227,76 @@ def test_from_env_disabled_by_default(monkeypatch):
     monkeypatch.delenv("WINE_VLM_BASE_URL", raising=False)
     with pytest.raises(ValueError):
         VlmJudge.from_env()
+
+
+def failing_judge(handler, **kwargs):
+    return VlmJudge(
+        "https://api.example/v1", "vlm", client=transport(handler),
+        trigger="family", options="family", **kwargs,
+    )
+
+
+def twins():
+    return [cand("a", 0.9, inliers=50), cand("b", 0.1)], {"a": "K", "b": "K"}
+
+
+def test_cooldown_after_failures_keeps_decider_answer():
+    """Облако лежит: после двух ошибок подряд судью не зовём до конца паузы — ответ за
+    решающим слоем и без ожидания таймаута; после паузы одна пробная попытка."""
+    now = [100.0]
+    judge = failing_judge(
+        lambda r: httpx.Response(503, text="down"), max_failures=2, cooldown=60,
+        clock=lambda: now[0],
+    )
+    for _ in range(2):
+        cands, fam = twins()
+        out, answered, report = judge.consult(Image.new("RGB", (10, 10)), cands, True, 0.5, fam)
+        assert report["applied"] == "none" and report["error"]
+    cands, fam = twins()
+    out, answered, report = judge.consult(Image.new("RGB", (10, 10)), cands, True, 0.5, fam)
+    assert (report["applied"], report["error"]) == ("skipped", "cooldown")
+    assert [c.item_id for c in out] == ["a", "b"] and answered
+    assert judge.calls == 2 and judge.skipped["cooldown"] == 1
+
+    now[0] += 61
+    cands, fam = twins()
+    judge.consult(Image.new("RGB", (10, 10)), cands, True, 0.5, fam)
+    assert judge.calls == 3
+
+
+def test_answer_resets_failure_streak():
+    replies = iter([httpx.Response(503), httpx.Response(200, json=completion('{"choice": 1}'))])
+    judge = failing_judge(lambda r: next(replies), max_failures=2)
+    for _ in range(2):
+        cands, fam = twins()
+        judge.consult(Image.new("RGB", (10, 10)), cands, True, 0.5, fam)
+    assert judge.failures_in_row == 0 and judge.paused_until == 0.0
+
+
+def test_no_time_left_skips_judge():
+    judge = failing_judge(lambda r: httpx.Response(200, json=completion('{"choice": 2}')))
+    cands, fam = twins()
+    out, _, report = judge.consult(
+        Image.new("RGB", (10, 10)), cands, True, 0.5, fam, elapsed=judge.deadline - 0.5
+    )
+    assert (report["applied"], report["error"]) == ("skipped", "deadline")
+    assert judge.calls == 0 and out[0].item_id == "a"
+
+
+def test_silent_cloud_is_abandoned_at_deadline():
+    """Облако молчит дольше, чем осталось до дедлайна запроса: ждём только остаток."""
+    import time
+
+    def slow(request):
+        time.sleep(3)
+        return httpx.Response(200, json=completion('{"choice": 2}'))
+
+    judge = failing_judge(slow, deadline=2.0)
+    cands, fam = twins()
+    started = time.perf_counter()
+    out, answered, report = judge.consult(
+        Image.new("RGB", (10, 10)), cands, True, 0.5, fam, elapsed=0.8
+    )
+    assert time.perf_counter() - started < 2.0
+    assert report["applied"] == "none" and "дедлайн" in report["error"]
+    assert out[0].item_id == "a" and answered and judge.failures_in_row == 1
