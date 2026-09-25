@@ -202,6 +202,8 @@ def health() -> dict:
             "judge": getattr(engine.judge, "provider", None),
             "judge_calls": getattr(engine.judge, "calls", 0),
             "judge_errors": getattr(engine.judge, "errors", 0),
+            # Сколько раз ответил решающий слой без судьи: облако на паузе или не хватило времени.
+            "judge_skipped": getattr(engine.judge, "skipped", None),
             "sommelier": getattr(state.get("sommelier"), "provider", None),
             "sommelier_fallbacks": getattr(
                 getattr(state.get("sommelier"), "llm", None), "failures", None
