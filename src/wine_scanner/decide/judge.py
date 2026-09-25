@@ -26,7 +26,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 from PIL import Image
@@ -43,6 +43,13 @@ OPTION_MODES = ("all", "family")
 # Когда звать: `reasons` — judge_reason (отказ при сильной геометрии, сосед вторым, малый
 # разрыв); `family` — всегда, когда у лидера есть сосед по винодельне среди кандидатов.
 TRIGGERS = ("reasons", "family")
+# Строки локального OCR (PaddleOCR) для судьи: `off` — судья читает этикетку только сам;
+# `hint` — строки идут в промпт подсказкой; `hint-verify` — вдобавок смену лидера может
+# подтвердить не только текст, прочитанный судьёй, но и строки OCR — независимый читатель.
+OCR_MODES = ("off", "hint", "hint-verify")
+# Сколько текста OCR отдавать: у пёстрого кадра бывает сотня строк, промпт от них раздувается.
+OCR_MAX_LINES = 40
+OCR_MAX_CHARS = 1500
 MARGIN_TRIGGER = 0.2
 STRONG_INLIERS = 30
 REFUSE_CONFIDENCE = 0.7
@@ -57,6 +64,25 @@ PROMPT = (
     'Ответь строго одним JSON-объектом вида {"choice": <номер или null>, '
     '"confidence": <число от 0 до 1>, "read_text": "<текст, который ты прочитал на этикетке>"}.'
 )
+OCR_HINT = (
+    "Ниже строки, которые с этой этикетки прочитала программа OCR. Это подсказка: в них бывают "
+    "ошибки в буквах, пропуски и чужие слова, картинка важнее. Используй их, чтобы разобрать "
+    "мелкий или плохо видимый текст; в read_text пиши то, что видишь сам."
+)
+
+
+def ocr_block(lines: list[str] | None) -> str:
+    """Строки OCR для промпта: без пустых, не больше OCR_MAX_LINES и OCR_MAX_CHARS."""
+    kept, size = [], 0
+    for line in lines or []:
+        line = " ".join(str(line).split())
+        if not line:
+            continue
+        if len(kept) >= OCR_MAX_LINES or size + len(line) > OCR_MAX_CHARS:
+            break
+        kept.append(line)
+        size += len(line)
+    return "\n".join(kept)
 
 
 @dataclass
@@ -159,6 +185,53 @@ def supports_switch(read_text: str, chosen, leader) -> bool:
     return bool(distinct & _stems(read_text))
 
 
+def consistent_pick(read_text: str, shown: list, chosen, text_index):
+    """Соседка, которую текст судьи подтверждает вместо его же выбора, или None.
+
+    Судья часто читает этикетку верно, а карточку выбирает не ту: прочитал «ZINFANDEL
+    SEMI-DRY ROSE» — выбрал «Semi-Dry Rose» с сортом Пино Нуар. Здесь прочитанное судьёй
+    сравнивается с карточками теми же сигналами, что и текст OCR в пайплайне (TextIndex.signals).
+    Выбор меняется, только когда текст *против* него — цвет, сорт или сладость противоречат, или
+    у карточки есть различающие слова, но ни одного нет в тексте, — и *за* другую показанную
+    карточку: она ничему не противоречит и подтверждена сортом или своим словом.
+    """
+    if not read_text:
+        return None
+    tokens = text_index.query_tokens(read_text)
+    attrs = text_index.query_attributes(tokens, read_text)
+    signals = {c.item_id: text_index.signals(tokens, attrs, c.item_id) for c in shown}
+
+    def contradicts(s: dict) -> bool:
+        return s["color_match"] == -1 or s["style_match"] == -1 or s.get("grape_match", 0) == -1
+
+    def supported(s: dict) -> bool:
+        return s.get("grape_match", 0) == 1 or s["disc_hit"] > 0
+
+    own = signals[chosen.item_id]
+    unsupported = own["disc_n"] > 0 and own["disc_hit"] == 0 and own.get("grape_match", 0) != 1
+    if not (contradicts(own) or unsupported):
+        return None
+    alternatives = [
+        c
+        for c in shown
+        if c is not chosen and not contradicts(signals[c.item_id]) and supported(signals[c.item_id])
+    ]
+    if not alternatives:
+        return None
+
+    def evidence(c) -> tuple:
+        s = signals[c.item_id]
+        return (
+            s["color_match"],
+            s.get("grape_match", 0),
+            s["style_match"],
+            round(s["disc_hit"], 2),
+            round(s["name_cover"], 2),
+        )
+
+    return max(alternatives, key=evidence)
+
+
 def apply_verdict(
     candidates: list, verdict: Verdict, threshold: float, options: list | None = None
 ) -> tuple[list, bool, str]:
@@ -200,9 +273,13 @@ class VlmJudge:
         trigger: str = "reasons",
         verify: bool = False,
         max_family: int = DEFAULT_MAX_FAMILY,
+        ocr: str = "off",
+        check: bool = False,
     ):
-        if options not in OPTION_MODES or trigger not in TRIGGERS:
-            raise ValueError(f"VlmJudge: options из {OPTION_MODES}, trigger из {TRIGGERS}")
+        if options not in OPTION_MODES or trigger not in TRIGGERS or ocr not in OCR_MODES:
+            raise ValueError(
+                f"VlmJudge: options из {OPTION_MODES}, trigger из {TRIGGERS}, ocr из {OCR_MODES}"
+            )
         # Либо готовый чат-клиент (llm.py: OpenAI-совместимый, Yandex, цепочка с откатом),
         # либо параметры OpenAI-совместимого — из них клиент собирается здесь.
         if llm is None:
@@ -220,6 +297,9 @@ class VlmJudge:
         # Смену лидера принимать, только если текст этикетки её подтверждает (supports_switch).
         self.verify = verify
         self.max_family = max_family
+        self.ocr = ocr
+        # Сверять выбор судьи с его же прочитанным текстом (consistent_pick).
+        self.check = check
         self.calls = 0
         self.errors = 0
 
@@ -237,6 +317,10 @@ class VlmJudge:
             options=os.environ.get("WINE_VLM_OPTIONS", "family"),
             trigger=os.environ.get("WINE_VLM_TRIGGER", "family"),
             verify=os.environ.get("WINE_VLM_VERIFY", "1") == "1",
+            ocr=os.environ.get("WINE_VLM_OCR", "off"),
+            # Сверка выбора с текстом судьи: на стенде 87 → 89 из 91, стресс 68 → 70 из 85,
+            # 7 замен из 7 верные. Строки OCR в промпт (WINE_VLM_OCR) не помогли: 87 → 84–85.
+            check=os.environ.get("WINE_VLM_CHECK", "1") == "1",
         )
 
     def select(self, candidates: list, answered: bool, threshold: float, family_of: dict):
@@ -258,10 +342,15 @@ class VlmJudge:
     def provider(self) -> str:
         return getattr(self.llm, "name", "?")
 
-    def judge(self, crop: Image.Image, options: list[str]) -> Verdict:
+    def judge(
+        self, crop: Image.Image, options: list[str], ocr_lines: list[str] | None = None
+    ) -> Verdict:
         self.calls += 1
         listing = "\n".join(f"{i}. {text}" for i, text in enumerate(options, start=1))
         prompt = f"{PROMPT}\n\nКарточки:\n{listing}"
+        hint = ocr_block(ocr_lines) if self.ocr != "off" else ""
+        if hint:
+            prompt = f"{prompt}\n\n{OCR_HINT}\nСтроки OCR:\n{hint}"
         try:
             text = self.llm.chat_with_image(
                 prompt, jpeg_bytes(crop, self.max_side), temperature=0.0, json_mode=self.json_mode
@@ -274,10 +363,57 @@ class VlmJudge:
             self.errors += 1
         return verdict
 
+    def verification_text(self, read_text: str, ocr_lines: list[str] | None) -> str:
+        """Текст, которым подтверждается смена лидера: прочитанное судьёй, а в `hint-verify`
+        ещё и строки OCR."""
+        if self.ocr == "hint-verify" and ocr_lines:
+            return " ".join([read_text, *map(str, ocr_lines)])
+        return read_text
+
+    def settle(self, verdict: Verdict, shown: list, leader, ocr_lines=None, text_index=None):
+        """Какую карточку выбрал судья после проверок: (карточка или None, исход).
+
+        Исход: `judge` — как сказал судья; `consistent` — выбор заменён соседкой, которая
+        сходится с текстом, прочитанным самим судьёй (`check`); `unverified` — смену лидера
+        текст не подтвердил (`verify`), ответ пайплайна остаётся.
+        """
+        chosen = (
+            shown[verdict.choice - 1]
+            if not verdict.error and verdict.choice and 1 <= verdict.choice <= len(shown)
+            else None
+        )
+        outcome = "judge"
+        if self.check and chosen is not None and text_index is not None:
+            better = consistent_pick(verdict.read_text, shown, chosen, text_index)
+            if better is not None:
+                chosen, outcome = better, "consistent"
+        if (
+            self.verify
+            and outcome == "judge"
+            and chosen is not None
+            and chosen is not leader
+            and not supports_switch(
+                self.verification_text(verdict.read_text, ocr_lines), chosen, leader
+            )
+        ):
+            outcome = "unverified"
+        return chosen, outcome
+
     def consult(
-        self, crop: Image.Image, candidates: list, answered: bool, threshold: float, family_of: dict
+        self,
+        crop: Image.Image,
+        candidates: list,
+        answered: bool,
+        threshold: float,
+        family_of: dict,
+        ocr_lines: list[str] | None = None,
+        text_index=None,
     ):
-        """Полный шаг судьи для пайплайна: решить, звать ли, позвать, применить."""
+        """Полный шаг судьи для пайплайна: решить, звать ли, позвать, применить.
+
+        `ocr_lines` — строки локального OCR; судье они уходят только при `ocr != "off"`.
+        `text_index` — для сверки выбора с текстом судьи (`check`); без него сверки нет.
+        """
         reason, shown = self.select(candidates, answered, threshold, family_of)
         if reason is None:
             return candidates, answered, None
@@ -285,24 +421,20 @@ class VlmJudge:
         leader = candidates[0]
         before_id, before_probability = leader.item_id, leader.probability
         answered_before = answered
-        verdict = self.judge(crop, [describe(c) for c in shown])
-        chosen = (
-            shown[verdict.choice - 1]
-            if not verdict.error and verdict.choice and 1 <= verdict.choice <= len(shown)
-            else None
-        )
-        if (
-            self.verify
-            and chosen is not None
-            and chosen is not leader
-            and not supports_switch(verdict.read_text, chosen, leader)
-        ):
+        verdict = self.judge(crop, [describe(c) for c in shown], ocr_lines)
+        chosen, outcome = self.settle(verdict, shown, leader, ocr_lines, text_index)
+        if outcome == "unverified":
             applied = "unverified"
         else:
+            if outcome == "consistent":
+                verdict = replace(verdict, choice=shown.index(chosen) + 1)
             candidates, answered, applied = apply_verdict(candidates, verdict, threshold, shown)
+            if outcome == "consistent" and applied == "choose":
+                applied = "consistent"
         report = {
             "reason": reason,
             "options": len(shown),
+            "ocr": self.ocr,
             "choice": verdict.choice,
             "confidence": verdict.confidence,
             "read_text": verdict.read_text,

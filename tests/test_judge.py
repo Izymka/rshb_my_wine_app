@@ -187,6 +187,32 @@ def test_verify_rejects_unsupported_switch():
     assert out[0].item_id == "a" and answered and report["applied"] == "unverified"
 
 
+def test_ocr_lines_reach_prompt_only_when_enabled():
+    prompts = []
+
+    def handler(request):
+        prompts.append(json.loads(request.content)["messages"][0]["content"][0]["text"])
+        return httpx.Response(200, json=completion('{"choice": 1, "confidence": 0.9}'))
+
+    for mode in ("off", "hint"):
+        judge = VlmJudge("https://api.example/v1", "vlm", client=transport(handler), ocr=mode)
+        judge.judge(Image.new("RGB", (10, 10)), ["a"], ["МАССАНДРА", "  ", "Портвейн  красный"])
+    assert "МАССАНДРА" not in prompts[0]
+    assert "Строки OCR:\nМАССАНДРА\nПортвейн красный" in prompts[1]
+
+
+def test_hint_verify_accepts_switch_confirmed_by_ocr():
+    fam = {"a": "K", "c": "K"}
+    content = '{"choice": 2, "confidence": 0.9, "read_text": "АЗЮР"}'
+    for mode, applied in (("hint", "unverified"), ("hint-verify", "choose")):
+        cands = [card("a", 0.6, "Азюр", grapes="Рислинг"), card("c", 0.2, "Азюр", grapes="Вионье")]
+        judge = verdict_judge(content, options="family", verify=True, ocr=mode)
+        out, _, report = judge.consult(
+            Image.new("RGB", (10, 10)), cands, True, 0.5, fam, ocr_lines=["AZUR", "Вионье"]
+        )
+        assert report["applied"] == applied and report["ocr"] == mode
+
+
 def test_family_trigger_skips_frames_without_siblings():
     judge = verdict_judge('{"choice": 1}', trigger="family")
     cands = [cand("a", 0.1, inliers=50), cand("b", 0.0)]

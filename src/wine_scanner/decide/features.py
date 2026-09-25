@@ -136,6 +136,9 @@ class PairFeatures:
     winery_hit: int = 0
     color_match: int = 0
     style_match: int = 0
+    # Сорт этикетки против поля `grapes` карточки (ocr/grapes.py), +1/−1/0. Пока не признак
+    # модели (его нет в FEATURE_NAMES): им пользуются правило семьи и проверка судьи.
+    grape_match: int = 0
 
     query: str = ""
     true_id: str = ""

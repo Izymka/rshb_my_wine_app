@@ -33,7 +33,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from wine_scanner.catalog import TEST_MANIFEST, is_holdout, load_equivalences, load_manifest
-from wine_scanner.decide.judge import VlmJudge, describe, supports_switch
+from wine_scanner.decide.guard import GRAPE_ENABLED
+from wine_scanner.decide.judge import VlmJudge, describe
 from wine_scanner.embed import load_image
 from wine_scanner.llm import chat_from_env
 from wine_scanner.pipeline import WineScanner
@@ -52,6 +53,8 @@ class Variant:
     trigger: str
     verify: bool
     reasoning: str  # reasoning_effort для Yandex; "none" — без рассуждений
+    ocr: str = "off"  # строки PaddleOCR судье: off / hint / hint-verify (judge.OCR_MODES)
+    check: bool = False  # сверять выбор судьи с его же прочитанным текстом (consistent_pick)
 
 
 VARIANTS = {
@@ -61,6 +64,12 @@ VARIANTS = {
     "family-always": Variant("family", "family", False, "none"),
     "family-verify": Variant("family", "family", True, "none"),
     "family-verify-low": Variant("family", "family", True, "low"),
+    # Строки PaddleOCR в промпте; смену лидера подтверждает только текст судьи.
+    "family-verify-ocr": Variant("family", "family", True, "none", "hint"),
+    # То же, но смену лидера может подтвердить и текст OCR.
+    "family-verify-ocr-check": Variant("family", "family", True, "none", "hint-verify"),
+    # Выбор судьи сверяется с его же текстом: цвет, сорт, сладость, различающие слова.
+    "family-verify-check": Variant("family", "family", True, "none", "off", True),
 }
 
 
@@ -72,6 +81,7 @@ class Frame:
     crop: object
     candidates: list
     answered: bool
+    ocr_lines: list[str]
 
 
 def git_head() -> str:
@@ -97,7 +107,7 @@ def load_frames(scanner: WineScanner, limit: int | None) -> list[Frame]:
     for query in tqdm(queries, desc="пайплайн"):
         image = load_image(query.path)
         key = str(query.path)
-        result = scanner.identify(image, image_key=key)
+        result = scanner.identify(image, image_key=key, trace=True)
         frames.append(
             Frame(
                 path=key,
@@ -106,6 +116,7 @@ def load_frames(scanner: WineScanner, limit: int | None) -> list[Frame]:
                 crop=scanner._crop(image, key),
                 candidates=result.candidates,
                 answered=result.answered,
+                ocr_lines=list(result.trace["ocr_lines"]),
             )
         )
     return frames
@@ -132,7 +143,9 @@ def stressed(frame: Frame, family_of: dict, max_options: int) -> list | None:
     return [sibling] + [c for c in candidates if c is not sibling]
 
 
-def run_variant(name: str, variant: Variant, frames, family_of, threshold, llm, timeout):
+def run_variant(
+    name: str, variant: Variant, frames, family_of, threshold, llm, timeout, text_index
+):
     llm.reasoning_effort = variant.reasoning
     judge = VlmJudge(
         llm=llm,
@@ -140,6 +153,8 @@ def run_variant(name: str, variant: Variant, frames, family_of, threshold, llm, 
         options=variant.options,
         trigger=variant.trigger,
         verify=variant.verify,
+        ocr=variant.ocr,
+        check=variant.check,
     )
     calls, natural, stress = [], [], []
     for frame in tqdm(frames, desc=name):
@@ -148,7 +163,13 @@ def run_variant(name: str, variant: Variant, frames, family_of, threshold, llm, 
         candidates = [_copy(c) for c in frame.candidates]
         started = time.perf_counter()
         after_list, _, report = judge.consult(
-            frame.crop, candidates, frame.answered, threshold, family_of
+            frame.crop,
+            candidates,
+            frame.answered,
+            threshold,
+            family_of,
+            frame.ocr_lines,
+            text_index,
         )
         elapsed = time.perf_counter() - started
         after = after_list[0].item_id if after_list else ""
@@ -172,17 +193,12 @@ def run_variant(name: str, variant: Variant, frames, family_of, threshold, llm, 
             else _family(swapped, family_of, judge)
         )
         started = time.perf_counter()
-        verdict = judge.judge(frame.crop, [describe(c) for c in shown])
+        verdict = judge.judge(frame.crop, [describe(c) for c in shown], frame.ocr_lines)
         elapsed = time.perf_counter() - started
-        chosen = (
-            shown[verdict.choice - 1]
-            if not verdict.error and verdict.choice and 1 <= verdict.choice <= len(shown)
-            else None
-        )
         leader = swapped[0]
-        if chosen is not None and variant.verify and chosen is not leader:
-            if not supports_switch(verdict.read_text, chosen, leader):
-                chosen = None
+        chosen, outcome = judge.settle(verdict, shown, leader, frame.ocr_lines, text_index)
+        if outcome == "unverified":
+            chosen = None
         final = chosen.item_id if chosen is not None else leader.item_id
         stress.append((EQUIVALENCES.same(frame.true_id, final), bool(verdict.error)))
         calls.append(
@@ -190,7 +206,12 @@ def run_variant(name: str, variant: Variant, frames, family_of, threshold, llm, 
                 name,
                 "stress",
                 frame,
-                {"choice": verdict.choice, "read_text": verdict.read_text, "error": verdict.error},
+                {
+                    "choice": verdict.choice,
+                    "read_text": verdict.read_text,
+                    "error": verdict.error,
+                    "applied": outcome,
+                },
                 elapsed,
                 leader.item_id,
                 final,
@@ -241,6 +262,7 @@ def summarize(name, variant, judge, calls, natural, stress):
         "stress_recovered": sum(ok for ok, _ in stress),
         "errors": judge.errors,
         "unverified": sum(c.get("applied") == "unverified" for c in calls),
+        "consistent": sum(c.get("applied") == "consistent" for c in calls),
         "call_p50_s": round(statistics.median(seconds), 2) if seconds else None,
         "call_p95_s": round(sorted(seconds)[int(0.95 * (len(seconds) - 1))], 2) if seconds else None,
     }
@@ -272,12 +294,20 @@ def main() -> None:
           f"{sum(EQUIVALENCES.same(f.true_id, f.candidates[0].item_id) for f in frames if f.candidates)}")
 
     stamp = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"), "git": git_head(), "tag": args.tag,
-             "index": str(args.index), "decider": str(args.decider), "frames": len(frames)}
+             "index": str(args.index), "decider": str(args.decider), "frames": len(frames),
+             "grape_rule": GRAPE_ENABLED}
     RUNS.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for name in names:
         judge, calls, natural, stress = run_variant(
-            name, VARIANTS[name], frames, family_of, scanner.threshold, llm, args.timeout
+            name,
+            VARIANTS[name],
+            frames,
+            family_of,
+            scanner.threshold,
+            llm,
+            args.timeout,
+            scanner.text_index,
         )
         row = summarize(name, VARIANTS[name], judge, calls, natural, stress)
         rows.append(row)
@@ -291,7 +321,7 @@ def main() -> None:
 
     table = pd.DataFrame(rows).set_index("variant")
     print(table[["natural_calls", "top1_before", "top1_after", "fixed", "broken", "stress_n",
-                 "stress_recovered", "unverified", "errors", "call_p50_s", "call_p95_s"]])
+                 "stress_recovered", "unverified", "consistent", "errors", "call_p50_s", "call_p95_s"]])
 
 
 if __name__ == "__main__":

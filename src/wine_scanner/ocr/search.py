@@ -22,13 +22,15 @@
 
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 from rapidfuzz import fuzz, process
 
 from . import attributes
+from .grapes import GrapeVocabulary
+from .grapes import compare as compare_grapes
 from .normalize import fold, fold_tokens, folded_variants, normalize, tokens, variants
 
 CATALOG_FIELDS = (
@@ -163,6 +165,7 @@ class TextIndex:
         self.idf = {t: math.log((n + 1) / (d + 1)) + 1.0 for t, d in df.items()}
 
         self.cards: dict[str, CardText] = {}
+        self.grapes = GrapeVocabulary()
         self.family_of: dict[str, str] = {}
         self.members: dict[str, list[str]] = {}
         if payloads is not None:
@@ -182,6 +185,7 @@ class TextIndex:
     # --- карточки ------------------------------------------------------------------------
 
     def _build_cards(self, payloads: list[dict], disc_max_share: float) -> None:
+        self.grapes = GrapeVocabulary.from_payloads(payloads)
         names = [frozenset(fold_tokens(str(p.get("name", "")))) for p in payloads]
         families = [
             str(p.get("winery") or p.get("producer") or p.get("brand") or "") for p in payloads
@@ -240,9 +244,14 @@ class TextIndex:
                     seen.append(token)
         return seen
 
-    @staticmethod
-    def query_attributes(query_tokens: list[str]) -> attributes.Attributes:
-        return attributes.from_tokens(query_tokens)
+    def query_attributes(
+        self, query_tokens: list[str], query_text: str | None = None
+    ) -> attributes.Attributes:
+        """Цвет, сладость, игристость по словам; сорта — по тексту, если он дан: сорт ищется
+        фразой, а в `query_tokens` слова уже без повторов и могут стоять не рядом."""
+        found = attributes.from_tokens(query_tokens)
+        text = query_text if query_text is not None else " ".join(query_tokens)
+        return replace(found, grapes=self.grapes.find(text))
 
     def score_all(self, query_text: str) -> np.ndarray:
         """Оценка каждой карточки каталога, в порядке `item_ids`."""
@@ -315,6 +324,7 @@ class TextIndex:
                 "winery_hit": 0,
                 "color_match": 0,
                 "style_match": 0,
+                "grape_match": 0,
             }
         color, style = attributes.compare(ocr_attrs, card.attrs)
         return {
@@ -324,6 +334,7 @@ class TextIndex:
             "winery_hit": int(token_hits(ocr_tokens, card.winery) > 0),
             "color_match": color,
             "style_match": style,
+            "grape_match": compare_grapes(ocr_attrs.grapes, card.attrs.grapes),
         }
 
     def family_rank(

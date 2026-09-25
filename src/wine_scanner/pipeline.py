@@ -532,7 +532,7 @@ class WineScanner:
             "hits": hits,
             "scores": scores,
             "tokens": query_tokens,
-            "attrs": self.text_index.query_attributes(query_tokens),
+            "attrs": self.text_index.query_attributes(query_tokens, text),
             "timings": timings,
         }
 
@@ -735,6 +735,7 @@ class WineScanner:
                     winery_hit=signal["winery_hit"],
                     color_match=signal["color_match"],
                     style_match=signal["style_match"],
+                    grape_match=signal["grape_match"],
                     family=self.text_index.family_of.get(item_id, ""),
                     **text_pair_features(
                         " ".join(line.text for line in lines),
@@ -788,7 +789,13 @@ class WineScanner:
         if use_judge and self.judge is not None and candidates:
             with stage("judge"):
                 candidates, answered, judge_report = self.judge.consult(
-                    crop, candidates, answered, self.threshold, self.text_index.family_of
+                    crop,
+                    candidates,
+                    answered,
+                    self.threshold,
+                    self.text_index.family_of,
+                    ocr_lines=[line.text for line in lines],
+                    text_index=self.text_index,
                 )
                 best = candidates[0]
 

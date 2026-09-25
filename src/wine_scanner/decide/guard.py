@@ -68,9 +68,11 @@ def twin_guard(features: dict, mode: str = DEFAULT_MODE) -> str | None:
 # --- Выбор внутри семьи по тексту ------------------------------------------------------------
 
 SIBLING_ENABLED = os.environ.get("WINE_SIBLING", "1") == "1"
+# Сорт этикетки против поля `grapes` (grape_match) как ещё одна ось правила — рядом с цветом.
+GRAPE_ENABLED = os.environ.get("WINE_GRAPE", "0") == "1"
 
 
-def text_evidence(features: dict) -> tuple:
+def text_evidence(features: dict, grape: bool = False) -> tuple:
     """Насколько этикетка подтверждает именно эту карточку, а не соседку по линейке.
 
     Порядок сравнения — лексикографический: сначала согласие по цвету (самое надёжное слово
@@ -80,10 +82,14 @@ def text_evidence(features: dict) -> tuple:
     входят намеренно: внутри одной линейки они измеряют не «то ли это вино», а «насколько
     крупный у карточки эталон» (проверено: лидер по геометрии не совпал с верной картой ни на
     одном из 24 живых кадров).
+
+    `grape` — сорт идёт сразу после цвета: у близнецов по сорту цвет обычно один и тот же.
     """
     txt_rank = features.get("txt_rank", 999)
+    grape_axis = (int(features.get("grape_match", 0)),) if grape else ()
     return (
         int(features.get("color_match", 0)),
+        *grape_axis,
         int(features.get("style_match", 0)),
         round(float(features.get("disc_hit", 0.0)), 2),
         -min(int(txt_rank), 999),
@@ -91,7 +97,7 @@ def text_evidence(features: dict) -> tuple:
     )
 
 
-def sibling_swap(scored: list, family_of: dict) -> int | None:
+def sibling_swap(scored: list, family_of: dict, grape: bool | None = None) -> int | None:
     """Индекс кандидата той же семьи, которого текст подтверждает вместо лидера, или None.
 
     Правило — вето, а не перевыбор: модель выбирает семью надёжно и внутри семьи чаще права,
@@ -99,8 +105,10 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
     такая версия меняла верные ответы на короткие названия). Перестановка только когда текст
     *против* лидера и *за* соседку: у лидера нет ни одного своего слова на этикетке, а у
     соседки есть, — или цвет (сладость) на этикетке противоречит лидеру и не противоречит
-    соседке.
+    соседке. С `grape` (по умолчанию WINE_GRAPE) то же самое для сорта.
     """
+    if grape is None:
+        grape = GRAPE_ENABLED
     if not scored:
         return None
     top = scored[0]
@@ -112,6 +120,7 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
         return None
     top_color = int(features.get("color_match", 0))
     top_style = int(features.get("style_match", 0))
+    top_grape = int(features.get("grape_match", 0)) if grape else 0
     top_has_disc = features.get("disc_n", 0) > 0
     top_unsupported = top_has_disc and features.get("disc_hit", 0.0) == 0.0
 
@@ -122,17 +131,19 @@ def sibling_swap(scored: list, family_of: dict) -> int | None:
         f = candidate.features
         color = int(f.get("color_match", 0))
         style = int(f.get("style_match", 0))
+        grape_match = int(f.get("grape_match", 0)) if grape else 0
         supported = f.get("disc_hit", 0.0) > 0.0
-        if color == -1 or style == -1:
+        if color == -1 or style == -1 or grape_match == -1:
             continue  # соседка сама противоречит этикетке — не кандидат на замену
         against_leader = (
             (top_color == -1 and (supported or color == 1))
             or (top_style == -1 and (supported or style == 1))
+            or (top_grape == -1 and (supported or grape_match == 1))
             or (top_unsupported and supported)
         )
         if not against_leader:
             continue
-        evidence = text_evidence(f)
+        evidence = text_evidence(f, grape)
         if best_evidence is None or evidence > best_evidence:
             best_index, best_evidence = index, evidence
     return best_index

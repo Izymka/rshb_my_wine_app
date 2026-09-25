@@ -59,6 +59,9 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | `WINE_VLM` | `0` (в Docker `1`) | `1` — VLM-судья между близнецами одной винодельни; работает только в `/v1/eval/predict` |
 | `WINE_VLM_SCAN` | `0` | `1` — звать судью и в продуктовом `/scan` (ложные приёмы незнакомых 0.07 → 0.34) |
 | `WINE_VLM_OPTIONS`, `WINE_VLM_TRIGGER`, `WINE_VLM_VERIFY`, `WINE_VLM_TIMEOUT` | `family`, `family`, `1`, `4` | Режим судьи family-verify: показывать карточки своей винодельни, звать при соседках в выдаче, смену лидера принимать только при подтверждении текстом этикетки |
+| `WINE_VLM_CHECK` | `1` | Сверять выбор судьи с текстом, который он сам прочитал: противоречие по цвету, сорту или сладости — выбор переходит к показанной соседке, которую текст подтверждает |
+| `WINE_VLM_OCR` | `off` | Строки PaddleOCR судье: `hint` — в промпт подсказкой, `hint-verify` — ещё и для подтверждения смены лидера (на стенде не помогло) |
+| `WINE_GRAPE` | `0` | `1` — сорт этикетки против поля `grapes` в правиле выбора внутри семьи без судьи |
 | `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `yandex`, — | Провайдер судьи и откат: `yandex` (Yandex AI Studio, без VPN) / `openai` (любой OpenAI-совместимый чат: `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) |
 | `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID` | — (ключ OCR), — | Ключ AI Studio: роль `ai.languageModels.user`, область ключа `yc.ai.languageModels.execute`; модели `YANDEX_VLM_MODEL` (`qwen3.6-35b-a3b`) и `YANDEX_LLM_MODEL` (`yandexgpt-5-lite`) |
 | `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`yandex` / `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |

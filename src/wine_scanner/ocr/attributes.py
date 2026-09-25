@@ -13,6 +13,7 @@
 
 from dataclasses import dataclass
 
+from .grapes import parse
 from .normalize import fold_phonetic, normalize
 
 
@@ -89,6 +90,8 @@ class Attributes:
     sweetness: str | None = None
     sparkling: bool | None = None
     fortified: bool | None = None
+    # Сорта (ocr/grapes.py): у этикетки — найденные в тексте, у карточки — из поля `grapes`.
+    grapes: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict:
         return {
@@ -96,6 +99,7 @@ class Attributes:
             "sweetness": self.sweetness,
             "sparkling": self.sparkling,
             "fortified": self.fortified,
+            "grapes": sorted(self.grapes),
         }
 
 
@@ -145,6 +149,7 @@ def from_card(payload: dict, name_tokens: list[str]) -> Attributes:
         sweetness=guessed.sweetness,
         sparkling=guessed.sparkling,
         fortified=guessed.fortified,
+        grapes=parse(payload.get("grapes", "")),
     )
 
 

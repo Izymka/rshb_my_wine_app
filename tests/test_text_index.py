@@ -121,4 +121,5 @@ def test_index_without_payloads_degrades_gracefully():
         "winery_hit": 0,
         "color_match": 0,
         "style_match": 0,
+        "grape_match": 0,
     }
