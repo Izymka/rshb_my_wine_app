@@ -122,11 +122,16 @@ jobs:
             if docker run -d --name "$name" --restart unless-stopped \
               -e NUXT_SCANNER_URL="$NUXT_SCANNER_URL" \
               -p "127.0.0.1:$WEB_PORT:3000" "$IMAGE"; then
-              if curl --fail --retry 10 --retry-connrefused --retry-delay 2 \
-                "http://127.0.0.1:$WEB_PORT/" -o /dev/null; then
-                docker rm "$previous" 2>/dev/null || true
-                exit 0
-              fi
+              attempt=0
+              while [ "$attempt" -lt 30 ]; do
+                if curl --fail --silent --max-time 3 \
+                  "http://127.0.0.1:$WEB_PORT/" -o /dev/null; then
+                  docker rm "$previous" 2>/dev/null || true
+                  exit 0
+                fi
+                attempt=$((attempt + 1))
+                sleep 2
+              done
             fi
             docker logs "$name" 2>/dev/null || true
             docker rm -f "$name" 2>/dev/null || true
