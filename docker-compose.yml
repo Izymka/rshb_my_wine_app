@@ -114,6 +114,8 @@ services:
     environment:
       # Nuxt проксирует /api/* в сервис по внутренней сети compose.
       NUXT_SCANNER_URL: http://scanner:8000
+      TG_NOTIFY_TOKEN: ${TG_NOTIFY_TOKEN:-}
+      TG_NOTIFY_TARGET: ${TG_NOTIFY_TARGET:-}
     depends_on:
       scanner:
         condition: service_healthy
