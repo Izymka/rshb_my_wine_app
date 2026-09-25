@@ -557,6 +557,11 @@ class WineScanner:
                 for item_id in self.text_index.family_rank(family, scores, seen, FAMILY_CAP):
                     added.append(item_id)
                     seen.add(item_id)
+        # Карточки с ошибкой контента по решению человека в ответ не попадают вовсе.
+        excluded = self.equivalences.excluded
+        if excluded:
+            base = [item_id for item_id in base if item_id not in excluded]
+            added = [item_id for item_id in added if item_id not in excluded]
         return base + added, added
 
     def _window(self, long_list: list[str], signals: dict[str, dict]) -> list[str]:

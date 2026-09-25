@@ -357,6 +357,9 @@ load_live = load_manifest  # прежнее имя, до раскладки 18.0
 
 
 EQUIVALENCES = Path("data/splits/catalog_slug_equivalences.csv")
+# Карточки с ошибкой контента, которые нельзя отдавать вовсе: например, фото чужой бутылки.
+# Подменить их каноническим slug нельзя — картинка притягивает кадры другого вина.
+EXCLUDED = Path("data/splits/catalog_excluded_slugs.csv")
 
 
 @dataclass
@@ -371,13 +374,18 @@ class Equivalences:
 
     canonical: dict[str, str] = field(default_factory=dict)
     group_of: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Slug, которые сервис не отдаёт никогда (`data/splits/catalog_excluded_slugs.csv`).
+    excluded: frozenset[str] = frozenset()
 
     def same(self, a: str, b: str) -> bool:
         return a == b or b in self.group_of.get(a, ())
 
 
-def load_equivalences(path: Path = EQUIVALENCES) -> Equivalences:
+def load_equivalences(path: Path = EQUIVALENCES, excluded: Path = EXCLUDED) -> Equivalences:
     result = Equivalences()
+    if excluded.exists():
+        table = pd.read_csv(excluded, dtype=str, keep_default_na=False)
+        result.excluded = frozenset(table.slug) - {""}
     if not path.exists():
         return result
     table = pd.read_csv(path, dtype=str, keep_default_na=False)
