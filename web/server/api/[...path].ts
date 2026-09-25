@@ -3,7 +3,9 @@
 import { proxyRequest } from "h3";
 
 export default defineEventHandler(async (event) => {
-  const path = event.context.params?.path || "";
-  const target = `${useRuntimeConfig().scannerUrl}/${path}`;
+  // event.path сохраняет query string и кодирование пути.
+  const path = event.path.slice("/api/".length);
+  const base = useRuntimeConfig(event).scannerUrl.replace(/\/+$/, "");
+  const target = `${base}/${path}`;
   return proxyRequest(event, target);
 });

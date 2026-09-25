@@ -7,7 +7,7 @@ export default defineNuxtConfig({
   ssr: true,
   css: ["~/assets/css/main.css"],
   runtimeConfig: {
-    scannerUrl: process.env.NUXT_SCANNER_URL || "http://127.0.0.1:8080",
+    scannerUrl: "http://127.0.0.1:8080",
   },
   app: {
     head: {

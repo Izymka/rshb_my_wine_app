@@ -27,6 +27,12 @@ curl -s localhost:8080/health | jq .devices   # визуальные модел�
 
 В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
 
+### Отдельный деплой фронтенда
+
+GitHub Actions → GHCR → Node.js-контейнер Nuxt/Nitro; scanner и PostgreSQL могут
+оставаться на локальном сервере разработки с GPU. Настройки CI, адрес API, HTTPS и откат:
+[инструкция по деплою](docs/FRONTEND_DEPLOY.md).
+
 ### Локально (uv, Python 3.12)
 
 ```bash
@@ -71,7 +77,7 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | `WINE_VISUAL_CANDIDATES`, `WINE_TEXT_CANDIDATES` | `100`, `50` | Ширина визуальной и текстовой веток |
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
 | `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
-| `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес сервиса для интерфейса |
+| `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес scanner для серверного прокси Nuxt; задаётся при запуске контейнера |
 
 Без единого внешнего ключа сервис полностью работоспособен: PaddleOCR локально, судья и
 сомелье выключены.

@@ -1,0 +1,137 @@
+name: Build and deploy frontend
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/deploy-web.yml']
+  pull_request:
+    paths: ['web/**', '.github/workflows/deploy-web.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}-web:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Nuxt server image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          target: server
+          load: true
+          tags: ${{ steps.image.outputs.name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test SSR and scanner proxy
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          cleanup() {
+            docker logs web-smoke || true
+            docker rm -f web-smoke scanner-mock || true
+            docker network rm web-smoke || true
+          }
+          trap cleanup EXIT
+          docker network create web-smoke
+          docker run -d --name scanner-mock --network web-smoke \
+            -v "$PWD/web/scripts/smoke.mjs:/smoke.mjs:ro" "$IMAGE" node /smoke.mjs serve
+          docker run -d --name web-smoke --network web-smoke \
+            -e NUXT_SCANNER_URL=http://scanner-mock:8080/prefix/ \
+            -p 127.0.0.1:3000:3000 "$IMAGE"
+          node web/scripts/smoke.mjs http://127.0.0.1:3000
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push tested image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: docker push "$IMAGE"
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      WEB_PORT: ${{ vars.WEB_PORT || '5000' }}
+      NUXT_SCANNER_URL: ${{ vars.NUXT_SCANNER_URL }}
+    steps:
+      - name: Validate scanner URL
+        run: |
+          node --input-type=module -e '
+            const url = new URL(process.env.NUXT_SCANNER_URL);
+            if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+              throw new Error("NUXT_SCANNER_URL must be an HTTP(S) base URL without credentials, query or fragment");
+            }
+          '
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ vars.SSH_PORT || '22' }}
+          fingerprint: ${{ secrets.SSH_HOST_FINGERPRINT }}
+          envs: IMAGE,REGISTRY_USER,REGISTRY_PASSWORD,WEB_PORT,NUXT_SCANNER_URL
+          command_timeout: 10m
+          script: |
+            set -eu
+            case "$WEB_PORT" in ''|*[!0-9]*) echo 'Invalid WEB_PORT'; exit 1;; esac
+            test "$WEB_PORT" -ge 1 && test "$WEB_PORT" -le 65535
+            test -n "$NUXT_SCANNER_URL"
+            command -v curl >/dev/null
+            DOCKER_CONFIG=$(mktemp -d)
+            export DOCKER_CONFIG
+            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+            printf '%s' "$REGISTRY_PASSWORD" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+            docker pull "$IMAGE"
+            name=wine-scanner-web
+            previous=wine-scanner-web-previous
+            docker rm -f "$previous" 2>/dev/null || true
+            if docker container inspect "$name" >/dev/null 2>&1; then
+              docker stop "$name"
+              docker rename "$name" "$previous"
+            fi
+            if docker run -d --name "$name" --restart unless-stopped \
+              -e NUXT_SCANNER_URL="$NUXT_SCANNER_URL" \
+              -p "127.0.0.1:$WEB_PORT:3000" "$IMAGE"; then
+              if curl --fail --retry 10 --retry-connrefused --retry-delay 2 \
+                "http://127.0.0.1:$WEB_PORT/" -o /dev/null; then
+                docker rm "$previous" 2>/dev/null || true
+                exit 0
+              fi
+            fi
+            docker logs "$name" 2>/dev/null || true
+            docker rm -f "$name" 2>/dev/null || true
+            if docker container inspect "$previous" >/dev/null 2>&1; then
+              docker rename "$previous" "$name"
+              docker start "$name"
+            fi
+            exit 1
