@@ -36,6 +36,10 @@ services:
       # Эталоны каталога — их отдаёт GET /catalog/image/{slug} для интерфейса.
       - ./data/catalog:/app/data/catalog:ro
       - ./data/media:/app/data/media:ro
+      # Решения человека по каталогу: дубли с каноническим slug и исключённые карточки
+      # (catalog_slug_equivalences.csv, catalog_excluded_slugs.csv). Без них сервис молча
+      # отвечает строго: выдаёт исключённую -109 и дубли вместо канонических slug.
+      - ./data/splits:/app/data/splits:ro
       # Кэш чужих весов переживает пересборку образа.
       - torch-cache:/opt/torch
       - paddle-cache:/root/.paddlex

@@ -51,12 +51,16 @@ COPY eval/ ./eval/
 RUN uv sync --frozen --extra api --extra rerank --extra ocr --extra decide
 
 # Чужие веса выкачиваются при первом обращении: XFeat через torch.hub, PaddleOCR — свои модели
-# распознавания. Если этого не сделать на сборке, первый запуск контейнера пойдёт в интернет,
-# займёт минуты и упадёт там, где сети нет.
+# распознавания, детектор бутылки RT-DETR (COCO) — с HuggingFace. Если этого не сделать на
+# сборке, первый запуск контейнера пойдёт в интернет, займёт минуты и упадёт там, где сети нет.
 RUN uv run python -c "\
 import torch; \
+from transformers import RTDetrForObjectDetection, RTDetrImageProcessor; \
+from wine_scanner.detect.rtdetr import COCO_BOTTLE_MODEL; \
 from wine_scanner.ocr.paddle import PaddleOCR; \
 torch.hub.load('verlab/accelerated_features', 'XFeat', pretrained=True, trust_repo=True); \
+RTDetrImageProcessor.from_pretrained(COCO_BOTTLE_MODEL); \
+RTDetrForObjectDetection.from_pretrained(COCO_BOTTLE_MODEL); \
 PaddleOCR()._get_engine()"
 
 EXPOSE 8000
