@@ -1,5 +1,5 @@
 import { telegramNotifier } from "../utils/telegram-notify";
 
 export default defineNitroPlugin(() => {
-  void telegramNotifier.message("Веб-сервер запущен");
+  void telegramNotifier.htmlMessage("🟢 <b>Веб-сервер запущен</b>");
 });
