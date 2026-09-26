@@ -58,6 +58,10 @@ export function useScan() {
 
   async function scan(file: File): Promise<boolean> {
     reset();
+    if (!navigator.onLine) {
+      error.value = "network";
+      return false;
+    }
     preview.value = URL.createObjectURL(file);
     busy.value = true;
     controller = new AbortController();

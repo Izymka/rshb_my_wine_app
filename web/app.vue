@@ -1,3 +1,4 @@
 <template>
+  <PwaStatus />
   <NuxtPage />
 </template>

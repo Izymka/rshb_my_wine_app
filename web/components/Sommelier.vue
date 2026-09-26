@@ -2,6 +2,7 @@
 // Цифровой сомелье: короткий разговор о найденном вине. Блок появляется только если сервис
 // умеет отвечать (/sommelier не 404); при ошибке провайдера — честная строка, карточка не страдает.
 const props = defineProps<{ slug: string; card: Record<string, unknown> }>();
+const { online } = useConnectivity();
 
 const available = ref<boolean | null>(null);
 const history = ref<{ role: "user" | "assistant"; content: string }[]>([]);
@@ -12,7 +13,7 @@ const suggestions = ["К чему подать?", "При какой темпе�
 
 async function ask(text: string) {
   const q = text.trim();
-  if (!q || busy.value) return;
+  if (!q || busy.value || !online.value) return;
   question.value = "";
   history.value.push({ role: "user", content: q });
   busy.value = true;
@@ -58,11 +59,11 @@ onMounted(async () => {
       <div v-if="failed" class="error small">Подсказки сейчас недоступны — попробуйте позже.</div>
     </div>
     <div v-if="!history.length" style="margin: 4px 0 10px">
-      <button v-for="s in suggestions" :key="s" class="chip" style="margin: 0 6px 6px 0" @click="ask(s)">{{ s }}</button>
+      <button v-for="s in suggestions" :key="s" class="chip" :disabled="!online || busy" style="margin: 0 6px 6px 0" @click="ask(s)">{{ s }}</button>
     </div>
     <form class="input" @submit.prevent="ask(question)">
-      <input v-model="question" placeholder="Ваш вопрос о вине" :disabled="busy" />
-      <button type="submit" :disabled="busy || !question.trim()">→</button>
+      <input v-model="question" placeholder="Ваш вопрос о вине" :disabled="busy || !online" />
+      <button type="submit" :disabled="busy || !online || !question.trim()" aria-label="Отправить вопрос">→</button>
     </form>
   </section>
 </template>

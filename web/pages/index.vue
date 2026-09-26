@@ -4,6 +4,7 @@
 // превращается в выбор файла. После ответа — переход на карточку или отказ.
 const { preview, error, busy, elapsedMs, scan, cancel, reset } = useScan();
 const router = useRouter();
+const { online } = useConnectivity();
 const cameraInput = ref<HTMLInputElement>();
 const galleryInput = ref<HTMLInputElement>();
 const slow = ref(false);
@@ -60,10 +61,10 @@ onMounted(reset);
     </div>
 
     <template v-if="!busy">
-      <button class="btn btn-primary" @click="cameraInput?.click()">
+      <button class="btn btn-primary" :disabled="!online" @click="cameraInput?.click()">
         <span>📷</span> Сканировать этикетку
       </button>
-      <button class="btn btn-secondary" @click="galleryInput?.click()">Выбрать из галереи</button>
+      <button class="btn btn-secondary" :disabled="!online" @click="galleryInput?.click()">Выбрать из галереи</button>
       <input ref="cameraInput" type="file" accept="image/*" capture="environment" hidden @change="onFile" />
       <input ref="galleryInput" type="file" accept="image/*,.heic" hidden @change="onFile" />
     </template>
