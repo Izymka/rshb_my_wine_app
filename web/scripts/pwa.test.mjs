@@ -9,7 +9,7 @@ function worker({ offline = false, installFails = false } = {}) {
   const removed = [];
   const shell = { body: "offline shell" };
   let claimed = false;
-  runInNewContext(source.replace("/* __PRECACHE__ */ []", '["/", "/_payload.json", "/_nuxt/app.js"]'), {
+  runInNewContext(source.replace("/* __PRECACHE__ */ []", '["/", "/offline.html", "/_payload.json", "/_nuxt/app.js"]'), {
     URL,
     self: {
       location: { origin: "https://wine.example" },
@@ -20,7 +20,7 @@ function worker({ offline = false, installFails = false } = {}) {
       open: async () => ({ addAll: async () => { if (installFails) throw Error("cache failed"); } }),
       keys: async () => ["wine-pwa-old", "wine-pwa-__CACHE_VERSION__", "other-app"],
       delete: async (name) => { removed.push(name); },
-      match: async (path) => path === "/" ? shell : { body: "cached asset" },
+      match: async (path) => path === "/offline.html" ? shell : { body: "cached asset" },
     },
     fetch: async () => { if (offline) throw Error("offline"); return { body: "network" }; },
   });
@@ -61,4 +61,28 @@ test("failed precaching rejects installation, preserving the existing worker", a
   let done;
   w.handlers.install({ waitUntil: (value) => { done = value; } });
   await assert.rejects(done, /cache failed/);
+});
+
+test("push displays an actionable notification and a click opens the saved card", async () => {
+  const handlers = {};
+  const notifications = [];
+  const opened = [];
+  let closed = false;
+  runInNewContext(source, { URL, self: {
+    location: { origin: 'https://wine.example' },
+    addEventListener: (name, handler) => { handlers[name] = handler; },
+    registration: { showNotification: async (title, options) => { notifications.push({ title, options }); } },
+    clients: { matchAll: async () => [], openWindow: async url => { opened.push(url); } },
+  } });
+  let done;
+  handlers.push({ data: { json: () => ({ title: 'Как вам вино?', url: '/wines/test#review', tag: 'wine-test' }) }, waitUntil: p => { done = p; } });
+  await done;
+  assert.equal(notifications[0].options.data.url, '/wines/test#review');
+  handlers.notificationclick({ notification: { data: notifications[0].options.data, close: () => { closed = true; } }, waitUntil: p => { done = p; } });
+  await done;
+  assert.equal(closed, true);
+  assert.deepEqual(opened, ['https://wine.example/wines/test#review']);
+  handlers.push({ data: { json: () => ({ url: 'https://evil.test' }) }, waitUntil: p => { done = p; } });
+  await done;
+  assert.equal(notifications[1].options.data.url, '/wines');
 });

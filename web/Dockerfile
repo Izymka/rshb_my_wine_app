@@ -15,6 +15,7 @@ FROM node:22-alpine AS server
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0
 COPY --from=server-build --chown=node:node /app/.output ./.output
+RUN mkdir -p /app/.data/wine-reminders && chown -R node:node /app/.data
 USER node
 EXPOSE 3000
 CMD ["node", ".output/server/index.mjs"]

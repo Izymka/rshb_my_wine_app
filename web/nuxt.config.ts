@@ -7,13 +7,18 @@ export default defineNuxtConfig({
   compatibilityDate: "2025-01-01",
   devtools: { enabled: false },
   ssr: true,
-  nitro: { prerender: { routes: ["/"] } },
+  nitro: { prerender: { routes: ["/", "/offline.html"] } },
+  routeRules: { "/offline.html": { ssr: false } },
   hooks: {
     "nitro:build:public-assets": (nitro) => buildPwa(nitro.options.output.publicDir),
   },
   css: ["~/assets/css/main.css"],
   runtimeConfig: {
     scannerUrl: "http://127.0.0.1:8080",
+    shelfPushPublicKey: "",
+    shelfPushPrivateKey: "",
+    shelfPushSubject: "",
+    shelfPushDirectory: ".data/wine-reminders",
   },
   app: {
     head: {

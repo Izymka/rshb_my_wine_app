@@ -2,8 +2,11 @@
 // Экраны 3 (карточка), 4 (вопрос о годе), 5 (не узнали) из DESIGN.md. Один маршрут, три
 // состояния: решает поле answered ответа сервиса, а не вероятность — порог откалиброван
 // вместе с моделью, и заводить свой здесь нельзя.
+import { similarKnown, REACTIONS, shelfDate } from "~/utils/shelf.mjs";
 const { preview, result, reset } = useScan();
 const router = useRouter();
+const { find: findOnShelf } = useShelf();
+const savedWine = computed(() => shownSlug.value ? findOnShelf(shownSlug.value) : undefined);
 
 if (!result.value) {
   // Прямой заход без сканирования (обновили страницу) — назад к камере.
@@ -38,8 +41,16 @@ function again() {
 
 function pick(c: { item_id: string; card: Record<string, unknown> }) {
   // Пользователь выбрал вино из похожих — показываем его карточку как ответ.
-  result.value = { ...r.value, answered: true, item_id: c.item_id, card: c.card as never, guard: null };
+  const knownCards = [
+    ...(r.value.analogues || []),
+    ...r.value.candidates.map(candidate => ({ ...candidate.card, slug: candidate.item_id })),
+  ];
+  result.value = {
+    ...r.value, answered: true, item_id: c.item_id, card: c.card as never,
+    guard: null, vintage: null, analogues: similarKnown(c.item_id, c.card, knownCards),
+  };
   wrong.value = false;
+  pickedYear.value = null;
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 </script>
@@ -57,8 +68,14 @@ function pick(c: { item_id: string; card: Record<string, unknown> }) {
       </button>
     </header>
 
+    <NuxtLink class="shelf-nav" to="/wines">Мои вина →</NuxtLink>
+
     <!-- Ответ найден -->
     <section v-if="answered && !wrong" class="card">
+      <div v-if="savedWine" class="shelf-saved small" style="margin-bottom: 14px">
+        <b>Это вино уже на полке · {{ shelfDate(savedWine.addedAt) }}</b>
+        <span>Оценка: {{ savedWine.reaction ? REACTIONS[savedWine.reaction] : "ещё не оценено" }}</span>
+      </div>
       <div class="row" style="align-items: flex-start">
         <img v-if="shownSlug" class="bottle" :src="imageUrl(shownSlug)" alt="эталон из каталога" />
         <div class="grow">
@@ -118,6 +135,8 @@ function pick(c: { item_id: string; card: Record<string, unknown> }) {
       </div>
     </section>
 
+    <ShelfEditor v-if="answered && !wrong && shownSlug" :key="shownSlug" :slug="shownSlug" :card="{ ...card, vintage: pickedYear && pickedYear !== 'нет' ? pickedYear : r.vintage?.year || card.vintage }" :analogues="r.analogues || []" />
+
     <!-- Похожие: близнецы из окна ре-ранкинга -->
     <section v-if="(!answered || wrong) && r.candidates.length" class="card">
       <h3 style="font-size: 18px; margin-bottom: 10px">Возможно, одно из этих</h3>
@@ -147,7 +166,7 @@ function pick(c: { item_id: string; card: Record<string, unknown> }) {
       </div>
     </section>
 
-    <Sommelier v-if="answered && !wrong && shownSlug" :slug="shownSlug" :card="card" />
+    <Sommelier :key="shownSlug || 'none'" v-if="answered && !wrong && shownSlug" :slug="shownSlug" :card="card" />
 
     <div class="footer">
       ответ за {{ Math.round(r.timings_ms?.total || 0) }} мс

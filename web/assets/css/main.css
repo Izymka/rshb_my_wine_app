@@ -106,3 +106,21 @@ button { font: inherit; }
 .install-action { margin-top: 10px; padding: 8px 12px; border: 0; border-radius: 999px; background: var(--accent); color: white; font-weight: 600; cursor: pointer; }
 .notice-close { flex: none; width: 32px; height: 32px; border: 0; border-radius: 50%; background: var(--bg-cream); color: var(--text-2); font-size: 24px; cursor: pointer; }
 button:disabled { cursor: default; opacity: 0.6; }
+
+.shelf-editor { display: flex; flex-direction: column; gap: 16px; }
+.shelf-editor h2 { font-size: 23px; }
+.shelf-editor p { margin: 0; }
+.shelf-saved { padding: 14px; background: #f0f6ef; border-radius: var(--radius-s); color: #365732; display: grid; gap: 5px; }
+.shelf-editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.shelf-editor legend { font-weight: 600; margin-bottom: 10px; }
+.shelf-note, .shelf-tools { display: grid; gap: 10px; }
+.shelf-note textarea, .shelf-tools input { width: 100%; padding: 12px; font: inherit; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: white; }
+.shelf-note textarea { resize: vertical; }
+.shelf-item { color: var(--text); padding: 14px; }
+.shelf-excerpt { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.reminder-box { display: grid; gap: 12px; padding: 14px; background: var(--bg-cream); border-radius: var(--radius-s); }
+.shelf-nav { display: block; text-align: center; padding: 12px; border: 1px solid var(--line); border-radius: 999px; }
+.push-settings { font-size: 13px; display: grid; gap: 8px; }
+.push-settings p { margin: 0; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+#review { scroll-margin-top: 20px; }

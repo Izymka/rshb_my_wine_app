@@ -39,6 +39,8 @@ onMounted(reset);
       </div>
     </header>
 
+    <NuxtLink class="shelf-nav" to="/wines">Мои вина →</NuxtLink>
+
     <div class="viewfinder">
       <img v-if="preview" :src="preview" alt="снятый кадр" :class="{ pulse: busy }" />
       <div v-else class="placeholder">

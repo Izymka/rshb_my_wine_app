@@ -15,7 +15,7 @@ export async function buildPwa(root) {
   const assets = (await files(root)).filter((path) =>
     path.startsWith("/_nuxt/") && !/\.(map|gz|br)$/.test(path)
   ).sort();
-  assets.push("/", "/_payload.json", "/icon.png", "/icon-512.png", "/logo.png", "/manifest.webmanifest");
+  assets.push("/offline.html", "/", "/_payload.json", "/icon.png", "/icon-512.png", "/logo.png", "/manifest.webmanifest");
   const hash = createHash("sha256");
   for (const asset of assets) hash.update(await readFile(join(root, asset === "/" ? "index.html" : asset)));
   const source = await readFile(new URL("./service-worker.js", import.meta.url), "utf8");
