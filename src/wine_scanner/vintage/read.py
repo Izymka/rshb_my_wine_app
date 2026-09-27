@@ -184,16 +184,65 @@ def resolve(reading: Reading, payload: dict) -> Answer:
     return Answer(None, "", ask=False)
 
 
-def compare(year: int | None, payload: dict) -> int:
-    """Признак для решающего слоя: +1 год совпал, -1 год противоречит, 0 сказать нечего.
+def compare(year: int | None, payload: dict, group_years: frozenset[int] = frozenset()) -> int:
+    """Признак решающего слоя: +1 год совпал, -1 год у другой карточки того же вина, 0 иначе.
 
-    Три состояния вместо двух — потому что «не знаем» и «не сходится» это совершенно разные
-    новости. Слепи их в один ноль, и модель перестанет отличать карточку без года от карточки
-    с чужим годом, то есть ровно от того случая, ради которого этап и делается.
+    Правило продукта (27.09.2026): вино, которое отличается от карточки только годом, — то же
+    вино. Если год с этикетки в каталоге не заведён ни у одной карточки этой этикетки
+    (`group_years` — годы соседей по группе года, см. `vintage_groups`), карточка остаётся
+    верным ответом, и год против неё не свидетельствует. Минус — только когда есть карточка
+    ровно с прочитанным годом: тогда эта карточка — не та бутылка.
     """
     if year is None:
         return 0
-    known = catalog_years(payload)
-    if not known:
-        return 0
-    return 1 if year in known else -1
+    if year in catalog_years(payload):
+        return 1
+    return -1 if year in group_years else 0
+
+
+_YEAR_IN_NAME = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+def _key_text(value: object) -> str:
+    return " ".join(re.findall(r"\w+", str(value or "").lower().replace("ё", "е")))
+
+
+def vintage_groups(payloads: dict[str, dict]) -> dict[str, frozenset[str]]:
+    """Карточки одного вина, которые отличаются только годом: slug -> вся группа.
+
+    Одно вино — та же винодельня, категория и сорта и то же название, если убрать из него год
+    («LETO Рислинг 2020 сухое белое» и «... 2024 ...»). Группа нужна, только если год хоть у
+    кого-то в ней записан: иначе различать членов по году нечем.
+    """
+    keys: dict[tuple, list[str]] = {}
+    dated: set[str] = set()
+    for slug, payload in payloads.items():
+        name = str(payload.get("name", ""))
+        if _YEAR_IN_NAME.search(name) or catalog_years(payload):
+            dated.add(slug)
+        key = (
+            _key_text(payload.get("winery")),
+            _key_text(_YEAR_IN_NAME.sub(" ", name)),
+            _key_text(payload.get("category")),
+            _key_text(payload.get("grapes")),
+        )
+        keys.setdefault(key, []).append(slug)
+    groups: dict[str, frozenset[str]] = {}
+    for members in keys.values():
+        if len(members) > 1 and dated.intersection(members):
+            group = frozenset(members)
+            for slug in members:
+                groups[slug] = group
+    return groups
+
+
+def pick_vintage(
+    year: int | None, slug: str, groups: dict[str, frozenset[str]], payloads: dict[str, dict]
+) -> str:
+    """Карточка того же вина с прочитанным годом, если такая есть; иначе исходная."""
+    if year is None or year in catalog_years(payloads.get(slug, {})):
+        return slug
+    for member in sorted(groups.get(slug, ())):
+        if year in catalog_years(payloads.get(member, {})):
+            return member
+    return slug

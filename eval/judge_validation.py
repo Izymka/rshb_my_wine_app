@@ -113,7 +113,7 @@ def load_frames(scanner: WineScanner, limit: int | None) -> list[Frame]:
                 path=key,
                 true_id=query.true_id,
                 source=query.source,
-                crop=scanner._crop(image, key),
+                crop=scanner._crop(image, key)[0],
                 candidates=result.candidates,
                 answered=result.answered,
                 ocr_lines=list(result.trace["ocr_lines"]),

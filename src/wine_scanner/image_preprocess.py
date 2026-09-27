@@ -94,5 +94,10 @@ class PreparedLabelCropper:
     def crop(self, image: Image.Image) -> Image.Image:
         return prepare_label_image(self.detector.crop(image))
 
+    def crop_pair(self, image: Image.Image) -> tuple[Image.Image, Image.Image]:
+        """(вырезка в разрешении кадра, та же вырезка 512 px). Первую читает OCR."""
+        raw = self.detector.crop(image)
+        return raw, prepare_label_image(raw)
+
     def __call__(self, path, image: Image.Image) -> Image.Image:
         return self.crop(image)

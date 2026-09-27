@@ -9,7 +9,9 @@ from .read import (
     from_text,
     newest_vintage,
     pick,
+    pick_vintage,
     resolve,
+    vintage_groups,
     years,
 )
 
@@ -27,8 +29,10 @@ __all__ = [
     "newest_vintage",
     "patch",
     "pick",
+    "pick_vintage",
     "project",
     "reference_region",
     "resolve",
+    "vintage_groups",
     "years",
 ]

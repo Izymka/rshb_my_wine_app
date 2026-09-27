@@ -17,9 +17,11 @@ from wine_scanner.vintage import (
     from_text,
     patch,
     pick,
+    pick_vintage,
     project,
     reference_region,
     resolve,
+    vintage_groups,
     years,
 )
 from wine_scanner.vintage.locate import MIN_INLIERS
@@ -70,7 +72,10 @@ def test_catalog_years_read_both_formats():
 
 def test_compare_separates_unknown_from_conflict():
     assert compare(2022, {"vintage": 2022}) == 1
-    assert compare(2022, {"vintage": 2023}) == -1
+    # Другой год той же этикетки, которого в каталоге нет, — то же вино (правило 27.09).
+    assert compare(2022, {"vintage": 2023}) == 0
+    # Минус — только когда прочитанный год есть у соседа по группе года.
+    assert compare(2022, {"vintage": 2023}, frozenset({2022})) == -1
     # Ноль означает «сравнивать не с чем», и это не то же самое, что несовпадение.
     assert compare(2022, {"vintage": None}) == 0
     assert compare(None, {"vintage": 2022}) == 0
@@ -159,3 +164,34 @@ def test_answer_stays_silent_for_wine_without_vintage():
     """У NV-вина спрашивать год бессмысленно: пользователю нечего ответить."""
     answer = resolve(from_text("VANG DALAT CLASSIC"), {"vintage": None})
     assert (answer.year, answer.ask) == (None, False)
+
+
+LETO = {
+    "leto-2020": {"name": "LETO Рислинг 2020 сухое белое", "vintage": 2020, "winery": "LETO",
+                  "category": "Белое", "grapes": "Рислинг"},
+    "leto-2024": {"name": "LETO Рислинг 2024 сухое белое", "vintage": 2024, "winery": "LETO",
+                  "category": "Белое", "grapes": "Рислинг"},
+    "leto-kf": {"name": "LETO Каберне Фран 2020", "vintage": 2020, "winery": "LETO",
+                "category": "Красное", "grapes": "Каберне Фран"},
+    "shiraz": {"name": "Шираз", "vintage": None, "winery": "Шато Пино", "category": "Красное",
+               "grapes": "Шираз"},
+    "shiraz-2": {"name": "Шираз", "vintage": None, "winery": "Шато Пино",
+                 "category": "Красное", "grapes": "Шираз"},
+}
+
+
+def test_vintage_groups_join_cards_differing_only_by_year():
+    groups = vintage_groups(LETO)
+    assert groups["leto-2020"] == frozenset({"leto-2020", "leto-2024"})
+    assert "leto-kf" not in groups
+    # Без года ни у кого различать по году нечем — это дело таблицы дублей, не группы года.
+    assert "shiraz" not in groups
+
+
+def test_pick_vintage_switches_only_to_exact_year():
+    groups = vintage_groups(LETO)
+    assert pick_vintage(2024, "leto-2020", groups, LETO) == "leto-2024"
+    # 2022 нет ни у одной карточки — отдаём выбранную, а не отказ.
+    assert pick_vintage(2022, "leto-2020", groups, LETO) == "leto-2020"
+    assert pick_vintage(None, "leto-2020", groups, LETO) == "leto-2020"
+    assert pick_vintage(2024, "shiraz", groups, LETO) == "shiraz"

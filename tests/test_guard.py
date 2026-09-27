@@ -113,3 +113,30 @@ def test_sibling_swap_on_sweetness_contradiction():
     wrong_color = scored("livadia", disc_hit=0.67, color_match=-1)
     top_unsupported = scored("alushta", disc_hit=0.0)
     assert sibling_swap([top_unsupported, wrong_color], FAMILY) is None
+
+
+from wine_scanner.decide.guard import label_confirmed  # noqa: E402
+
+RULE = {"max_txt_rank": 0, "min_disc_hit": 0.5, "min_name_cover": 0.6}
+VETER = {  # «Ветер в травах 2022»: текст однозначен, года в карточке нет
+    "txt_rank": 0, "winery_hit": 1, "disc_hit": 1.0, "name_cover": 0.8,
+    "color_match": 1, "style_match": 1, "grape_match": 0, "vintage_match": 0,
+}
+
+
+def test_label_confirmed_answers_same_label_below_threshold():
+    assert label_confirmed(VETER, RULE)
+    # Без подобранных границ правило выключено.
+    assert not label_confirmed(VETER, None)
+
+
+@pytest.mark.parametrize("change", [
+    {"txt_rank": 1},
+    {"winery_hit": 0},
+    {"disc_hit": 0.2, "name_cover": 0.3},
+    {"style_match": -1},
+    {"grape_match": -1},
+    {"vintage_match": -1},  # прочитанный год есть у другой карточки того же вина
+])
+def test_label_confirmed_needs_all_evidence(change):
+    assert not label_confirmed({**VETER, **change}, RULE)

@@ -49,7 +49,7 @@ from .catalog import load_equivalences
 from .decide import Decider, PairFeatures, Scored, derive
 from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
-from .decide.guard import SIBLING_ENABLED, sibling_swap, twin_guard
+from .decide.guard import SIBLING_ENABLED, label_confirmed, sibling_swap, twin_guard
 from .decide.judge import VlmJudge
 from .detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper
 from .embed import Whitening, build_embedder, load_image, pick_device
@@ -57,7 +57,16 @@ from .embed.siglip import DEFAULT_SIGLIP_MODEL as DEFAULT_MODEL
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex
 from .rerank import DescriptorStore, XFeatMatcher
-from .vintage import Answer, VintageReader, compare, project, resolve
+from .vintage import (
+    Answer,
+    VintageReader,
+    catalog_years,
+    compare,
+    pick_vintage,
+    project,
+    resolve,
+    vintage_groups,
+)
 
 INDEX_DIR = Path("models/index")
 DECIDER_DIR = Path("models/decider")
@@ -319,6 +328,17 @@ class WineScanner:
         self.index = index if index is not None else VectorIndex.load(index_dir)
         self.decider = decider if decider is not None else Decider.load(decider_dir)
         self.threshold = self.decider.threshold if threshold is None else threshold
+        # WINE_OCR_FULLRES=1 — OCR читает вырезку этикетки в разрешении кадра (≤ 640 px), а не
+        # квадрат 512 px эмбеддера. Замер 27.09.2026 на train (eval/ocr_resolution_benchmark.py,
+        # eval/decider_feature_ablation.py): близнецов лучше не различает, решающий слой на таких
+        # признаках хуже (170.7 против 173 из 196 живых), без ужатия p95 13.6 с. Выключено.
+        self.ocr_fullres = os.environ.get("WINE_OCR_FULLRES", "0") == "1"
+        # WINE_LABEL_RULE=0 выключает ответ по подтверждённой этикетке ниже порога.
+        self.label_rule = (
+            self.decider.meta.get("label_rule")
+            if os.environ.get("WINE_LABEL_RULE", "1") == "1"
+            else None
+        )
 
         config_path = Path(index_dir) / "config.json"
         self.config = (
@@ -411,6 +431,17 @@ class WineScanner:
         self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
         # Дубли каталога по решению человека: дубль с каноническим slug отдаётся каноническим.
         self.equivalences = load_equivalences()
+        # Карточки одного вина, отличающиеся только годом (vintage/read.py). Год с этикетки
+        # выбирает между ними, но не отнимает ответ, если такого года в каталоге нет.
+        self.vintage_groups = vintage_groups(self.payload_by_id)
+        self.group_years = {
+            slug: frozenset(
+                year
+                for member in group - {slug}
+                for year in catalog_years(self.payload_by_id[member])
+            )
+            for slug, group in self.vintage_groups.items()
+        }
         # Где на карточке напечатан год. Считается при сборке индекса тем же распознавателем,
         # что и всё остальное, — на запросе это лишний вызов OCR по каждому кандидату.
         # Индекс, собранный до Э8, поля не содержит: тогда год читается только из общего
@@ -458,12 +489,27 @@ class WineScanner:
         # снимка это бессмысленно, поэтому в сервисе он выключен.
         return CachedCropper(detector, crop_cache) if crop_cache else detector
 
-    def _crop(self, image: Image.Image, key: str | None) -> Image.Image:
-        if isinstance(self.cropper, CachedCropper) and key:
-            return self.cropper(Path(key), image)
+    def _crop(self, image: Image.Image, key: str | None) -> tuple[Image.Image, Image.Image]:
+        """(вырезка 512 px для эмбеддера и сопоставления, вырезка для OCR).
+
+        По умолчанию OCR читает тот же квадрат 512 px. С WINE_OCR_FULLRES=1 — ту же этикетку
+        в разрешении кадра (см. `ocr_fullres`); координаты строк OCR — доли кадра, поэтому от
+        масштаба вырезки они не зависят.
+        """
         if self.cropper is None:
-            return image
-        return self.cropper.crop(image)
+            return image, image
+        if isinstance(self.cropper, CachedCropper) and key:
+            prepared = self.cropper(Path(key), image)
+            inner = self.cropper.detector
+            if self.ocr_fullres and hasattr(inner, "crop_pair"):
+                # В кэше лежит только 512 px; вырезку для OCR пересчитывает тот же детектор.
+                return prepared, inner.detector.crop(image)
+            return prepared, prepared
+        if self.ocr_fullres and hasattr(self.cropper, "crop_pair"):
+            raw, prepared = self.cropper.crop_pair(image)
+            return prepared, raw
+        prepared = self.cropper.crop(image)
+        return prepared, prepared
 
     def _candidate_descriptor(self, item_id: str) -> dict | None:
         """Локальные признаки карточки каталога.
@@ -488,7 +534,7 @@ class WineScanner:
         from .embed.branches import branch_image
 
         return self.matcher.describe(
-            branch_image(self._crop(load_image(path), key), self.local_preprocess), cache_key=key
+            branch_image(self._crop(load_image(path), key)[0], self.local_preprocess), cache_key=key
         )
 
     def _text_branch(self, crop: Image.Image, use_cache: bool) -> dict:
@@ -635,7 +681,7 @@ class WineScanner:
             timings[name] = time.perf_counter() - start
 
         with stage("crop"):
-            crop = self._crop(image, image_key)
+            crop, ocr_crop = self._crop(image, image_key)
         from .embed.branches import branch_image
 
         local_crop = branch_image(crop, self.local_preprocess)
@@ -662,13 +708,13 @@ class WineScanner:
             # значит просто выбрасывать работу.
             head = [h.item_id for h in visual[: max(1, self.candidates // 2)]]
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="text") as pool:
-                future = pool.submit(self._text_branch, crop, use_cache)
+                future = pool.submit(self._text_branch, ocr_crop, use_cache)
                 with stage("rerank"):
                     query_features = self.matcher.describe(local_crop)
                     self._match(query_features, head, matches)
                 text_result = future.result()
         else:
-            text_result = self._text_branch(crop, use_cache)
+            text_result = self._text_branch(ocr_crop, use_cache)
             with stage("rerank"):
                 query_features = self.matcher.describe(local_crop)
 
@@ -727,7 +773,11 @@ class WineScanner:
                     ocr_lines=len(lines),
                     ocr_conf=text_result["confidence"],
                     vintage_known=int(bool(reading)),
-                    vintage_match=compare(reading.year, self.payload_by_id.get(item_id, {})),
+                    vintage_match=compare(
+                        reading.year,
+                        self.payload_by_id.get(item_id, {}),
+                        self.group_years.get(item_id, frozenset()),
+                    ),
                     in_window=int(item_id in window_set),
                     disc_hit=signal["disc_hit"],
                     disc_n=signal["disc_n"],
@@ -784,6 +834,11 @@ class WineScanner:
         ]
         best = candidates[0] if candidates else None
         answered = bool(best and best.probability >= self.threshold)
+        # Ниже порога, но этикетка сама подтверждает карточку (другой год той же этикетки и
+        # т. п.) — отвечаем. Границы правила подобраны на train вместе с порогом.
+        if best is not None and not answered and label_confirmed(best.features, self.label_rule):
+            answered = True
+            guard = "+".join(filter(None, [guard, "label"]))
 
         judge_report = None
         if use_judge and self.judge is not None and candidates:
@@ -799,6 +854,28 @@ class WineScanner:
                     elapsed=time.perf_counter() - wall_started,
                 )
                 best = candidates[0]
+
+        # То же вино другого года: если год с этикетки есть у соседа по группе года —
+        # отдаём его карточку с уверенностью выбранной, иначе остаётся выбранная.
+        if best is not None and best.item_id in self.vintage_groups:
+            target = pick_vintage(
+                reading.year, best.item_id, self.vintage_groups, self.payload_by_id
+            )
+            if target != best.item_id:
+                moved = next((c for c in candidates if c.item_id == target), None)
+                if moved is None:
+                    moved = Candidate(
+                        item_id=target,
+                        probability=best.probability,
+                        payload=self.payload_by_id.get(target, {}),
+                        features={},
+                    )
+                else:
+                    candidates.remove(moved)
+                    moved.probability = max(moved.probability, best.probability)
+                candidates.insert(0, moved)
+                best = moved
+                guard = "+".join(filter(None, [guard, "vintage"]))
 
         if best is not None and best.item_id in self.equivalences.canonical:
             candidates = canonicalize(candidates, self.equivalences.canonical, self.payload_by_id)

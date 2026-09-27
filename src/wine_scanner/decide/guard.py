@@ -147,3 +147,30 @@ def sibling_swap(scored: list, family_of: dict, grape: bool | None = None) -> in
         if best_evidence is None or evidence > best_evidence:
             best_index, best_evidence = index, evidence
     return best_index
+
+
+def label_confirmed(features: dict, rule: dict | None) -> bool:
+    """Этикетка подтверждает карточку сама — отвечаем, даже если вероятность ниже порога.
+
+    Правило продукта (27.09.2026): вино той же этикетки другого года или без года в каталоге —
+    то же вино, и ответ по нему не должен теряться из-за порога. Решающий слой на таких кадрах
+    бывает неуверен (картинка карточки старого года, год мешает сравнению), а текст однозначен:
+    текстовая ветка ставит карточку первой, винодельня прочитана, различающие слова или
+    название совпадают, и ни цвет, ни сладость, ни сорт, ни год карточке не противоречат.
+
+    Границы (`rule`) подбираются на train и лежат в meta решающего слоя (`label_rule`); без них
+    правило выключено.
+    """
+    if not rule:
+        return False
+    if any(features.get(name, 0) == -1 for name in ("color_match", "style_match",
+                                                     "grape_match", "vintage_match")):
+        return False
+    return (
+        features.get("txt_rank", 999) <= rule.get("max_txt_rank", 0)
+        and features.get("winery_hit", 0) == 1
+        and (
+            features.get("disc_hit", 0.0) >= rule["min_disc_hit"]
+            or features.get("name_cover", 0.0) >= rule["min_name_cover"]
+        )
+    )
