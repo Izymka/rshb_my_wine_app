@@ -123,3 +123,18 @@ def test_index_without_payloads_degrades_gracefully():
         "style_match": 0,
         "grape_match": 0,
     }
+
+
+def test_split_word_is_joined_by_catalog_vocabulary():
+    index = TextIndex.from_payloads(
+        ["veter", "shyopot"],
+        [
+            {"name": "Ветер в травах", "winery": "Скалистый берег", "category": "Красное"},
+            {"name": "Шёпот цветов", "winery": "Скалистый берег", "category": "Белое"},
+        ],
+    )
+    tokens_ = index.query_tokens("СКАЛИСТЫЙ БЕРЕГ BETEP TPA BAX 2022")
+    assert "travah" in tokens_
+    # Слова, которые и так есть в словаре, не склеиваются в несуществующие.
+    assert "skalistibereg" not in tokens_
+    assert index.search("BETEP TPA BAX", top_k=1)[0].item_id == "veter"

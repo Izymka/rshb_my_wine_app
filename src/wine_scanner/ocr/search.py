@@ -170,6 +170,13 @@ class TextIndex:
         self.members: dict[str, list[str]] = {}
         if payloads is not None:
             self._build_cards(payloads, disc_max_share)
+        # Слова названий и виноделен — словарь для склейки разорванных OCR слов
+        # («тра вах» → «травах»). Описания сюда не идут: склеивать ради них незачем.
+        self.vocab = (
+            frozenset(t for card in self.cards.values() for t in card.name | card.winery)
+            if self.cards
+            else frozenset(t for doc in self.folded for t in doc.split())
+        )
 
     @classmethod
     def from_payloads(
@@ -234,13 +241,43 @@ class TextIndex:
 
     # --- запрос ---------------------------------------------------------------------------
 
-    @staticmethod
-    def query_tokens(query_text: str) -> list[str]:
-        """Свёрнутые слова этикетки по обоим вариантам чтения (прямой и через гомоглифы)."""
+    def _joined(self, words: list[str]) -> list[str]:
+        """Слова каталога, которые OCR разорвал пробелом: «тра вах» → «травах».
+
+        Склеиваются два или три соседних куска, если склейка — слово из названий или
+        виноделен каталога, а сами куски таковыми не являются (иначе «шато пино» дал бы
+        несуществующее «шатопино» только потому, что оно случайно совпало).
+        """
+        found: list[str] = []
+        for size in (2, 3):
+            for start in range(len(words) - size + 1):
+                parts = words[start : start + size]
+                joined = "".join(parts)
+                if (
+                    len(joined) >= 4
+                    and joined.isalpha()  # «202» + «5» не должно стать годом «2025»
+                    and joined in self.vocab
+                    and not all(part in self.vocab for part in parts)
+                ):
+                    found.append(joined)
+        return found
+
+    def query_variants(self, query_text: str) -> list[str]:
+        """Свёрнутые варианты текста этикетки: прямой, через гомоглифы и со склейками."""
+        seen: list[str] = []
+        for variant in folded_variants(query_text):
+            for candidate in (variant, " ".join([variant, *self._joined(variant.split())])):
+                if candidate not in seen:
+                    seen.append(candidate)
+        return seen
+
+    def query_tokens(self, query_text: str) -> list[str]:
+        """Свёрнутые слова этикетки по всем вариантам чтения (см. `query_variants`)."""
         seen: list[str] = []
         for variant in variants(query_text):
-            for token in fold_tokens(variant):
-                if token not in seen:
+            words = fold_tokens(variant)
+            for token in [*words, *self._joined(fold(variant).split())]:
+                if len(token) > 1 and token not in seen:
                     seen.append(token)
         return seen
 
@@ -259,7 +296,7 @@ class TextIndex:
             scores = np.asarray(self.bm25.get_scores(tokens(query_text)), dtype=np.float32)
             top = float(scores.max()) if len(scores) else 0.0
             return scores / top if top > 0 else scores
-        query = self.vectorizer.transform(folded_variants(query_text))
+        query = self.vectorizer.transform(self.query_variants(query_text))
         sims = (self.matrix @ query.T).toarray()
         return sims.max(axis=1).astype(np.float32)
 

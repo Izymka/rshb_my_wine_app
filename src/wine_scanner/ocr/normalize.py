@@ -63,13 +63,41 @@ def fold_homoglyphs(text: str) -> str:
     return "".join(LATIN_TO_CYRILLIC_HOMOGLYPHS.get(ch, ch) for ch in lowered)
 
 
+# Цифры, которые OCR ставит вместо похожих букв посреди слова: «6ЕРЕГ» вместо «БЕРЕГ»,
+# «В0ДА». Внутри кириллического слова — кириллица, иначе латиница.
+DIGIT_TO_CYRILLIC = {"0": "о", "3": "з", "6": "б", "8": "в"}
+DIGIT_TO_LATIN = {"0": "o", "6": "b", "8": "b"}
+_WORD = re.compile(r"\w+", flags=re.UNICODE)
+_CYRILLIC = re.compile(r"[а-яё]", flags=re.IGNORECASE)
+
+
+def repair_digits(text: str) -> str:
+    """Заменить цифры-двойники буквами внутри слов, где букв больше, чем цифр.
+
+    Слово должно содержать хотя бы две буквы и не больше двух цифр: так «2022г», «750ml»,
+    «12%» и год остаются как есть, а «6EРEГ» становится «БEРEГ».
+    """
+
+    def fix(match: re.Match) -> str:
+        word = match.group(0)
+        digits = sum(ch.isdigit() for ch in word)
+        letters = sum(ch.isalpha() for ch in word)
+        if not digits or digits > 2 or letters < 2:
+            return word
+        table = DIGIT_TO_CYRILLIC if _CYRILLIC.search(word) else DIGIT_TO_LATIN
+        return "".join(table.get(ch, ch) for ch in word)
+
+    return _WORD.sub(fix, text)
+
+
 def variants(text: str) -> list[str]:
     """Нормализованные варианты строки, по которым имеет смысл искать.
 
     Второй вариант нужен на случай, когда OCR прочитал кириллицу как латиницу. Сравниваем
     по обоим и берём лучшее совпадение: лишний вариант ничего не портит, а пропущенный
-    стоит промаха.
+    стоит промаха. Цифры-двойники внутри слов (`repair_digits`) чинятся в обоих вариантах.
     """
+    text = repair_digits(text)
     direct = normalize(text)
     folded = normalize(fold_homoglyphs(text))
     return [direct] if folded == direct else [direct, folded]

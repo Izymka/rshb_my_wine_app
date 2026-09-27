@@ -83,3 +83,25 @@ def test_fold_keeps_different_wineries_apart():
 
 def test_fold_tokens_drop_single_letters():
     assert fold_tokens("A Chateau 12 % vol") == ["shato", "12", "vol"]
+
+
+from wine_scanner.ocr.normalize import repair_digits  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("raw", "fixed"),
+    [
+        ("6EРEГ", "бEРEГ"),  # кириллическое слово: 6 → б
+        ("B0DKA", "BoDKA"),  # латинское: 0 → o
+        ("2022", "2022"),  # год не трогаем
+        ("2022г", "2022г"),  # цифр больше двух — это число с единицей
+        ("750ml", "750ml"),
+        ("12%", "12%"),
+    ],
+)
+def test_repair_digits_only_inside_words(raw, fixed):
+    assert repair_digits(raw) == fixed
+
+
+def test_variants_read_bereg_with_digit():
+    assert any("bereg" in v for v in variants("СКАЛИСТЫЙ 6EРEГ"))
