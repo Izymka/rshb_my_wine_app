@@ -40,7 +40,7 @@ button { font: inherit; }
 .card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
 .cream { background: var(--bg-cream); border-color: transparent; }
 .tag { display: inline-block; padding: 6px 12px; border-radius: 999px; background: var(--sand); color: var(--text); font-size: 13px; font-weight: 600; margin: 0 6px 6px 0; }
-.tags { margin-top: 14px; }
+.tags { margin-top: 10px; }
 .tag.accent { background: var(--accent); color: #fff; }
 .muted { color: var(--text-2); }
 .small { font-size: 13px; }
