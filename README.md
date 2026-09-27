@@ -49,7 +49,14 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 
 ```bash
 cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
-  --endpoint http://127.0.0.1:8080/v1/eval/predict --output /tmp/predictions.jsonl
+  --endpoint http://127.0.0.1:8080/v1/eval/predict --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
+```
+
+также решение можно протестировать на уже развернутом сервере разработчика 
+(нужно принимать во внимание сетевые издержки на работу с удаленным сервером):
+```bash
+cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
+  --endpoint http://212.46.3.67:58080/v1/eval/predict --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
 ```
 
 Ручка отвечает `{"slug": ...}` либо `{"slug": null, "similar": [...]}` на незнакомое вино.
