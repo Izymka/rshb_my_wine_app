@@ -2,7 +2,7 @@
 // Экран 1 (камера) и экран 2 (ожидание) из DESIGN.md. Камера — системная: <input capture>
 // открывает её на телефоне без разрешений и без своего видоискателя, а на компьютере
 // превращается в выбор файла. После ответа — переход на карточку или отказ.
-const { preview, error, busy, elapsedMs, scan, cancel, reset } = useScan();
+const { preview, error, busy, elapsedMs, scan, retry, canRetry, cancel, reset } = useScan();
 const router = useRouter();
 const { online } = useConnectivity();
 const cameraInput = ref<HTMLInputElement>();
@@ -10,20 +10,29 @@ const galleryInput = ref<HTMLInputElement>();
 const slow = ref(false);
 let slowTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Сбой сервиса или сети — тот же кадр можно отправить ещё раз; нечитаемый файл — нет.
+const retryable = computed(
+  () => error.value !== null && error.value !== "unreadable" && canRetry(),
+);
+
+async function run(send: () => Promise<boolean>) {
+  slow.value = false;
+  slowTimer = setTimeout(() => (slow.value = true), 3000);
+  const ok = await send();
+  if (slowTimer) clearTimeout(slowTimer);
+  if (ok) router.push("/result");
+}
+
 async function onFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-  slow.value = false;
-  slowTimer = setTimeout(() => (slow.value = true), 3000);
-  const ok = await scan(file);
-  if (slowTimer) clearTimeout(slowTimer);
-  if (ok) router.push("/result");
+  await run(() => scan(file));
 }
 
-function retry() {
-  reset();
+function onRetry() {
+  run(retry);
 }
 
 onMounted(reset);
@@ -60,6 +69,9 @@ onMounted(reset);
       <template v-else-if="error === 'network'">Нет связи с сервисом. Проверьте сеть и повторите.</template>
       <template v-else-if="error === 'starting'">Сервис ещё запускается — подождите полминуты.</template>
       <template v-else>Сервис временно недоступен. Попробуйте чуть позже.</template>
+      <button v-if="retryable" class="btn btn-secondary error-retry" :disabled="!online" @click="onRetry">
+        Повторить запрос
+      </button>
     </div>
 
     <template v-if="!busy">
@@ -73,7 +85,7 @@ onMounted(reset);
     <button v-else class="btn btn-ghost" @click="cancel">Отменить</button>
 
     <p v-if="error" class="small muted" style="text-align: center; margin: 0">
-      <a href="#" @click.prevent="retry">Скрыть сообщение</a>
+      <a href="#" @click.prevent="reset">Скрыть сообщение</a>
     </p>
 
     <div class="card cream small">

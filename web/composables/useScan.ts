@@ -48,6 +48,10 @@ export interface ScanResponse {
 
 export type ScanError = "unreadable" | "network" | "unavailable" | "starting" | null;
 
+// Последний отправленный кадр — для кнопки «Повторить» после сбоя сервиса или сети.
+// Держим вне useState: File не сериализуется, а сканирование идёт только в браузере.
+let lastFile: File | null = null;
+
 export function useScan() {
   const preview = useState<string | null>("scan.preview", () => null);
   const result = useState<ScanResponse | null>("scan.result", () => null);
@@ -58,6 +62,7 @@ export function useScan() {
 
   async function scan(file: File): Promise<boolean> {
     reset();
+    lastFile = file;
     if (!navigator.onLine) {
       error.value = "network";
       return false;
@@ -84,6 +89,7 @@ export function useScan() {
         return false;
       }
       result.value = (await response.json()) as ScanResponse;
+      lastFile = null;
       return true;
     } catch (e) {
       if ((e as Error).name === "AbortError") return false;
@@ -100,13 +106,22 @@ export function useScan() {
     busy.value = false;
   }
 
+  // Повторная отправка того же кадра; false, если повторять нечего.
+  function retry(): Promise<boolean> {
+    return lastFile ? scan(lastFile) : Promise.resolve(false);
+  }
+
+  function canRetry(): boolean {
+    return lastFile !== null;
+  }
+
   function reset() {
     result.value = null;
     error.value = null;
     elapsedMs.value = 0;
   }
 
-  return { preview, result, error, busy, elapsedMs, scan, cancel, reset };
+  return { preview, result, error, busy, elapsedMs, scan, retry, canRetry, cancel, reset };
 }
 
 export function imageUrl(slug: string | undefined | null): string | undefined {

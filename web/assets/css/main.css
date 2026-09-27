@@ -86,6 +86,7 @@ button { font: inherit; }
 .chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
 
 .error { background: #fff4f2; border: 1px solid #f0d3cf; color: var(--accent-dark); border-radius: var(--radius-s); padding: 12px 14px; }
+.error .error-retry { margin-top: 10px; width: 100%; }
 .chat { display: flex; flex-direction: column; gap: 8px; }
 .bubble { padding: 10px 14px; border-radius: 18px; max-width: 92%; font-size: 15px; }
 .bubble.q { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 6px; }
