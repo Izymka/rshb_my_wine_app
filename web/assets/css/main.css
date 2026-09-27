@@ -119,6 +119,19 @@ button:disabled { cursor: default; opacity: 0.6; }
 .shelf-note textarea { resize: vertical; }
 .shelf-item { color: var(--text); padding: 14px; }
 .shelf-excerpt { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.shelf-editor .shelf-review { display: grid; gap: 12px; }
+.shelf-editor .shelf-review legend { margin-bottom: 12px; }
+.shelf-editor legend, .shelf-note label { font-size: 18px; font-weight: 600; }
+.shelf-editor .optional { font-size: 16px; font-weight: 400; color: var(--text-2); }
+.reaction-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.reaction { padding: 16px 12px; min-height: 64px; border-radius: 20px; border: 1.5px solid var(--line); background: #fff; color: var(--text); font-size: 17px; font-weight: 600; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.reaction.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+.shelf-hint { font-size: 14px; color: var(--text-3); }
+.shelf-review .shelf-hint { color: var(--text-2); }
+.link { padding: 0; border: 0; background: none; color: var(--accent); cursor: pointer; }
+.link.more { padding: 8px 6px; font-weight: 600; }
+.shelf-note textarea { min-height: 120px; padding: 14px 16px; border-radius: var(--radius-s); }
+.shelf-note textarea::placeholder { color: var(--text-2); }
 .reminder-box { display: grid; gap: 12px; padding: 14px; background: var(--bg-cream); border-radius: var(--radius-s); }
 .shelf-nav { display: block; text-align: center; padding: 12px; border: 1px solid var(--line); border-radius: 999px; }
 .push-settings { font-size: 13px; display: grid; gap: 8px; }
