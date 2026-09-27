@@ -75,6 +75,42 @@ def test_family_margins_compare_only_siblings():
     assert values["c"]["family_vis_margin"] == 0
 
 
+def test_reading_margins_against_strongest_sibling():
+    def twin(item_id, family, **text):
+        return PairFeatures(item_id, 0.9, 0, 0.5, 0, 0, 10, 8, 0.8, 0.2, 1, 3, 0.9,
+                            family=family, **text)
+
+    rows = [
+        # Этикетка читается как «белое полусладкое Рислинг» — подтверждает «a», а не «b».
+        twin("a", "A", disc_hit=0.8, color_match=1, style_match=1, grape_match=1),
+        twin("b", "A", disc_hit=0.2, color_match=1, style_match=-1, grape_match=-1),
+        twin("c", "B", disc_hit=0.9, color_match=-1),
+    ]
+    values = {row["item_id"]: row for row in derive(rows)}
+    assert values["a"]["attr_agree"] == 3
+    assert values["b"]["attr_agree"] == -1
+    assert values["a"]["family_disc_margin"] == pytest.approx(0.6)
+    assert values["a"]["family_style_margin"] == 2
+    assert values["a"]["family_grape_margin"] == 2
+    assert values["a"]["family_color_margin"] == 0
+    assert values["a"]["family_attr_margin"] == 4
+    assert values["b"]["family_attr_margin"] == -4
+    # Без соседок по винодельне отрыв нулевой, чужая «c» с сильным disc_hit не в счёт.
+    assert values["c"]["family_disc_margin"] == 0
+    assert values["c"]["family_attr_margin"] == 0
+
+
+def test_previous_version_model_still_loads():
+    from wine_scanner.decide.features import FEATURE_VERSION
+
+    names = FEATURE_NAMES[: FEATURE_NAMES.index("grapes_token_set_ratio") + 1]
+    decider = Decider(None, 1.0, 0.0, 0.5, feature_names=names, meta={"feature_version": 4})
+    assert decider.meta["feature_version"] == 4
+    assert FEATURE_VERSION == 5
+    with pytest.raises(ValueError):
+        Decider(None, 1.0, 0.0, 0.5, feature_names=names, meta={"feature_version": 2})
+
+
 def test_ranker_changes_order_but_classifier_keeps_confidence():
     class Confidence:
         def predict_proba(self, values):

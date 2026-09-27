@@ -76,16 +76,30 @@ FEATURE_NAMES = (
     "winery_jaro_winkler",
     "winery_token_set_ratio",
     "grapes_token_set_ratio",
+    # Версия 5 (25.09.2026): «прочитанное» против соседок по винодельне. Близнецов одной
+    # линейки решающий слой путал, потому что картинка перевешивала слова: `color_match`,
+    # `disc_hit` у верной карточки выше, но модель видела их по отдельности, а не как «этикетка
+    # подтверждает эту карточку лучше, чем её соседку». Отрыв считается от сильнейшей соседки
+    # той же винодельни, как family_*_margin версии 4.
+    "grape_match",
+    "attr_agree",
+    "family_disc_margin",
+    "family_color_margin",
+    "family_style_margin",
+    "family_grape_margin",
+    "family_attr_margin",
 )
 
 # Меняется вместе с FEATURE_NAMES. Пишется в meta решающего слоя и проверяется при загрузке:
 # несовпадение версии — сигнал переобучить, а не молча считать по чужим колонкам.
-FEATURE_VERSION = 4
-# В v4 добавлены только производные признаки ``derive``. Сырым записям v3 не нужны новые
-# поля: при обучении и инференсе они вычисляются одним и тем же кодом. Это позволяет честно
-# переобучить ranker на уже сохранённых train-парах, но старая модель всё равно не загрузится:
-# список FEATURE_NAMES в meta.json изменился.
-RAW_FEATURE_VERSIONS = frozenset({3, FEATURE_VERSION})
+FEATURE_VERSION = 5
+# Модели прошлых версий загружаются: их признаки — упорядоченное подмножество FEATURE_NAMES,
+# а новые признаки дописаны в конец (см. Decider).
+SUPPORTED_MODEL_VERSIONS = frozenset({3, 4, FEATURE_VERSION})
+# Сырые записи v3/v4 не содержат `grape_match` (он появился в пайплайне 25.09): from_dict
+# молча подставил бы ноль, и модель выучила бы, что сорт никогда не читается. Поэтому учиться
+# можно только на сырых парах v5 — старые файлы признаков надо пересобрать.
+RAW_FEATURE_VERSIONS = frozenset({FEATURE_VERSION})
 
 
 @dataclass
@@ -136,8 +150,8 @@ class PairFeatures:
     winery_hit: int = 0
     color_match: int = 0
     style_match: int = 0
-    # Сорт этикетки против поля `grapes` карточки (ocr/grapes.py), +1/−1/0. Пока не признак
-    # модели (его нет в FEATURE_NAMES): им пользуются правило семьи и проверка судьи.
+    # Сорт этикетки против поля `grapes` карточки (ocr/grapes.py), +1/−1/0. С версии 5 —
+    # признак модели; им же пользуются правило семьи и проверка судьи.
     grape_match: int = 0
 
     query: str = ""
@@ -180,6 +194,11 @@ class PairFeatures:
     def from_dict(cls, data: dict) -> "PairFeatures":
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def attr_agree(row: PairFeatures) -> int:
+    """Цвет, сладость и сорт этикетки против карточки одним числом: от −3 до +3."""
+    return row.color_match + row.style_match + row.grape_match
 
 
 def derive(rows: list[PairFeatures]) -> list[dict]:
@@ -280,6 +299,19 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
         data["family_name_cover_margin"] = row.name_cover - max(
             (other.name_cover for other in family_others), default=row.name_cover
         )
+        # Сумма трёх осей «прочитанного»: +1 за каждое подтверждение, −1 за противоречие.
+        # Отрывы — от лучшей соседки по той же оси; без соседок ноль, как у прочих family_*.
+        data["attr_agree"] = attr_agree(row)
+        for name, value in (
+            ("disc", lambda r: r.disc_hit),
+            ("color", lambda r: r.color_match),
+            ("style", lambda r: r.style_match),
+            ("grape", lambda r: r.grape_match),
+            ("attr", attr_agree),
+        ):
+            data[f"family_{name}_margin"] = value(row) - max(
+                (value(other) for other in family_others), default=value(row)
+            )
         data["label"] = row.label
         out.append(data)
     return out

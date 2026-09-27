@@ -19,7 +19,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .features import FEATURE_NAMES, FEATURE_VERSION, PairFeatures, derive
+from .features import (
+    FEATURE_NAMES,
+    FEATURE_VERSION,
+    SUPPORTED_MODEL_VERSIONS,
+    PairFeatures,
+    derive,
+)
 
 DEFAULT_DIR = Path("models/decider")
 
@@ -93,7 +99,7 @@ class Decider:
                 "иначе бустер получит колонки не на своих местах и молча начнёт врать."
             )
         version = self.meta.setdefault("feature_version", FEATURE_VERSION)
-        if version not in {3, FEATURE_VERSION}:
+        if version not in SUPPORTED_MODEL_VERSIONS:
             raise ValueError(
                 f"решающий слой обучен на неподдерживаемой версии признаков {version}. "
                 "Переобучить: scripts/build_platform_features.py, "
