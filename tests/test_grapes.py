@@ -97,3 +97,19 @@ def test_consistent_pick_follows_judge_text(index):
     assert consistent_pick(read, shown, shown[1], index) is None
     # Текст ничего не говорит — ничего не меняем.
     assert consistent_pick("QUINTESSENCE", shown, shown[0], index) is None
+
+
+def test_consistent_pick_accepts_colour_and_sweetness_when_choice_refuted():
+    """Линейка без различающих слов: подтверждение — цвет и сладость."""
+    payloads = [
+        {"winery": "Цимлянские вина", "name": "Цимлянское белое полусладкое", "grapes": "",
+         "category": "Белое"},
+        {"winery": "Цимлянские вина", "name": "Игристое красное сладкое Цимлянское", "grapes": "",
+         "category": "Красное"},
+    ]
+    index = TextIndex.from_payloads(["white", "red"], payloads)
+    white, red = SimpleNamespace(item_id="white"), SimpleNamespace(item_id="red")
+    text = "ИГРИСТОЕ ВИНО ЦИМЛЯНСКОЕ Полусладкое Белое"
+    assert consistent_pick(text, [white, red], red, index) is white
+    # Выбор не опровергнут, только цвет у соседки совпал — не трогаем.
+    assert consistent_pick("ЦИМЛЯНСКОЕ", [white, red], red, index) is None

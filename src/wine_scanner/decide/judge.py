@@ -207,7 +207,10 @@ def consistent_pick(read_text: str, shown: list, chosen, text_index):
     сравнивается с карточками теми же сигналами, что и текст OCR в пайплайне (TextIndex.signals).
     Выбор меняется, только когда текст *против* него — цвет, сорт или сладость противоречат, или
     у карточки есть различающие слова, но ни одного нет в тексте, — и *за* другую показанную
-    карточку: она ничему не противоречит и подтверждена сортом или своим словом.
+    карточку: она ничему не противоречит и подтверждена сортом или своим словом. Если выбор
+    текстом опровергнут, подтверждением служит и совпавший цвет или сладость: у линейки
+    «Цимлянское» различающих слов нет вовсе, и «Полусладкое Белое» против выбранного
+    «красное сладкое» — единственное, что есть.
     """
     if not read_text:
         return None
@@ -218,17 +221,22 @@ def consistent_pick(read_text: str, shown: list, chosen, text_index):
     def contradicts(s: dict) -> bool:
         return s["color_match"] == -1 or s["style_match"] == -1 or s.get("grape_match", 0) == -1
 
-    def supported(s: dict) -> bool:
-        return s.get("grape_match", 0) == 1 or s["disc_hit"] > 0
+    def supported(s: dict, refuted: bool) -> bool:
+        if s.get("grape_match", 0) == 1 or s["disc_hit"] > 0:
+            return True
+        return refuted and (s["color_match"] == 1 or s["style_match"] == 1)
 
     own = signals[chosen.item_id]
+    refuted = contradicts(own)
     unsupported = own["disc_n"] > 0 and own["disc_hit"] == 0 and own.get("grape_match", 0) != 1
-    if not (contradicts(own) or unsupported):
+    if not (refuted or unsupported):
         return None
     alternatives = [
         c
         for c in shown
-        if c is not chosen and not contradicts(signals[c.item_id]) and supported(signals[c.item_id])
+        if c is not chosen
+        and not contradicts(signals[c.item_id])
+        and supported(signals[c.item_id], refuted)
     ]
     if not alternatives:
         return None
