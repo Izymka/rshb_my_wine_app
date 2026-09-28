@@ -100,6 +100,21 @@ def test_reading_margins_against_strongest_sibling():
     assert values["c"]["family_attr_margin"] == 0
 
 
+def test_ranks_are_recomputed_among_remaining_candidates():
+    # Верный кандидат «a» выброшен (аугментация незнакомого или исключённая карточка):
+    # лучший из оставшихся по картинке должен стать нулевым, а не сохранить дыру.
+    rows = [pair("b", 0.8, 1, 0.5, 2), pair("c", 0.6, 3, 0.9, 0), pair("d", 0.5, 999, 0.1, 999)]
+    values = {row["item_id"]: row for row in derive(rows)}
+    assert [values[i]["vis_rank"] for i in "bcd"] == [0, 1, 999]
+    assert [values[i]["txt_rank"] for i in "bcd"] == [1, 0, 999]
+    assert [values[i]["rrf_rank"] for i in "bcd"] == [0, 1, 2]
+    assert values["b"]["rrf_margin"] == 1
+    assert values["c"]["txt_in_top5"] == 1
+    # Без дыр производные совпадают с сырыми рангами.
+    full = derive([pair("a", 0.9, 0, 0.9, 0), *rows])
+    assert [row["vis_rank"] for row in full] == [0, 1, 2, 999]
+
+
 def test_previous_version_model_still_loads():
     from wine_scanner.decide.features import FEATURE_VERSION
 

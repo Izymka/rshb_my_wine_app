@@ -498,3 +498,16 @@ def test_family_key_travels_with_features():
     assert rows["taman"]["family"] == "Кубань-Вино"
     # disc_contra у красного — лучший disc_hit среди других Массандр; без OCR он нулевой.
     assert rows["krasnyy"]["disc_contra"] == 0.0
+
+
+def test_excluded_card_leaves_the_visual_index():
+    # Исключённая карточка не должна занимать место в визуальной выдаче: иначе верное вино,
+    # похожее на её фото, получает vis_rank = 1 и штраф решающего слоя.
+    vectors = np.eye(3, dtype=np.float32)
+    index = VectorIndex(3)
+    index.add(vectors, ["bad", "good", "other"], [{"n": 0}, {"n": 1}, {"n": 2}])
+    kept = WineScanner._without(index, frozenset({"bad"}))
+    assert kept.item_ids == ["good", "other"]
+    assert kept.payloads == [{"n": 1}, {"n": 2}]
+    assert [hit.item_id for hit in kept.search(vectors[0] + vectors[1], top_k=1)] == ["good"]
+    assert WineScanner._without(index, frozenset({"missing"})) is index

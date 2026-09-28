@@ -104,7 +104,17 @@ def training_rows(
     return rows, labels, weights
 
 
-def make_confidence_model() -> CatBoostClassifier:
+def make_confidence_model(params: dict | None = None) -> CatBoostClassifier:
+    if params:
+        # Параметры готового решающего слоя (--params-from): их подбирал ноутбук 06.
+        return CatBoostClassifier(
+            **params,
+            loss_function="Logloss",
+            random_seed=2026,
+            thread_count=4,
+            allow_writing_files=False,
+            verbose=False,
+        )
     return CatBoostClassifier(
         iterations=400,
         learning_rate=0.05,
@@ -379,7 +389,20 @@ def main() -> None:
         action="store_false",
         help="учить только на запросах, где верный ответ есть в каталоге (как было до Э8)",
     )
+    parser.add_argument(
+        "--params-from",
+        type=Path,
+        default=None,
+        help="взять набор признаков и параметры CatBoost из meta.json готового решающего слоя "
+        "(их подбирает ноутбук 06); ranker не обучается, порядок — по classifier, как у него",
+    )
     args = parser.parse_args()
+
+    names, params = FEATURE_NAMES, None
+    if args.params_from is not None:
+        source = json.loads((args.params_from / "meta.json").read_text(encoding="utf-8"))
+        names, params = tuple(source["feature_names"]), dict(source["params"])
+    columns = [FEATURE_NAMES.index(name) for name in names]
 
     if args.family_map is not None:
         import pandas as pd
@@ -417,16 +440,24 @@ def main() -> None:
         confidence_rows, labels, weights = training_rows(
             train_groups, args.augment_unknown, args.live_weight
         )
-        confidence = make_confidence_model().fit(
-            np.asarray(confidence_rows), np.asarray(labels), sample_weight=np.asarray(weights)
+        confidence = make_confidence_model(params).fit(
+            np.asarray(confidence_rows)[:, columns],
+            np.asarray(labels),
+            sample_weight=np.asarray(weights),
         )
-        rank_pool, _ = ranking_pool(train_groups, args.live_weight)
-        ranker = make_ranker().fit(rank_pool)
+        ranker = None
+        if params is None:
+            rank_pool, _ = ranking_pool(train_groups, args.live_weight)
+            ranker = make_ranker().fit(rank_pool)
 
         def select(candidates: list[PairFeatures], ranker=ranker, confidence=confidence) -> tuple:
-            values = np.asarray(matrix(derive(candidates)))
-            ranking = np.asarray(ranker.predict(values), dtype=float).ravel()
+            values = np.asarray(matrix(derive(candidates)))[:, columns]
             confidence_raw = np.asarray(confidence.predict_proba(values)[:, 1], dtype=float)
+            ranking = (
+                np.asarray(ranker.predict(values), dtype=float).ravel()
+                if ranker is not None
+                else confidence_raw
+            )
             best = int(np.argmax(ranking))
             return best, confidence_raw[best], ranking[best]
 
@@ -561,22 +592,41 @@ def main() -> None:
                 f"{precision_at_prior(current, share):.3f}"
             )
 
-    final_confidence = make_confidence_model()
+    final_confidence = make_confidence_model(params)
     rows, labels, weights = training_rows(
         [by_query[q] for q in queries], args.augment_unknown, args.live_weight
     )
-    final_confidence.fit(np.asarray(rows), np.asarray(labels), sample_weight=np.asarray(weights))
-    final_rank_pool, ranker_stats = ranking_pool(
-        [by_query[q] for q in queries], args.live_weight
+    final_confidence.fit(
+        np.asarray(rows)[:, columns], np.asarray(labels), sample_weight=np.asarray(weights)
     )
-    final_ranker = make_ranker().fit(final_rank_pool)
+    final_ranker, ranking_meta = None, None
+    if params is None:
+        final_rank_pool, ranker_stats = ranking_pool(
+            [by_query[q] for q in queries], args.live_weight
+        )
+        final_ranker = make_ranker().fit(final_rank_pool)
+        ranking_meta = {
+            "objective": "PairLogitPairwise",
+            "hard_negatives": "same_family_or_top5_visual_text_rrf",
+            **ranker_stats,
+            "feature_importance": dict(
+                zip(
+                    names,
+                    map(
+                        float,
+                        final_ranker.get_feature_importance(type="PredictionValuesChange"),
+                    ),
+                    strict=True,
+                )
+            ),
+        }
 
     decider = Decider(
         booster=final_confidence,
         calib_weight=weight,
         calib_bias=bias,
         threshold=picked["threshold"],
-        feature_names=FEATURE_NAMES,
+        feature_names=names,
         ranker=final_ranker,
         meta={
             "trained_on": str(args.features),
@@ -597,24 +647,13 @@ def main() -> None:
             "coverage": picked["coverage"],
             "precision": picked["precision"],
             "false_answer_rate": picked["false_answer_rate"],
-            "ranking": {
-                "objective": "PairLogitPairwise",
-                "hard_negatives": "same_family_or_top5_visual_text_rrf",
-                **ranker_stats,
-            },
-            "ranker_feature_importance": dict(
-                zip(
-                    FEATURE_NAMES,
-                    map(
-                        float,
-                        final_ranker.get_feature_importance(type="PredictionValuesChange"),
-                    ),
-                    strict=True,
-                )
-            ),
+            "ranking": ranking_meta,
+            "params_from": str(args.params_from) if args.params_from else None,
+            "params": params,
+            "feature_set": source.get("feature_set") if params else None,
             "confidence_feature_importance": dict(
                 zip(
-                    FEATURE_NAMES,
+                    names,
                     map(float, final_confidence.get_feature_importance()),
                     strict=True,
                 )

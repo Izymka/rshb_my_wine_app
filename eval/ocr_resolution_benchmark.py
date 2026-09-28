@@ -33,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sides", default="legacy,640,1280,0")
     parser.add_argument("--index", type=Path, default=Path("models/index_platform_sq_v3"))
-    parser.add_argument("--decider", type=Path, default=Path("models/decider_platform_sq_v3_slug"))
+    parser.add_argument("--decider", type=Path, default=Path("models/decider_platform_sq_v3_v7"))
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--tag", default="")
     args = parser.parse_args()

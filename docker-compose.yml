@@ -46,7 +46,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://wine_scanner:${POSTGRES_PASSWORD:-wine_scanner}@postgres:5432/wine_scanner
       WINE_INDEX: /app/models/index_platform_sq_v3
-      WINE_DECIDER: /app/models/decider_platform_sq_v3_slug
+      WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
       # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.
       WINE_OCR: ${WINE_OCR:-paddle}
       YANDEX_OCR_API_KEY: ${YANDEX_OCR_API_KEY:-}

@@ -45,7 +45,7 @@ from PIL import Image
 
 from .analogues import Analogues
 from .burst import fuse_rrf, ranked, sharpness
-from .catalog import load_equivalences
+from .catalog import EXCLUDED, load_equivalences
 from .decide import Decider, PairFeatures, Scored, derive
 from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
@@ -363,6 +363,12 @@ class WineScanner:
         self.whitening = Whitening.load(whitening_path) if whitening_path.exists() else None
         if self.whitening is not None:
             self.index = self._whitened(self.index, self.whitening)
+        # Дубли каталога по решению человека: дубль с каноническим slug отдаётся каноническим.
+        # Карточки с ошибкой контента убираются из индекса целиком — а с ним из текстового
+        # индекса и аналогов, которые строятся по его списку.
+        self.equivalences = load_equivalences()
+        if self.equivalences.excluded and isinstance(self.index, VectorIndex):
+            self.index = self._without(self.index, self.equivalences.excluded)
 
         # Версия артефактов уходит в каждый ответ. Индекс и решающий слой пересобираются, и без
         # этого поля ответы, полученные на разных версиях, в логах клиента неразличимы: жалоба
@@ -370,7 +376,13 @@ class WineScanner:
         index_dir, decider_dir = Path(index_dir), Path(decider_dir)
         self.version = {
             "index": digest(
-                [index_dir / "vectors.faiss", index_dir / "meta.json", config_path, whitening_path]
+                [
+                    index_dir / "vectors.faiss",
+                    index_dir / "meta.json",
+                    config_path,
+                    whitening_path,
+                    EXCLUDED,
+                ]
             ),
             "decider": digest(
                 [decider_dir / "model.cbm", decider_dir / "ranker.cbm", decider_dir / "meta.json"]
@@ -432,8 +444,6 @@ class WineScanner:
             for item_id, payload in zip(self.index.item_ids, self.index.payloads, strict=True)
         }
         self.payload_by_id = dict(zip(self.index.item_ids, self.index.payloads, strict=True))
-        # Дубли каталога по решению человека: дубль с каноническим slug отдаётся каноническим.
-        self.equivalences = load_equivalences()
         # Карточки одного вина, отличающиеся только годом (vintage/read.py). Год с этикетки
         # выбирает между ними, но не отнимает ответ, если такого года в каталоге нет.
         self.vintage_groups = vintage_groups(self.payload_by_id)
@@ -461,6 +471,25 @@ class WineScanner:
         raw = index.index.reconstruct_n(0, index.index.ntotal)
         result = VectorIndex(whitening.dim)
         result.add(whitening.apply(raw), item_ids=index.item_ids, payloads=index.payloads)
+        return result
+
+    @staticmethod
+    def _without(index: VectorIndex, excluded: frozenset[str]) -> VectorIndex:
+        """Тот же индекс без карточек, которые сервис не отдаёт (ошибка контента).
+
+        Мало не отдавать их в ответе: оставшись в индексе, такая карточка занимает место в
+        визуальной выдаче, и верное вино получает vis_rank = 1 вместо 0.
+        """
+        keep = [i for i, item_id in enumerate(index.item_ids) if item_id not in excluded]
+        if len(keep) == len(index.item_ids):
+            return index
+        raw = index.index.reconstruct_n(0, index.index.ntotal)
+        result = VectorIndex(index.dim)
+        result.add(
+            raw[keep],
+            item_ids=[index.item_ids[i] for i in keep],
+            payloads=[index.payloads[i] for i in keep],
+        )
         return result
 
     def devices(self) -> dict[str, str]:

@@ -222,9 +222,30 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
         if r.family:
             by_family.setdefault(r.family, []).append(r)
 
+    # Ранги веток — среди тех, кто в списке остался, а не позиции в исходной выдаче. Иначе
+    # выброшенный кандидат оставляет дыру: без верного ответа (аугментация незнакомого на
+    # обучении) или без исключённой карточки на инференсе лучший по картинке получает
+    # vis_rank = 1 при vis_gap = 0. На обучении это сочетание встречалось только в копиях без
+    # верного ответа, и модель выучила его как «ответа нет»: «Ветер в травах», чей визуальный
+    # top-1 — исключённая карточка -109, получал 0.30 вместо 0.90.
+    ranks = {
+        name: {
+            id(r): i
+            for i, r in enumerate(
+                sorted((r for r in rows if getattr(r, name) < 999), key=lambda r: getattr(r, name))
+            )
+        }
+        for name in ("vis_rank", "txt_rank")
+    }
+    # Позиция после слияния есть у каждого кандидата; 999 здесь не бывает.
+    rrf_rank = {id(r): i for i, r in enumerate(sorted(rows, key=lambda r: r.rrf_rank))}
+
     out = []
     for row in rows:
         data = row.to_dict()
+        for name in ("vis_rank", "txt_rank"):
+            data[name] = ranks[name].get(id(row), 999)
+        data["rrf_rank"] = rrf_rank[id(row)]
         data["vis_available"] = int(row.vis_rank < 999)
         # IndexFlatIP operates on L2-normalized vectors: score is cosine similarity.
         # No vector coordinate is included in the feature matrix.
@@ -238,7 +259,7 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
             data[f"txt_top{rank + 1}_score"] = (
                 text_top[rank].txt_score if rank < len(text_top) else -1.0
             )
-        data["txt_in_top5"] = int(row.txt_rank < 5)
+        data["txt_in_top5"] = int(data["txt_rank"] < 5)
         data["vis_gap"] = best_vis - row.vis_score
         data["inliers_gap"] = best_inliers - row.inliers
         # Улика за сиблинга: лучшее подтверждение различающих слов у другой карточки той же
@@ -262,7 +283,9 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
         # Доля инлаеров кандидата среди всех: если один кандидат забрал их почти все,
         # это гораздо убедительнее, чем просто большое абсолютное число.
         data["inliers_share"] = row.inliers / total_inliers
-        data["rrf_margin"] = min((r.rrf_rank for r in others), default=row.rrf_rank) - row.rrf_rank
+        data["rrf_margin"] = (
+            min((rrf_rank[id(r)] for r in others), default=data["rrf_rank"]) - data["rrf_rank"]
+        )
         # RANSAC хорош только при согласованной гомографии, приличной доле инлаеров и их
         # пространственном покрытии. Это компактный scalar, а не сырые точки/матрица.
         geometry = (

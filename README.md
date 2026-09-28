@@ -37,7 +37,7 @@ GitHub Actions → GHCR → Node.js-контейнер Nuxt/Nitro; scanner и Po
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform_sq_v3 WINE_DECIDER=models/decider_platform_sq_v3_slug \
+WINE_INDEX=models/index_platform_sq_v3 WINE_DECIDER=models/decider_platform_sq_v3_v7 \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -67,7 +67,7 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3`) |
-| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_slug`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_v7`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_VLM` | `0` (в Docker `1`) | `1` — VLM-судья между близнецами одной винодельни; работает только в `/v1/eval/predict` |
 | `WINE_VLM_SCAN` | `0` | `1` — звать судью и в продуктовом `/scan` (ложные приёмы незнакомых 0.07 → 0.34) |
