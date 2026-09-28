@@ -103,10 +103,15 @@ uv run python scripts/synthesize_queries.py --n 300         # псевдофот
 uv run python scripts/import_live_photos.py                  # новые съёмки из data/incoming -> data/test | data/train
 uv run python scripts/import_organizer_photos.py            # organizer_100 -> data/train по таблице проверки
 uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3 \
-  --sources synthetic,train --out eval/results/features_platform_sq_v3.jsonl
-uv run python scripts/build_decider_training_notebook.py    # ноутбук 06: EDA, CV, подбор, K/P
+  --sources synthetic,train --out eval/results/features_platform_sq_v3_v7.jsonl
+uv run python scripts/build_decider_training_notebook.py    # ноутбук 06: EDA, CV, подбор параметров
 uv run jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 \
-  notebooks/06_decider_eda_and_training.ipynb               # -> models/decider_platform_sq_v3_slug
+  notebooks/06_decider_eda_and_training.ipynb               # -> models/decider_platform_sq_v3_v6
+uv run python scripts/train_decider.py --features eval/results/features_platform_sq_v3_v7.jsonl \
+  --params-from models/decider_platform_sq_v3_v6 --calibration live-split --scenario real \
+  --out models/decider_platform_sq_v3_v7                    # параметры v6, признаки v7
+uv run python eval/threshold_selection.py --decider models/decider_platform_sq_v3_v7 \
+  --apply utility                                           # порог по пользе, бутстреп по винодельням
 ```
 
 Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.
