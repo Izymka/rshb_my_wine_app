@@ -1,6 +1,6 @@
 slug_a,slug_b,decision,canonical_slug,reviewer_note
 abrau-dyurso-imperatorskoe-bryut-shardone-beloe-12,abrau-dyurso-udelnoe-vedomstvo-imperatorskoe-beloe-bryut,equivalent,,"24.09 Ирина: ошибка контента, одно вино заведено в каталог дважды. Заказчик исправлять не будет, в тесте разночтений не обещает; за ошибку модели не считать"
-abrau-dyurso-victor-dravigny-brut-shardone-beloe-bryut-12,abrau-dyurso-victor-dravigny-bryut,equivalent,abrau-dyurso-victor-dravigny-bryut,"24.09 Ирина: правильный abrau-dyurso-victor-dravigny-bryut"
+abrau-dyurso-victor-dravigny-brut-shardone-beloe-bryut-12,abrau-dyurso-victor-dravigny-bryut,equivalent,abrau-dyurso-victor-dravigny-bryut,24.09 Ирина: правильный abrau-dyurso-victor-dravigny-bryut
 chateau-le-grand-vostock-kyuve-karsov-rezerv-shardone-beloe-suhoe-14,chteau-le-grand-vostock-cuvee-karsov-reserve-shardone-beloe-suhoe-14,equivalent,chteau-le-grand-vostock-cuvee-karsov-reserve-shardone-beloe-suhoe-14,"24.09 Ирина: правильный chteau-le-grand-vostock-cuvee-karsov-reserve-..., у второго страница 404"
 golubitskoe-estate-risling,golubitskoe-estate-risling-beloe-suhoe-125,equivalent,,"24.09 Ирина: ошибка контента, одно вино заведено в каталог дважды. Заказчик исправлять не будет, в тесте разночтений не обещает; за ошибку модели не считать"
 skalistyy-bereg-shyopot-tsvetov-risling-beloe-suhoe-109,skalistyy-bereg-veter-v-travah-kaberne-fran-krasnoe-suhoe-13,duplicate_photo_not_equivalent,,"24.09 Ирина: разные вина, разные slug и разные этикетки. 25.09: у ...-109 в карточке фото «Ветра в травах» — ошибка контента, карточка исключена"
@@ -8,3 +8,6 @@ skalistyj-bereg-shepot-czvetov,skalistyy-bereg-shyopot-tsvetov-risling-beloe-suh
 abrau-dyurso-brut-dor-blanc-de-blancs-shardone-beloe-bryut-12,abrau-dyurso-brut-dor-blanc-de-blancs-shardone-beloe-bryut-125,equivalent,,"25.09 Ирина: ошибка контента, одно вино («Brut d'Or Blanc de Blancs») заведено в каталог дважды; за ошибку модели не считать"
 shato-pino-shiraz-krasnoe-suhoe-14,shato-pino-shiraz-krasnoe-suhoe-135,equivalent,,"27.09 правило Ирины: карточки отличаются только годом на этикетке (у -14 на фото 2017, у -135 года нет) — одно вино"
 vinodelnya-krinitsa-ester-muskat-belyy-beloe-suhoe-12,vinodelnya-krinitsa-ester-muskat-beloe-suhoe-128,equivalent,,"27.09 правило Ирины: одна этикетка «Эстер» Криницы, отличаются годом и крепостью в карточке — одно вино"
+balaklava-muskat-beloe-polusladkoe,balaklava-muskat,equivalent,,"28.09 сверка разметки train (Ирина): одно вино, обе карточки верны"
+massandra-muskat-belyy-pozdnego-sbora-beloe-sladkoe-10,massandra-muskat-pozdnego-sbora-muskat-belyy-beloe-sladkoe-16,equivalent,,"28.09 сверка разметки train (Ирина): одно вино, обе карточки верны"
+inkermanskiy-zmv-inkerman-bryut-rkatsiteli-beloe-12,inkermanskiy-zmv-inkerman-bryut-shardone-beloe-135,equivalent,,"28.09 сверка разметки train (Ирина): одно вино, обе карточки верны"

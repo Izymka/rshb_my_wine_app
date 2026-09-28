@@ -123,6 +123,9 @@ def reviewed(row: dict, context: dict, args) -> dict:
     source = SOURCE / row["image_path"]
     if row["reason"] in TEST_REASONS or not source.exists():
         return {**result, "decision": "skip"}
+    # Кадр, забракованный при сверке разметки (две бутылки, не то вино, смаз): не брать вовсе.
+    if row["decision"] == "reject":
+        return {**result, "decision": "skip", "reason": row["reason"] or "забракован при сверке"}
     if sha256(source) in context["test_hashes"]:
         return {**result, "decision": "skip", "reason": "тот же файл есть в data/test"}
     if slug:
