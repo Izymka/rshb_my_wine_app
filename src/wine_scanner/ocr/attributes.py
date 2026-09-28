@@ -180,4 +180,9 @@ def compare(query: Attributes, card: Attributes) -> tuple[int, int]:
 
 def is_attribute_word(token: str) -> bool:
     """Слово цвета, сладости или игристости — то, что сравнивают атрибуты, а не название."""
-    return _color(token) is not None or token in _SWEETNESS or token in _SPARKLING or token == _EXTRA
+    return (
+        _color(token) is not None
+        or token in _SWEETNESS
+        or token in _SPARKLING
+        or token == _EXTRA
+    )

@@ -57,8 +57,8 @@ NGRAM_RANGE = (3, 5)
 def catalog_document(payload: dict, fields: tuple[str, ...] = CATALOG_FIELDS) -> str:
     """Собрать текст карточки из тех полей, которые реально есть у каталога."""
     parts = []
-    for field in fields:
-        value = payload.get(field)
+    for name in fields:
+        value = payload.get(name)
         if value is None or value == "" or (isinstance(value, float) and math.isnan(value)):
             continue
         parts.append(" ".join(map(str, value)) if isinstance(value, list) else str(value))

@@ -206,7 +206,10 @@ class FallbackChat:
 
 
 def yandex_from_env(prefix: str, timeout: float = DEFAULT_TIMEOUT) -> YandexChat | None:
-    """Клиент Yandex AI Studio; модель — `YANDEX_VLM_MODEL` для судьи, `YANDEX_LLM_MODEL` для сомелье."""
+    """Клиент Yandex AI Studio.
+
+    Модель — `YANDEX_VLM_MODEL` для судьи, `YANDEX_LLM_MODEL` для сомелье.
+    """
     api_key = os.environ.get("YANDEX_LLM_API_KEY") or os.environ.get("YANDEX_OCR_API_KEY")
     folder_id = os.environ.get("YANDEX_FOLDER_ID")
     if not api_key or not folder_id:
