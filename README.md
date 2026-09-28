@@ -30,7 +30,7 @@ curl -s localhost:8080/health | jq .devices   # визуальные модел�
 
 ### Отдельный деплой фронтенда
 
-GitHub Actions → GHCR → Node.js-контейнер Nuxt/Nitro; scanner и PostgreSQL могут
+GitHub Actions → GHCR → Node.js-контейнер Nuxt/Nitro; scanner может
 оставаться на локальном сервере разработки с GPU. Настройки CI, адрес API, HTTPS и откат:
 [инструкция по деплою](docs/FRONTEND_DEPLOY.md).
 

@@ -12,20 +12,6 @@
 # PaddleOCR в текущем адаптере намеренно работает на CPU.
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: wine_scanner
-      POSTGRES_USER: wine_scanner
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wine_scanner}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wine_scanner -d wine_scanner"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-
   scanner:
     build: .
     ports:
@@ -44,7 +30,6 @@ services:
       - torch-cache:/opt/torch
       - paddle-cache:/root/.paddlex
     environment:
-      DATABASE_URL: postgresql+psycopg://wine_scanner:${POSTGRES_PASSWORD:-wine_scanner}@postgres:5432/wine_scanner
       WINE_INDEX: /app/models/index_platform_sq_v3
       WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
       # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.
@@ -95,9 +80,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
       # Модели поднимаются десятки секунд, и до этого сервис отвечать не обязан.
@@ -122,6 +104,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres-data:
   torch-cache:
   paddle-cache:
