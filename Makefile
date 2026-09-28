@@ -1,6 +1,17 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help web-env web web-install web-build web-start web-dev tunnel tunnel-stop
+.PHONY: help web-env web web-install web-build web-start web-dev tunnel tunnel-stop scanner-init release-prepare release-publish
+
+PYTHON ?= python3
+
+scanner-init: ## Скачать релиз, проверить SHA256, распаковать и запустить scanner (повторяемо)
+	$(PYTHON) scripts/release_scanner.py deploy
+
+release-prepare: ## Пересобрать два релизных архива, SHA256SUMS и инструкцию
+	$(PYTHON) scripts/release_scanner.py prepare
+
+release-publish: release-prepare ## С подтверждением загрузить релиз в Google Drive (DRIVE_REMOTE=gdrive:)
+	$(PYTHON) scripts/release_scanner.py publish
 
 help: ## Показать команды
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

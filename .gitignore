@@ -26,3 +26,4 @@ rtdetr_data.tgz
 # Признаки решающего слоя на каталоге платформы — десятки мегабайт, пересобираются скриптом.
 eval/results/features_platform*.jsonl
 eval/results/frames/
+/data/eval/organizer_100

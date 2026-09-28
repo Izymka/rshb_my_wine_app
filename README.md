@@ -1,5 +1,51 @@
 # Сканер российских вин для платформы «Своё Вино»
 
+## Проверяющим: ручной запуск сканера
+
+Нужны Linux-машина с NVIDIA Turing или новее (от 6 ГБ VRAM), драйвер r570+, Docker Compose
+и NVIDIA Container Toolkit. На время установки нужно около 40 ГБ свободного места и интернет.
+Релизные файлы лежат в [папке Google Drive](https://drive.google.com/drive/u/0/folders/1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ).
+Перед запуском установите `gdown` версии 6.1 или новее (`pipx install gdown`).
+
+```bash
+git clone https://github.com/Izymka/rshb_my_wine_app.git
+cd rshb_my_wine_app
+mkdir -p data/release
+gdown 'https://drive.google.com/drive/folders/1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ' -O data/release
+(cd data/release && sha256sum -c SHA256SUMS)
+tar -xf data/release/wine_scanner_artifacts.tar
+tar -xf data/release/siglip2.tar
+cp .env.example .env
+# При наличии ключа Yandex впишите его в .env; без ключа задайте WINE_VLM=0.
+docker compose up -d --build scanner
+curl -s http://localhost:8080/health | jq .
+```
+
+Если папка доступна только авторизованным пользователям, настройте Google Drive remote
+в `rclone` и вместо `gdown`
+выполните `rclone copy gdrive: data/release --drive-root-folder-id 1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ`.
+Для повторяемой установки с автоматической проверкой артефактов, GPU и `/health` есть
+`make scanner-init` (для закрытой папки: `make scanner-init DRIVE_REMOTE=gdrive:`).
+Ожидается `status: ok`, версии `994899aea9e7` / `8ba1722e86f7`, порог `0.533`,
+`devices.ocr: gpu:0`; первый запуск со сборкой занимает около 20–40 минут.
+Подробности и вариант загрузки SigLIP с HuggingFace — в [инструкции](docs/DEPLOY_SCANNER.md).
+
+### Быстрая проверка на уже работающем удалённом сервере
+
+Чтобы оценить решение без установки модели, используйте скрипт организаторов и готовый
+сервер разработчика. Время ответа включает задержку сети; для замера локальной скорости
+подставьте `http://127.0.0.1:8080/v1/eval/predict`.
+
+```bash
+cd data/eval
+./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
+  --endpoint http://212.46.3.67:58080/v1/eval/predict \
+  --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
+```
+
+Ручка возвращает `{"slug": ...}` или `{"slug": null, "similar": [...]}` для незнакомого вина.
+Доступность удалённого стенда зависит от машины разработчика.
+
 Состояние после переноса с Mac и перехода на RT-DETR: [аудит 20.09.2026](docs/RTDETR_STATUS.md).
 Разбор кропов и разметки: [ноутбук](notebooks/02_rtdetr_crop_audit.ipynb).
 Переобучение, padding и OCR/XFeat: [эксперименты](notebooks/03_pipeline_rebuild_experiments.ipynb).
@@ -23,7 +69,7 @@
 ```bash
 cp .env.example .env          # ключи облачного OCR и LLM, если используются; без них тоже работает
 docker compose up --build     # сервис на :8080, интерфейс на :3000
-curl -s localhost:8080/health | jq .devices   # визуальные модели — cuda, PaddleOCR — cpu
+curl -s localhost:8080/health | jq .devices   # визуальные модели — cuda, PaddleOCR — gpu:0
 ```
 
 В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
@@ -46,21 +92,6 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 Первый запрос после старта сервис делает сам (прогрев), поэтому поднимается он около минуты;
 `/health` показывает `load_seconds` и `warmup_seconds`.
 
-### Скрипт оценки
-
-```bash
-cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
-  --endpoint http://127.0.0.1:8080/v1/eval/predict --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
-```
-
-также решение можно протестировать на уже развернутом сервере разработчика 
-(нужно принимать во внимание сетевые издержки на работу с удаленным сервером):
-```bash
-cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
-  --endpoint http://212.46.3.67:58080/v1/eval/predict --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
-```
-
-Ручка отвечает `{"slug": ...}` либо `{"slug": null, "similar": [...]}` на незнакомое вино.
 Переключатель `WINE_EVAL_REFUSE=0` заставляет и ниже порога отдавать лучшего кандидата.
 
 ## Переменные окружения
