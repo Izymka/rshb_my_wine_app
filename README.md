@@ -1,11 +1,18 @@
 # Сканер российских вин для платформы «Своё Вино»
 
-## Проверяющим: ручной запуск сканера
+## Быстрый запуск теста
 
-Нужны Linux-машина с NVIDIA Turing или новее (от 6 ГБ VRAM), драйвер r570+, Docker Compose
-и NVIDIA Container Toolkit. На время установки нужно около 40 ГБ свободного места и интернет.
+### Подготовка сервера
+
+Выберите один из трёх вариантов. Для собственного сервера нужны Linux-машина с NVIDIA Turing
+или новее (от 6 ГБ VRAM), драйвер r570+, Docker Compose и NVIDIA Container Toolkit.
+На время установки нужно около 40 ГБ свободного места и интернет.
+
+#### 1. Ручная подготовка
+
 Релизные файлы лежат в [папке Google Drive](https://drive.google.com/drive/u/0/folders/1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ).
-Перед запуском установите `gdown` версии 6.1 или новее (`pipx install gdown`).
+Для загрузки скриптом можно использовать команду `gdown` (версии 6.1 или новее (`pipx install gdown`)), 
+либо скачайте файлы вручную в папку data/release 
 
 ```bash
 git clone https://github.com/Izymka/rshb_my_wine_app.git
@@ -21,30 +28,64 @@ docker compose up -d --build scanner
 curl -s http://localhost:8080/health | jq .
 ```
 
-Если папка доступна только авторизованным пользователям, настройте Google Drive remote
-в `rclone` и вместо `gdown`
-выполните `rclone copy gdrive: data/release --drive-root-folder-id 1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ`.
-Для повторяемой установки с автоматической проверкой артефактов, GPU и `/health` есть
-`make scanner-init` (для закрытой папки: `make scanner-init DRIVE_REMOTE=gdrive:`).
-Ожидается `status: ok`, версии `994899aea9e7` / `8ba1722e86f7`, порог `0.533`,
-`devices.ocr: gpu:0`; первый запуск со сборкой занимает около 20–40 минут.
-Подробности и вариант загрузки SigLIP с HuggingFace — в [инструкции](docs/DEPLOY_SCANNER.md).
+#### 2. Команда `make scanner-init`
 
-### Быстрая проверка на уже работающем удалённом сервере
-
-Чтобы оценить решение без установки модели, используйте скрипт организаторов и готовый
-сервер разработчика. Время ответа включает задержку сети; для замера локальной скорости
-подставьте `http://127.0.0.1:8080/v1/eval/predict`.
+Установите `make`, Python 3.11+ и `gdown` 6.1+; для закрытой папки вместо `gdown` нужен
+настроенный `rclone`.
 
 ```bash
-cd data/eval
-./participant_test.sh --images-dir ./queries --manifest ./queries.tsv \
-  --endpoint http://212.46.3.67:58080/v1/eval/predict \
-  --output ./output/predictions_$(date +%Y%m%d_%H%M%S).jsonl
+git clone https://github.com/Izymka/rshb_my_wine_app.git
+cd rshb_my_wine_app
+make scanner-init
 ```
 
-Ручка возвращает `{"slug": ...}` или `{"slug": null, "similar": [...]}` для незнакомого вина.
-Доступность удалённого стенда зависит от машины разработчика.
+Команда скачивает и проверяет архивы, распаковывает их, создаёт `.env` при необходимости,
+запускает scanner и проверяет `/health`. Повторный запуск использует установленные артефакты.
+Для обоих вариантов ожидаются `status: ok`, версии `994899aea9e7` / `8ba1722e86f7`,
+порог `0.533` и `devices.ocr: gpu:0`. Первая сборка занимает около 20–40 минут.
+Подробности и вариант загрузки SigLIP с HuggingFace — в [инструкции](docs/DEPLOY_SCANNER.md).
+
+#### 3. Готовый сервер
+
+Можно сразу использовать [сервер разработчика](http://212.46.3.67:58080/v1/eval/predict).
+Для запуска скрипта нужен только код проекта; модели и Docker не требуются:
+
+```bash
+git clone https://github.com/Izymka/rshb_my_wine_app.git
+cd rshb_my_wine_app
+```
+
+Доступность стенда зависит от машины разработчика.
+
+> При тестах с удалённым сервером время ответа включает сетевые издержки. Учитывайте их при
+> сравнении скорости с локальным запуском.
+
+### Запуск скрипта валидации
+
+Скрипту нужны `bash`, `curl`, `jq`, `awk`, `mktemp` и `sha256sum` (или `shasum`). Команды ниже
+выполняются из корня клонированного репозитория.
+
+#### С локальным сервером
+
+```bash
+./data/eval/participant_test.sh --images-dir ./data/eval/queries \
+  --manifest ./data/eval/queries.tsv \
+  --endpoint http://127.0.0.1:8080/v1/eval/predict \
+  --output ./data/eval/output/predictions_local_$(date +%Y%m%d_%H%M%S).jsonl
+```
+
+#### С удалённым сервером
+
+```bash
+./data/eval/participant_test.sh --images-dir ./data/eval/queries \
+  --manifest ./data/eval/queries.tsv \
+  --endpoint http://212.46.3.67:58080/v1/eval/predict \
+  --output ./data/eval/output/predictions_remote_$(date +%Y%m%d_%H%M%S).jsonl
+```
+
+> Результаты каждого прогона находятся в `data/eval/output/predictions_*.jsonl` на машине,
+> где запущен скрипт. В каждой строке — `query_id`, `image_path`, `image_sha256`,
+> `predicted_slug` и время ответа `latency_ms`.
 
 Состояние после переноса с Mac и перехода на RT-DETR: [аудит 20.09.2026](docs/RTDETR_STATUS.md).
 Разбор кропов и разметки: [ноутбук](notebooks/02_rtdetr_crop_audit.ipynb).
