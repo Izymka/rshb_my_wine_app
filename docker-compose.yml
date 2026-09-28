@@ -38,7 +38,7 @@ services:
       - ./data/media:/app/data/media:ro
       # Решения человека по каталогу: дубли с каноническим slug и исключённые карточки
       # (catalog_slug_equivalences.csv, catalog_excluded_slugs.csv). Без них сервис молча
-      # отвечает строго: выдаёт исключённую -109 и дубли вместо канонических slug.
+      # отвечает строго: выдаёт дубли вместо канонических slug и не видит исключённых карточек.
       - ./data/splits:/app/data/splits:ro
       # Кэш чужих весов переживает пересборку образа.
       - torch-cache:/opt/torch
@@ -86,8 +86,8 @@ services:
       # Политика eval-ручки: 0 — всегда лучший кандидат (проверка заказчика — вина каталога,
       # null — ошибка), 1 — честный null на незнакомом вине.
       WINE_EVAL_REFUSE: ${WINE_EVAL_REFUSE:-0}
-      # Окно ре-ранкинга: 25 на процессоре, 50 на видеокарте.
-      WINE_RERANK_CANDIDATES: ${WINE_RERANK_CANDIDATES:-50}
+      # Окно ре-ранкинга: 25, как при сборке признаков решающего слоя.
+      WINE_RERANK_CANDIDATES: ${WINE_RERANK_CANDIDATES:-25}
     deploy:
       resources:
         reservations:
