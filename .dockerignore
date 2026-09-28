@@ -3,10 +3,12 @@ data/
 models/
 notebooks/
 .venv/
+.venv-ocr/
 .git/
 .idea/
 .pytest_cache/
 .ruff_cache/
 **/__pycache__/
 *.pyc
-eval/results/features.jsonl
+# Результаты замеров (~0.8 ГБ) сервису не нужны.
+eval/results/

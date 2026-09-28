@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Сервис сканера вина под NVIDIA GPU.
 #
 #   docker build -t wine-scanner .
@@ -5,13 +6,17 @@
 #
 # База — обычная Ubuntu, а не образ nvidia/cuda, и это осознанно. Колёса torch с PyPI под Linux
 # уже везут с собой весь нужный рантайм CUDA (cuBLAS, cuDNN, NCCL приезжают пакетами
-# nvidia-*-cu13), а драйвер в контейнер прокидывает nvidia-container-toolkit с хоста. Образ
+# nvidia-*-cu12), а драйвер в контейнер прокидывает nvidia-container-toolkit с хоста. Образ
 # nvidia/cuda в такой схеме добавляет полтора гигабайта и, что хуже, ещё одну версию CUDA,
 # которая может не совпасть с той, под которую собран torch.
 #
-# Требование к хосту: драйвер NVIDIA под CUDA 13 (ветка r580 и новее) и установленный
-# nvidia-container-toolkit. Карта — Turing или новее. Pascal (GTX 10xx) не подойдёт:
-# CUDA 13 убрала поддержку этой архитектуры, а torch выкинул её ещё из сборок под 12.8.
+# Требование к хосту: драйвер NVIDIA r570 и новее (torch собран под CUDA 12.8, Paddle-GPU —
+# под 12.6) и установленный nvidia-container-toolkit. Карта — Turing или новее, от 6 ГБ
+# видеопамяти (сервис в пике занимает ~2.2 ГБ, замер 28.09). Pascal (GTX 10xx) не подойдёт:
+# torch выкинул эту архитектуру из сборок под 12.8.
+#
+# Кэш uv монтируется только на время сборки (--mount=type=cache) и в образ не попадает:
+# раньше он оставался в слоях и весил 16 ГБ из 34.
 #
 # Веса не копируются в образ, а монтируются томом. Их около 700 МБ (индекс, дескрипторы
 # каталога, детектор этикетки, решающий слой), и они меняются чаще кода: пересобирать образ
@@ -46,7 +51,8 @@ WORKDIR /app
 # 1.4 с на CPU, /scan на живых кадрах train p95 3.3 → 1.9 с.
 # Два шага: у индекса Paddle есть свой старый paddleocr, а uv берёт пакет из первого индекса,
 # где его нашёл, — paddleocr ставится отдельно, только с PyPI.
-RUN uv venv /opt/ocr --python python3.12 \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv /opt/ocr --python python3.12 \
     && uv pip install --python /opt/ocr/bin/python \
         --index-url https://pypi.org/simple \
         --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
@@ -57,14 +63,16 @@ ENV WINE_OCR_PYTHON=/opt/ocr/bin/python \
 
 # Зависимости отдельным слоем: пересобирается только при правке pyproject.toml или uv.lock.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project \
         --extra api --extra rerank --extra ocr --extra decide
 
 COPY src/ ./src/
 COPY api/ ./api/
 COPY scripts/ ./scripts/
 COPY eval/ ./eval/
-RUN uv sync --frozen --extra api --extra rerank --extra ocr --extra decide
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --extra api --extra rerank --extra ocr --extra decide
 
 # Чужие веса выкачиваются при первом обращении: XFeat через torch.hub, PaddleOCR — свои модели
 # распознавания, детектор бутылки RT-DETR (COCO) — с HuggingFace. Если этого не сделать на
