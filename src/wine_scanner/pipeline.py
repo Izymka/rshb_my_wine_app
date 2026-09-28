@@ -313,6 +313,8 @@ class WineScanner:
         # Сколько текстом подтверждённых кандидатов можно добавить в окно сверх основного:
         # ограничение нужно, чтобы длинная линейка не удвоила стоимость ре-ранкинга.
         self.window_extra = candidates if window_extra is None else window_extra
+        # Сколько визуальных кандидатов сопоставлять, пока идёт OCR (параллельный режим).
+        self.prematch = _env_int("WINE_PREMATCH", max(1, candidates // 2))
         self.guard = guard
         # Выбор внутри семьи по тексту (decide/guard.py, sibling_swap).
         self.sibling = sibling
@@ -417,6 +419,9 @@ class WineScanner:
         self.cropper = getattr(embedder, "cropper", None)
 
         self.ocr = ocr if ocr is not None else LabelOCR()
+        if ocr is None:
+            # Процесс-воркер OCR и его модели поднимаются в фоне, пока грузится остальное.
+            self.ocr.warm()
         self.matcher = matcher if matcher is not None else XFeatMatcher()
         self.vintage = VintageReader(self.ocr)
         self.text_index = (
@@ -506,7 +511,7 @@ class WineScanner:
             "ocr": (
                 getattr(self.ocr, "backend", "paddle")
                 if getattr(self.ocr, "backend", "paddle") != "paddle"
-                else ("cuda" if getattr(self.ocr, "gpu", False) else "cpu")
+                else str(getattr(self.ocr, "device", "cpu"))
             ),
             "ocr_fallbacks": str(getattr(self.ocr, "fallbacks", 0)),
         }
@@ -734,11 +739,12 @@ class WineScanner:
         # сопоставление точек с визуальными кандидатами — их список известен сразу после
         # поиска в индексе и от текста не зависит.
         if self.parallel:
-            # Заранее берём не всё окно, а его верхнюю половину. Кандидат, стоящий у визуальной
-            # ветки высоко, из итогового порядка почти никогда не выпадает, а вот нижняя часть
-            # окна после слияния с текстом перетасовывается сильно — и сопоставлять её заранее
-            # значит просто выбрасывать работу.
-            head = [h.item_id for h in visual[: max(1, self.candidates // 2)]]
+            # Заранее берём не всё окно, а его верхнюю половину (WINE_PREMATCH). Нижняя часть
+            # окна после слияния с текстом перетасовывается сильно, и сопоставлять её заранее
+            # значит выбрасывать работу: замер 28.09 на 80 живых кадрах train, два прогона —
+            # 25 пар заранее: p50 2.37/2.38 с, p95 4.50/3.35 с; 12 пар: p50 2.31/2.28 с,
+            # p95 3.79/3.32 с.
+            head = [h.item_id for h in visual[: max(1, self.prematch)]]
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="text") as pool:
                 future = pool.submit(self._text_branch, ocr_crop, use_cache)
                 with stage("rerank"):

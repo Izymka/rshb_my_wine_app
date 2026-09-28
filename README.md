@@ -70,6 +70,7 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3`) |
 | `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_v7`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
+| `WINE_OCR_PYTHON`, `WINE_OCR_DEVICE` | —, `gpu:0` | Интерпретатор отдельного окружения с `paddlepaddle-gpu` и устройство PaddleOCR (`src/wine_scanner/ocr/worker.py`); в Docker заданы в образе (`/opt/ocr`). Пусто — OCR на CPU в отдельном процессе (`WINE_OCR_PROCESS=0` — в потоке сервиса) |
 | `WINE_VLM` | `0` (в Docker `1`) | `1` — VLM-судья между близнецами одной винодельни; работает только в `/v1/eval/predict` |
 | `WINE_VLM_SCAN` | `0` | `1` — звать судью и в продуктовом `/scan` (ложные приёмы незнакомых 0.07 → 0.34) |
 | `WINE_VLM_OPTIONS`, `WINE_VLM_TRIGGER`, `WINE_VLM_VERIFY`, `WINE_VLM_TIMEOUT` | `family`, `family`, `1`, `4` | Режим судьи family-verify: показывать карточки своей винодельни, звать при соседках в выдаче, смену лидера принимать только при подтверждении текстом этикетки |

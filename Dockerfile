@@ -39,6 +39,22 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+# PaddleOCR на видеокарте — своё окружение. paddlepaddle-gpu жёстко фиксирует CUDA-библиотеки
+# под 12.6 (cuDNN 9.5, cuBLAS 12.6), torch проекта собран под 12.8: вместе они не ставятся, а в
+# одном процессе две версии cuDNN — это падения. Сервис запускает src/wine_scanner/ocr/worker.py
+# этим интерпретатором и общается с ним по stdin/stdout. Замер 28.09: OCR 27 мс на GPU против
+# 1.4 с на CPU, /scan на живых кадрах train p95 3.3 → 1.9 с.
+# Два шага: у индекса Paddle есть свой старый paddleocr, а uv берёт пакет из первого индекса,
+# где его нашёл, — paddleocr ставится отдельно, только с PyPI.
+RUN uv venv /opt/ocr --python python3.12 \
+    && uv pip install --python /opt/ocr/bin/python \
+        --index-url https://pypi.org/simple \
+        --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
+        "paddlepaddle-gpu==3.3.1" \
+    && uv pip install --python /opt/ocr/bin/python "paddleocr==3.4.1"
+ENV WINE_OCR_PYTHON=/opt/ocr/bin/python \
+    WINE_OCR_DEVICE=gpu:0
+
 # Зависимости отдельным слоем: пересобирается только при правке pyproject.toml или uv.lock.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project \

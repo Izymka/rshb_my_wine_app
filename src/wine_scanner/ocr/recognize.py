@@ -133,10 +133,35 @@ class LabelOCR:
 
     def _paddle(self):
         if self._local is None:
-            from .paddle import PaddleOCR
+            from .paddle import PaddleOCR, ProcessPaddleOCR, SubprocessPaddleOCR
 
-            self._local = PaddleOCR(min_confidence=self.min_confidence)
+            # WINE_OCR_PYTHON — интерпретатор отдельного окружения с paddlepaddle-gpu (worker.py);
+            # WINE_OCR_DEVICE — устройство Paddle (gpu:0 / cpu). Без WINE_OCR_PYTHON PaddleOCR
+            # идёт в процессе того же окружения (WINE_OCR_PROCESS=1, по умолчанию), чтобы
+            # работать параллельно с ре-ранкингом по-настоящему, а не делить с ним GIL.
+            python = os.environ.get("WINE_OCR_PYTHON", "")
+            device = os.environ.get("WINE_OCR_DEVICE", "gpu:0" if python else "cpu")
+            if python:
+                self._local = SubprocessPaddleOCR(
+                    min_confidence=self.min_confidence, device=device, python=python
+                )
+            elif os.environ.get("WINE_OCR_PROCESS", "1") == "1":
+                self._local = ProcessPaddleOCR(min_confidence=self.min_confidence, device=device)
+            else:
+                self._local = PaddleOCR(min_confidence=self.min_confidence, device=device)
         return self._local
+
+    @property
+    def device(self) -> str:
+        """На чём читает локальный OCR — для /health."""
+        return getattr(self._paddle(), "device", "cpu")
+
+    def warm(self) -> None:
+        """Заранее поднять локальный OCR (процесс-воркер и модели), если он используется."""
+        if self.backend in {"paddle", "hybrid"} or self.cloud is None:
+            local = self._paddle()
+            if hasattr(local, "warm"):
+                local.warm()
 
     def read(self, image: Image.Image, use_cache: bool = False) -> list[TextLine]:
         """Распознать текст. Кэш включается явно — он нужен бенчмаркам, а не сервису.
