@@ -3,7 +3,8 @@
 Состояние после переноса с Mac и перехода на RT-DETR: [аудит 20.09.2026](docs/RTDETR_STATUS.md).
 Разбор кропов и разметки: [ноутбук](notebooks/02_rtdetr_crop_audit.ipynb).
 Переобучение, padding и OCR/XFeat: [эксперименты](notebooks/03_pipeline_rebuild_experiments.ipynb).
-Разбор ошибок действующего решающего слоя: [ноутбук 04](notebooks/04_catboost_importance_and_errors.ipynb).
+Обучение решающего слоя: [ноутбук 06](notebooks/06_decider_eda_and_training.ipynb).
+Инференс v7 на тесте, ошибки и важность признаков: [ноутбук 08](notebooks/08_inference_test_eval_errors_importance.ipynb).
 Облачные шаги (hybrid OCR, VLM-судья) на тесте: [ноутбук 07](notebooks/07_cloud_steps_hybrid_ocr_and_vlm_judge.ipynb).
 
 Фотография этикетки → карточка вина из каталога платформы, калиброванная уверенность, честный
@@ -80,7 +81,7 @@ cd data/eval && ./participant_test.sh --images-dir ./queries --manifest ./querie
 | `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID` | — (ключ OCR), — | Ключ AI Studio: роль `ai.languageModels.user`, область ключа `yc.ai.languageModels.execute`; модели `YANDEX_VLM_MODEL` (`qwen3.6-35b-a3b`) и `YANDEX_LLM_MODEL` (`yandexgpt-5-lite`) |
 | `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`yandex` / `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |
 | `WINE_GUARD` | `warn` | Защита от близнеца: `warn` возвращает карточку с предупреждением; `twin` / `strict` отказывают, `off` выключает правило |
-| `WINE_RERANK_CANDIDATES` | `25` | Окно ре-ранкинга локальными признаками; на видеокарте 50 |
+| `WINE_RERANK_CANDIDATES` | `25` | Окно ре-ранкинга локальными признаками; признаки решающего слоя собираются с тем же окном 25 |
 | `WINE_VISUAL_CANDIDATES`, `WINE_TEXT_CANDIDATES` | `100`, `50` | Ширина визуальной и текстовой веток |
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
 | `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
@@ -104,9 +105,8 @@ uv run python scripts/import_live_photos.py                  # новые съё
 uv run python scripts/import_organizer_photos.py            # organizer_100 -> data/train по таблице проверки
 uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3 \
   --sources synthetic,train --out eval/results/features_platform_sq_v3_v7.jsonl
-uv run python scripts/build_decider_training_notebook.py    # ноутбук 06: EDA, CV, подбор параметров
 uv run jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 \
-  notebooks/06_decider_eda_and_training.ipynb               # -> models/decider_platform_sq_v3_v6
+  notebooks/06_decider_eda_and_training.ipynb               # EDA, CV, подбор -> decider_platform_sq_v3_v6
 uv run python scripts/train_decider.py --features eval/results/features_platform_sq_v3_v7.jsonl \
   --params-from models/decider_platform_sq_v3_v6 --calibration live-split --scenario real \
   --out models/decider_platform_sq_v3_v7                    # параметры v6, признаки v7

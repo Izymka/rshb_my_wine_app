@@ -190,14 +190,11 @@ def main():
             "eval/results/platform_recrop_outcomes.jsonl",
         ],
     )
-    for script, notebook in (
-        ("scripts/build_crop_audit_notebook.py", "notebooks/02_rtdetr_crop_audit.ipynb"),
-        (
-            "scripts/build_pipeline_experiments_notebook.py",
-            "notebooks/03_pipeline_rebuild_experiments.ipynb",
-        ),
+    # Notebooks are edited by hand; only their outputs are refreshed here.
+    for notebook in (
+        "notebooks/02_rtdetr_crop_audit.ipynb",
+        "notebooks/03_pipeline_rebuild_experiments.ipynb",
     ):
-        run("notebooks", [script])
         run(
             "notebooks",
             [
