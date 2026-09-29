@@ -6,6 +6,7 @@
 """
 
 import io
+import json
 import os
 
 import pytest
@@ -56,7 +57,7 @@ class FakeScanner:
         self.judged: list[bool] = []
         self.answered = True
 
-    def identify(self, image, image_key=None, use_judge=True) -> ScanResult:
+    def identify(self, image, image_key=None, use_judge=True, trace=False) -> ScanResult:
         self.calls.append("single")
         self.judged.append(use_judge)
         return answer(answered=self.answered)
@@ -257,3 +258,78 @@ def test_judge_only_on_the_eval_endpoint(monkeypatch, client):
     client.post("/scan", files={"files": ("a.png", frame(), "image/png")})
 
     assert client.engine.judged == [False, True, True]
+
+
+def test_eval_log_records_model_photo_and_errors(monkeypatch, client, tmp_path):
+    from api.eval_log import EvalLog
+
+    audit = EvalLog(tmp_path)
+    monkeypatch.setattr(main, "eval_log", audit)
+    try:
+        good = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+        bad = client.post(
+            "/v1/eval/predict", files={"image": ("bad.png", b"broken", "image/png")}
+        )
+        audit.close()
+        rows = audit.recent()
+        assert [row["status_code"] for row in rows] == [400, 200]
+        assert rows[1]["response"]["slug"] == "wine_a"
+        assert rows[1]["model"]["candidates_full"][0]["item_id"] == "wine_a"
+        assert rows[1]["model_answered"] is True
+        assert rows[1]["model_confidence_pct"] == 90.0
+        assert rows[1]["eval_found"] is True
+        assert rows[1]["judge_called"] is False
+        assert rows[1]["response_ms"] >= 0
+        assert (tmp_path / "images" / rows[1]["image_url"].split("/")[-1]).read_bytes() == frame()
+        assert good.status_code == 200 and bad.status_code == 400
+        assert client.get("/v1/eval/logs/data").json()[0]["status_code"] == 400
+        assert client.get(rows[1]["image_url"]).content == frame()
+        assert "Запросы /v1/eval/predict" in client.get("/v1/eval/logs").text
+        assert len((tmp_path / "requests.jsonl").read_text(encoding="utf-8").splitlines()) == 2
+        lines = (tmp_path / "requests.jsonl").read_text(encoding="utf-8").splitlines()
+        assert all(json.loads(line) for line in lines)
+    finally:
+        audit.close()
+
+
+def test_eval_log_marks_judge_error_fallback(monkeypatch, client, tmp_path):
+    from api.eval_log import EvalLog
+
+    audit = EvalLog(tmp_path)
+    monkeypatch.setattr(main, "eval_log", audit)
+
+    def with_judge(image, image_key=None, use_judge=True, trace=False):
+        result = answer()
+        result.timings["judge"] = 0.125
+        result.judge = {"error": "timeout", "applied": "fallback", "before_id": "wine_a"}
+        return result
+
+    monkeypatch.setattr(client.engine, "identify", with_judge)
+    try:
+        client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+        audit.close()
+        row = audit.recent()[0]
+        assert row["judge_called"] is True
+        assert row["judge_error_fallback"] is True
+        assert row["judge_ms"] == 125.0
+        assert row["judge_result"]["before_id"] == "wine_a"
+    finally:
+        audit.close()
+
+
+def test_eval_log_distinguishes_internal_refusal_from_returned_slug(monkeypatch, client, tmp_path):
+    from api.eval_log import EvalLog
+
+    audit = EvalLog(tmp_path)
+    monkeypatch.setattr(main, "eval_log", audit)
+    client.engine.answered = False
+    monkeypatch.setattr(main, "EVAL_REFUSE", False)
+    try:
+        response = client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+        audit.close()
+        row = audit.recent()[0]
+        assert response.json()["slug"] == "wine_a"
+        assert row["model_answered"] is False
+        assert row["eval_found"] is False
+    finally:
+        audit.close()

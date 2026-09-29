@@ -17,18 +17,21 @@ import asyncio
 import io
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 
+from api.eval_log import EvalLog
 from wine_scanner.embed import load_image
 from wine_scanner.pipeline import REPORTED_CANDIDATES, ScanResult, WineScanner
 from wine_scanner.sommelier import Sommelier
@@ -47,6 +50,11 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_BYTES = 60 * 1024 * 1024
 
 state: dict[str, object] = {}
+eval_log = (
+    EvalLog(Path(os.environ.get("WINE_EVAL_LOG_DIR", "data/eval_requests")))
+    if os.environ.get("WINE_EVAL_LOG", "0") == "1"
+    else None
+)
 
 # Политика eval-ручки на незнакомом вине. С 24.09.2026 по умолчанию отвечаем всегда: заказчик
 # проверяет ~100 фотографий вин каталога, и `slug: null` засчитывается ошибкой. WINE_EVAL_REFUSE=1
@@ -71,11 +79,14 @@ scan_lock = asyncio.Lock()
 
 
 async def run_identify(
-    engine: WineScanner, images: list[Image.Image], use_judge: bool
+    engine: WineScanner, images: list[Image.Image], use_judge: bool, trace: bool = False
 ) -> ScanResult:
     async with scan_lock:
         if len(images) == 1:
-            return await asyncio.to_thread(engine.identify, images[0], use_judge=use_judge)
+            options = {"trace": True} if trace else {}
+            return await asyncio.to_thread(
+                engine.identify, images[0], use_judge=use_judge, **options
+            )
         return await asyncio.to_thread(engine.identify_burst, images, use_judge)
 
 
@@ -116,6 +127,8 @@ async def lifespan(app: FastAPI):
         state["warmup_seconds"],
     )
     yield
+    if eval_log is not None:
+        await asyncio.to_thread(eval_log.close)
     state.clear()
 
 
@@ -140,9 +153,52 @@ async def request_id(request: Request, call_next):
     """
     number = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
     request.state.request_id = number
-    response = await call_next(request)
+    is_eval = request.url.path == "/v1/eval/predict" and request.method == "POST"
+    started = time.perf_counter() if is_eval and eval_log is not None else None
+    requested_at = datetime.now(UTC).isoformat() if started is not None else None
+    try:
+        response = await call_next(request)
+    except Exception:
+        if started is not None:
+            submit_eval_log(request, requested_at, started, 500)
+        raise
+    if started is not None:
+        submit_eval_log(request, requested_at, started, response.status_code)
     response.headers["x-request-id"] = number
     return response
+
+
+def submit_eval_log(request: Request, requested_at: str, started: float, status: int) -> None:
+    """Queue disk I/O after inference; never wait for a lock in the request path."""
+    if eval_log is None:
+        return
+    result = getattr(request.state, "eval_result", None)
+    report = result.judge if result else None
+    called = bool(report and report.get("applied") != "skipped")
+    row = {
+        "id": uuid.uuid4().hex,
+        "request_id": request.state.request_id,
+        "requested_at": requested_at,
+        "status_code": status,
+        "response_ms": round((time.perf_counter() - started) * 1000, 1),
+        "filename": getattr(request.state, "eval_filename", None),
+        "image_content_type": getattr(request.state, "eval_content_type", None),
+        "model": getattr(request.state, "eval_model", None),
+        "response": getattr(request.state, "eval_response", None),
+        # `slug` может быть непустым и при отказе: такова политика eval-ручки.
+        "model_answered": result.answered if result else None,
+        "model_confidence_pct": round(result.best.probability * 100, 1)
+        if result and result.best
+        else None,
+        "eval_found": request.state.eval_response["found"]
+        if getattr(request.state, "eval_response", None)
+        else None,
+        "judge_called": called,
+        "judge_result": report,
+        "judge_ms": round(result.timings.get("judge", 0) * 1000, 1) if called else None,
+        "judge_error_fallback": bool(called and report.get("error")),
+    }
+    eval_log.submit(row, getattr(request.state, "eval_image", None))
 
 
 def scanner() -> WineScanner:
@@ -295,9 +351,34 @@ async def predict(image: Annotated[UploadFile, File()], request: Request) -> dic
     Скрипт ждёт ответа 10 с; судья с таймаутом 4 с укладывается в p95 ~3 с на запрос.
     """
     number = request.state.request_id
-    images = await collect([image])
+    if eval_log is not None:
+        request.state.eval_filename = image.filename
+        request.state.eval_content_type = image.content_type
+        payload = await image.read()
+        request.state.eval_image = payload
+        if len(payload) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail=f"файл больше {MAX_BYTES} байт")
+        images = [read_image(payload, image.filename or "кадр")]
+    else:
+        images = await collect([image])
     engine = scanner()
-    result = await run_identify(engine, images, use_judge=True)
+    result = await run_identify(engine, images, use_judge=True, trace=eval_log is not None)
+    if eval_log is not None:
+        request.state.eval_result = result
+        request.state.eval_model = {
+            **result.to_dict(),
+            "candidates_full": [
+                {
+                    "item_id": candidate.item_id,
+                    "probability": candidate.probability,
+                    "payload": candidate.payload,
+                    "features": candidate.features,
+                }
+                for candidate in result.candidates
+            ],
+            "version": engine.version,
+            "trace": result.trace,
+        }
     log.info(
         "%s eval ответ=%s slug=%s p=%.3f %.0f мс",
         number,
@@ -306,7 +387,35 @@ async def predict(image: Annotated[UploadFile, File()], request: Request) -> dic
         result.best.probability if result.best else 0.0,
         result.timings["total"] * 1000,
     )
-    return eval_answer(result)
+    response = eval_answer(result)
+    if eval_log is not None:
+        request.state.eval_response = response
+    return response
+
+
+@app.get("/v1/eval/logs", response_class=HTMLResponse)
+async def eval_logs_page() -> HTMLResponse:
+    if eval_log is None:
+        raise HTTPException(status_code=404)
+    return HTMLResponse((Path(__file__).parent / "eval_logs.html").read_text(encoding="utf-8"))
+
+
+@app.get("/v1/eval/logs/data")
+async def eval_logs_data(offset: int = Query(default=0, ge=0)) -> list[dict]:
+    if eval_log is None:
+        raise HTTPException(status_code=404)
+    return await asyncio.to_thread(eval_log.recent, 200, offset)
+
+
+@app.get("/v1/eval/logs/images/{name}")
+async def eval_log_image(name: str) -> FileResponse:
+    valid_name = re.fullmatch(r"[0-9a-f]{32}\.(jpg|jpeg|png|webp|heic|heif|image)", name)
+    if eval_log is None or not valid_name:
+        raise HTTPException(status_code=404)
+    image_path = eval_log.root / "images" / name
+    if not image_path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(image_path)
 
 
 @app.get("/catalog/image/{slug}")

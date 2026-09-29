@@ -26,10 +26,14 @@ services:
       # (catalog_slug_equivalences.csv, catalog_excluded_slugs.csv). Без них сервис молча
       # отвечает строго: выдаёт дубли вместо канонических slug и не видит исключённых карточек.
       - ./data/splits:/app/data/splits:ro
+      # Фото и JSONL запросов оценки переживают пересоздание контейнера.
+      - ./data/eval_requests:/app/data/eval_requests
       # Кэш чужих весов переживает пересборку образа.
       - torch-cache:/opt/torch
       - paddle-cache:/root/.paddlex
     environment:
+      WINE_EVAL_LOG: ${WINE_EVAL_LOG:-0}
+      WINE_EVAL_LOG_DIR: /app/data/eval_requests
       WINE_INDEX: /app/models/index_platform_sq_v3
       WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
       # Порог отказа /scan вместо 0.533 из meta.json решающего слоя (см. api/main.py).
