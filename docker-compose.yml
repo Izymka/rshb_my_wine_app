@@ -32,6 +32,8 @@ services:
     environment:
       WINE_INDEX: /app/models/index_platform_sq_v3
       WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
+      # Порог отказа /scan вместо 0.533 из meta.json решающего слоя (см. api/main.py).
+      WINE_THRESHOLD: ${WINE_THRESHOLD:-0.4}
       # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.
       WINE_OCR: ${WINE_OCR:-paddle}
       # Правило выбора внутри семьи по тексту: выключено, решающий слой v7 выбирает сам.

@@ -58,6 +58,12 @@ EVAL_REFUSE = os.environ.get("WINE_EVAL_REFUSE", "0") == "1"
 # поднимает ложные приёмы незнакомых вин с 0.07 до 0.34. WINE_VLM_SCAN=1 вернёт его в /scan.
 SCAN_JUDGE = os.environ.get("WINE_VLM_SCAN", "0") == "1"
 
+# Порог отказа /scan поверх порога решающего слоя (meta.json, 0.533 — «максимум пользы» на train).
+# 29.09.2026 в сервисе 0.40: на ужатых кадрах OCR читает хуже, и верный ответ оставался ниже
+# порога. Цена по OOF train: верно 84.7 → 85.8 %, неверно 4.2 → 6.3 %, ложные приёмы 5.8 → 7.1 %;
+# тест (справка): верно 85 → 87 из 100, ложные приёмы 9.8 → 12.7 %. Пусто — порог решающего слоя.
+SCAN_THRESHOLD = float(os.environ["WINE_THRESHOLD"]) if os.environ.get("WINE_THRESHOLD") else None
+
 # Пайплайн не потокобезопасен по замыслу (одна видеокарта, одни модели) и занимает секунды.
 # Считаем его в рабочем потоке под замком: цикл событий остаётся отзывчивым — /health отвечает
 # во время скана, — а запросы всё равно идут по одному, как и раньше.
@@ -98,6 +104,7 @@ async def lifespan(app: FastAPI):
     engine = WineScanner(
         index_dir=Path(os.environ.get("WINE_INDEX", "models/index")),
         decider_dir=Path(os.environ.get("WINE_DECIDER", "models/decider")),
+        threshold=SCAN_THRESHOLD,
     )
     state["warmup_seconds"] = warm_up(engine)
     state["scanner"] = engine
