@@ -14,6 +14,7 @@ wine_scanner.pipeline, и это не вопрос вкуса. Как тольк
 """
 
 import asyncio
+import hmac
 import io
 import logging
 import os
@@ -25,8 +26,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
@@ -55,6 +57,27 @@ eval_log = (
     if os.environ.get("WINE_EVAL_LOG", "0") == "1"
     else None
 )
+EVAL_LOG_USER = os.environ.get("WINE_EVAL_LOG_USER", "")
+EVAL_LOG_PASSWORD = os.environ.get("WINE_EVAL_LOG_PASSWORD", "")
+eval_log_basic = HTTPBasic(auto_error=False)
+
+
+def require_eval_log_auth(
+    credentials: Annotated[HTTPBasicCredentials | None, Depends(eval_log_basic)],
+) -> None:
+    if not EVAL_LOG_USER and not EVAL_LOG_PASSWORD:
+        return
+    if not EVAL_LOG_USER or not EVAL_LOG_PASSWORD:
+        raise HTTPException(status_code=503, detail="неполная настройка авторизации журнала")
+    if credentials is None or not (
+        hmac.compare_digest(credentials.username, EVAL_LOG_USER)
+        and hmac.compare_digest(credentials.password, EVAL_LOG_PASSWORD)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="требуется авторизация",
+            headers={"WWW-Authenticate": 'Basic realm="Eval logs"'},
+        )
 
 # Политика eval-ручки на незнакомом вине. С 24.09.2026 по умолчанию отвечаем всегда: заказчик
 # проверяет ~100 фотографий вин каталога, и `slug: null` засчитывается ошибкой. WINE_EVAL_REFUSE=1
@@ -394,21 +417,42 @@ async def predict(image: Annotated[UploadFile, File()], request: Request) -> dic
 
 
 @app.get("/v1/eval/logs", response_class=HTMLResponse)
-async def eval_logs_page() -> HTMLResponse:
+async def eval_logs_page(_: Annotated[None, Depends(require_eval_log_auth)]) -> HTMLResponse:
     if eval_log is None:
         raise HTTPException(status_code=404)
     return HTMLResponse((Path(__file__).parent / "eval_logs.html").read_text(encoding="utf-8"))
 
 
 @app.get("/v1/eval/logs/data")
-async def eval_logs_data(offset: int = Query(default=0, ge=0)) -> list[dict]:
+async def eval_logs_data(
+    _: Annotated[None, Depends(require_eval_log_auth)],
+    offset: int = Query(default=0, ge=0),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    answered: bool | None = None,
+) -> list[dict]:
     if eval_log is None:
         raise HTTPException(status_code=404)
-    return await asyncio.to_thread(eval_log.recent, 200, offset)
+    if (since is not None and since.tzinfo is None) or (
+        until is not None and until.tzinfo is None
+    ):
+        raise HTTPException(status_code=422, detail="даты должны содержать часовой пояс")
+    return await asyncio.to_thread(eval_log.recent, 200, offset, since, until, answered)
+
+
+@app.get("/v1/eval/logs/revision")
+async def eval_logs_revision(
+    _: Annotated[None, Depends(require_eval_log_auth)],
+) -> dict[str, str]:
+    if eval_log is None:
+        raise HTTPException(status_code=404)
+    return {"revision": await asyncio.to_thread(eval_log.revision)}
 
 
 @app.get("/v1/eval/logs/images/{name}")
-async def eval_log_image(name: str) -> FileResponse:
+async def eval_log_image(
+    name: str, _: Annotated[None, Depends(require_eval_log_auth)]
+) -> FileResponse:
     valid_name = re.fullmatch(r"[0-9a-f]{32}\.(jpg|jpeg|png|webp|heic|heif|image)", name)
     if eval_log is None or not valid_name:
         raise HTTPException(status_code=404)

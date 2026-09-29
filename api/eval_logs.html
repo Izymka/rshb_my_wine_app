@@ -3,86 +3,205 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Запросы оценки</title>
+  <title>Журнал запросов оценки</title>
   <style>
-    body{font:15px system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:24px;color:#20242a;background:#f6f7f8}
-    h1{font-size:24px} #status{color:#667} article{display:grid;grid-template-columns:160px 1fr;gap:16px;
-    background:white;border:1px solid #ddd;border-radius:10px;margin:14px 0;padding:16px}
-    .photo{border:0;background:none;padding:0;cursor:zoom-in;text-align:left}
-    .photo img{width:160px;max-height:240px;object-fit:contain}
-    pre{white-space:pre-wrap;overflow-wrap:anywhere;
-    background:#f4f5f6;padding:12px;border-radius:6px} summary{cursor:pointer} .meta{line-height:1.7}
-    .meta a{color:#176399;overflow-wrap:anywhere}
-    dialog{border:0;border-radius:10px;padding:12px;max-width:95vw;max-height:95vh}
-    dialog::backdrop{background:rgba(0,0,0,.8)}
-    dialog img{display:block;max-width:90vw;max-height:85vh;object-fit:contain}
-    .close{display:block;margin:0 0 8px auto}
-    @media(max-width:600px){article{grid-template-columns:1fr}.photo img{width:100%;max-height:320px}}
+    :root{font-family:system-ui,sans-serif;color:#24313d;background:#f4f6f8}
+    *{box-sizing:border-box}body{margin:0;padding:20px;width:100%}
+    h1{font-size:24px;margin:0 0 16px}
+    .toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin-bottom:12px}
+    .toolbar label{display:grid;gap:4px;font-size:13px;color:#536273}
+    input,select,button{font:inherit}input,select{border:1px solid #bcc8d2;border-radius:6px;padding:8px;background:white}
+    button{border:1px solid #aab9c6;border-radius:6px;padding:8px 12px;background:white;cursor:pointer}
+    button:hover{background:#eaf0f5}.primary{background:#176399;border-color:#176399;color:white}
+    .primary:hover{background:#12527f}#status{font-size:13px;color:#536273;margin:0 0 10px}
+    #changes{display:none;color:#8a4300;background:#fff1d6;border:1px solid #e7bf70;
+      border-radius:6px;padding:8px 12px;margin-bottom:10px;font-weight:600}
+    #changes.visible{display:block}
+    .table-wrap{width:100%;overflow-x:auto;background:white;border:1px solid #dce3e9;border-radius:8px}
+    table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1120px}
+    col.time{width:125px}col.result{width:95px}col.percent{width:110px}
+    col.photo{width:100px}col.title{width:auto}col.timing{width:90px}col.details{width:90px}
+    th,td{padding:9px 10px;border-bottom:1px solid #e5e9ed;text-align:left;vertical-align:middle}
+    th{position:sticky;top:0;background:#eaf0f5;color:#405264;font-size:13px;z-index:1}
+    tbody tr:nth-child(even){background:#fafbfc}tbody tr:hover{background:#edf5fb}
+    td{font-size:13px;overflow-wrap:anywhere}
+    td.time,td.timing,td.percent{white-space:nowrap;font-variant-numeric:tabular-nums}
+    td.result{text-align:center;font-size:25px;font-weight:700}
+    td.photo-cell{text-align:center}
+    .yes{color:#178348}.no{color:#cb3939}.muted{color:#7c8995}
+    .small{display:block;color:#72808d;font-size:11px;margin-top:2px}
+    .thumb{border:0;padding:0;background:none;cursor:zoom-in}.thumb:hover{background:none}
+    .thumb img{display:block;max-width:80px;max-height:80px;object-fit:contain;border-radius:4px}
+    a{color:#176399;text-decoration:none}a:hover{text-decoration:underline}.title-link{font-weight:600}
+    #more{margin-top:12px}dialog{border:0;border-radius:10px;padding:16px;max-width:95vw;max-height:95vh;
+      box-shadow:0 12px 40px #0004}dialog::backdrop{background:#000b}
+    dialog .close{display:block;margin:0 0 10px auto}
+    #photo-dialog img{display:block;max-width:calc(95vw - 32px);max-height:82vh;object-fit:contain}
+    #details-dialog{width:min(1100px,95vw)}#details-dialog pre{margin:0;max-height:75vh;overflow:auto;
+      white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:#f5f7f8;padding:12px;border-radius:6px}
   </style>
 </head>
 <body>
-  <h1>Запросы /v1/eval/predict</h1>
-  <button id="refresh" type="button">Обновить</button><p id="status">Загрузка…</p>
-  <main id="entries"></main>
-  <button id="more" hidden>Показать ещё</button>
-  <dialog id="photo-dialog" aria-label="Фотография запроса">
-    <button class="close" type="button">Закрыть</button><img alt="Фотография запроса">
+  <h1>Журнал запросов /v1/eval/predict</h1>
+  <div class="toolbar">
+    <label>От <input id="from" type="datetime-local"></label>
+    <label>До <input id="to" type="datetime-local"></label>
+    <label>Результат <select id="answer-filter">
+      <option value="">Все</option><option value="true">Модель: ответ</option>
+      <option value="false">Модель: отказ</option>
+    </select></label>
+    <button id="refresh" class="primary" type="button">Обновить</button>
+    <button id="sound" type="button">Включить звук</button>
+  </div>
+  <div id="changes" role="status">Есть новые записи. Нажмите «Обновить», чтобы увидеть их.</div>
+  <p id="status">Загрузка…</p>
+  <div class="table-wrap"><table>
+    <colgroup><col class="time"><col class="result"><col class="percent"><col class="photo">
+      <col class="photo"><col class="title"><col class="timing"><col class="timing">
+      <col class="timing"><col class="details"></colgroup>
+    <thead><tr><th>Время</th><th>Результат</th><th>%<span class="small">top-1 / top-5</span></th>
+      <th>Фото (поиск)</th><th>Фото (найдено)</th><th>Название</th>
+      <th>T модель</th><th>T судья</th><th>T overall</th><th>Детали</th></tr></thead>
+    <tbody id="entries"></tbody>
+  </table></div>
+  <button id="more" type="button" hidden>Показать ещё</button>
+  <dialog id="photo-dialog" aria-label="Фотография">
+    <button class="close" type="button">Закрыть</button><img alt="Фотография">
+  </dialog>
+  <dialog id="details-dialog" aria-label="Детали запроса">
+    <button class="close" type="button">Закрыть</button><pre></pre>
   </dialog>
   <script>
-    let shown=0;
-    const dialog=document.getElementById('photo-dialog');
-    dialog.querySelector('.close').onclick=()=>dialog.close();
-    dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});
-    function openPhoto(url,alt){
-      const image=dialog.querySelector('img');image.src=url;image.alt=alt;dialog.showModal();
+    const entries=document.getElementById('entries');
+    const status=document.getElementById('status');
+    const changes=document.getElementById('changes');
+    const photoDialog=document.getElementById('photo-dialog');
+    const detailsDialog=document.getElementById('details-dialog');
+    let shown=0,seenRevision=null,audioContext=null;
+    for(const dialog of [photoDialog,detailsDialog]){
+      dialog.querySelector('.close').onclick=()=>dialog.close();
+      dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});
+    }
+    function cell(row,className=''){
+      const td=document.createElement('td');td.className=className;row.append(td);return td;
+    }
+    function timeLabel(value){
+      if(!value)return '—';
+      const d=new Date(value),p=n=>String(n).padStart(2,'0');
+      if(Number.isNaN(d.getTime()))return '—';
+      return `${p(d.getDate())}.${p(d.getMonth()+1)}.${p(d.getFullYear()%100)} `+
+        `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+    function percent(value){return value==null?'—':`${Number(value).toFixed(1)}%`}
+    function milliseconds(value){return value==null?'—':`${Math.round(Number(value))} мс`}
+    function photoCell(td,url,alt){
+      td.className='photo-cell';
+      if(!url){td.textContent='—';return}
+      const button=document.createElement('button'),img=document.createElement('img');
+      button.className='thumb';button.type='button';button.title='Открыть фото';
+      img.src=url;img.alt=alt;img.loading='lazy';
+      img.onerror=()=>{td.textContent='—'};
+      button.onclick=()=>{
+        const large=photoDialog.querySelector('img');large.src=url;large.alt=alt;
+        photoDialog.showModal();
+      };
+      button.append(img);td.append(button);
+    }
+    function render(row){
+      const tr=document.createElement('tr'),model=row.model||{},response=row.response||{};
+      const answer=row.model_answered??model.answered;
+      const top1=row.model_confidence_pct??
+        (model.probability==null?null:model.probability*100);
+      const top5=model.confidence?.top5==null?null:model.confidence.top5*100;
+      const slug=response.slug;
+      const candidate=model.candidates_full?.find(item=>item.item_id===slug);
+      const name=candidate?.payload?.name||model.card?.name||
+        response.similar?.find(item=>item.slug===slug)?.name||slug;
+      cell(tr,'time').textContent=timeLabel(row.requested_at);
+      const result=cell(tr,'result');
+      result.textContent=answer===true?'✓':answer===false?'✕':'—';
+      result.classList.add(answer===true?'yes':answer===false?'no':'muted');
+      result.title=answer===true?'Модель: ответ':answer===false?'Модель: отказ':'Модель не запускалась';
+      cell(tr,'percent').textContent=`${percent(top1)} / ${percent(top5)}`;
+      photoCell(cell(tr),row.image_url,row.filename||'Фото запроса');
+      photoCell(cell(tr),slug?`/catalog/image/${encodeURIComponent(slug)}`:null,
+        name||'Найденное вино');
+      const title=cell(tr);
+      if(slug){
+        const link=document.createElement('a');link.className='title-link';
+        link.href=`https://vino-svoe.ru/wines/${encodeURIComponent(slug)}`;
+        link.target='_blank';link.rel='noopener noreferrer';link.textContent=name||slug;
+        title.append(link);
+      }else{title.textContent='—'}
+      cell(tr,'timing').textContent=milliseconds(model.timings_ms?.total);
+      cell(tr,'timing').textContent=milliseconds(row.judge_ms);
+      cell(tr,'timing').textContent=milliseconds(row.response_ms);
+      const details=cell(tr),button=document.createElement('button');
+      button.type='button';button.textContent='Детали';
+      button.onclick=()=>{
+        detailsDialog.querySelector('pre').textContent=JSON.stringify(row,null,2);
+        detailsDialog.showModal();
+      };
+      details.append(button);entries.append(tr);
+    }
+    function filters(){
+      const params=new URLSearchParams(),from=document.getElementById('from').value;
+      const to=document.getElementById('to').value;
+      if(from)params.set('since',new Date(from).toISOString());
+      if(to)params.set('until',new Date(new Date(to).getTime()+59999).toISOString());
+      const answer=document.getElementById('answer-filter').value;
+      if(answer)params.set('answered',answer);
+      return params;
+    }
+    async function getRevision(){
+      const response=await fetch('/v1/eval/logs/revision',{cache:'no-store'});
+      if(!response.ok)throw new Error(`HTTP ${response.status}`);
+      return (await response.json()).revision;
     }
     async function refresh(more=false){
-      const status=document.getElementById('status'), entries=document.getElementById('entries');
       try{
-        const response=await fetch(`/v1/eval/logs/data?offset=${more?shown:0}`,{cache:'no-store'});
-        if(!response.ok) throw new Error(`HTTP ${response.status}`);
-        const rows=await response.json(); if(!more){entries.replaceChildren();shown=0}
+        const params=filters();params.set('offset',more?shown:0);
+        if(!more)seenRevision=await getRevision();
+        const response=await fetch(`/v1/eval/logs/data?${params}`,{cache:'no-store'});
+        if(!response.ok)throw new Error(`HTTP ${response.status}`);
+        const rows=await response.json();
+        if(!more){entries.replaceChildren();shown=0;changes.classList.remove('visible')}
+        for(const row of rows)render(row);
         shown+=rows.length;
         status.textContent=`Показано ${shown} записей`;
         document.getElementById('more').hidden=rows.length<200;
-        for(const row of rows){
-          const article=document.createElement('article');
-          if(row.image_url){
-            const button=document.createElement('button'),img=document.createElement('img');
-            button.className='photo';button.type='button';button.title='Открыть фото';
-            img.src=row.image_url;img.alt=row.filename||'Фото';
-            button.onclick=()=>openPhoto(row.image_url,img.alt);
-            button.append(img);article.append(button);
-          }
-          const info=document.createElement('div'), meta=document.createElement('div');meta.className='meta';
-          const result=row.response||{};
-          const confidence=row.model_confidence_pct??
-            (row.model?.probability!=null?Math.round(row.model.probability*1000)/10:null);
-          meta.textContent=`${row.requested_at} · ${row.request_id} · HTTP ${row.status_code}\n`+
-            `модель: ${(row.model_answered??row.model?.answered)===true?'ответ':
-              (row.model_answered??row.model?.answered)===false?'отказ':'не запускалась'} · `+
-            `уверенность: ${confidence==null?'—':confidence+'%'} · `+
-            `ответ: ${row.response_ms} мс\nslug: `;
-          if(result.slug){
-            const link=document.createElement('a');
-            link.href=`https://vino-svoe.ru/wines/${encodeURIComponent(result.slug)}`;
-            link.target='_blank';link.rel='noopener noreferrer';link.textContent=result.slug;
-            meta.append(link);
-          }else{meta.append('—')}
-          meta.append(document.createTextNode('\n'+
-            `судья: ${row.judge_called?'да':'нет'} · ${row.judge_ms??'—'} мс · `+
-            `фоллбэк после ошибки: ${row.judge_error_fallback?'да':'нет'}`));
-          info.append(meta);
-          const details=document.createElement('details'), summary=document.createElement('summary');
-          summary.textContent='Все данные модели и судьи';
-          const pre=document.createElement('pre');pre.textContent=JSON.stringify(row,null,2);
-          details.append(summary,pre);info.append(details);article.append(info);entries.append(article);
-        }
       }catch(error){status.textContent=`Не удалось загрузить журнал: ${error.message}`}
     }
-    document.getElementById('more').onclick=()=>refresh(true);
+    function beep(){
+      if(!audioContext||audioContext.state!=='running')return;
+      for(const [offset,frequency] of [[0,880],[0.18,1320]]){
+        const oscillator=audioContext.createOscillator(),gain=audioContext.createGain();
+        const start=audioContext.currentTime+offset;
+        oscillator.type='sine';oscillator.frequency.value=frequency;
+        gain.gain.setValueAtTime(0.001,start);
+        gain.gain.exponentialRampToValueAtTime(0.24,start+0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001,start+0.15);
+        oscillator.connect(gain).connect(audioContext.destination);
+        oscillator.start(start);oscillator.stop(start+0.16);
+      }
+    }
+    async function poll(){
+      try{
+        const revision=await getRevision();
+        if(seenRevision!==null&&revision!==seenRevision){
+          seenRevision=revision;changes.classList.add('visible');beep();
+        }
+      }catch(error){status.textContent=`Проверка новых записей недоступна: ${error.message}`}
+    }
+    document.getElementById('sound').onclick=async event=>{
+      const Context=window.AudioContext||window.webkitAudioContext;
+      if(!Context){event.target.textContent='Звук не поддерживается';return}
+      audioContext??=new Context();await audioContext.resume();
+      event.target.textContent='Звук включён';event.target.disabled=true;
+    };
     document.getElementById('refresh').onclick=()=>refresh();
-    refresh();
+    document.getElementById('more').onclick=()=>refresh(true);
+    refresh();setInterval(poll,30000);
   </script>
 </body>
 </html>

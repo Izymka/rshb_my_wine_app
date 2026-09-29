@@ -9,6 +9,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -81,14 +82,46 @@ class EvalLog:
                 output.write(line)
                 output.flush()
 
-    def recent(self, limit: int = 200, offset: int = 0) -> list[dict]:
+    def recent(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        answered: bool | None = None,
+    ) -> list[dict]:
         path = self.root / "requests.jsonl"
         with file_lock(self.root / "requests.lock"):
             if not path.exists():
                 return []
             with path.open(encoding="utf-8") as source:
-                lines = deque(source, maxlen=limit + offset)
-        return [json.loads(line) for line in list(reversed(lines))[offset:]]
+                rows = deque(maxlen=limit + offset)
+                for line in source:
+                    row = json.loads(line)
+                    stamp = (
+                        datetime.fromisoformat(row["requested_at"])
+                        if since is not None or until is not None
+                        else None
+                    )
+                    model_answered = row.get("model_answered")
+                    if model_answered is None and row.get("model"):
+                        model_answered = row["model"].get("answered")
+                    if (
+                        (since is not None and stamp < since)
+                        or (until is not None and stamp > until)
+                        or (answered is not None and model_answered is not answered)
+                    ):
+                        continue
+                    rows.append(row)
+        return list(reversed(rows))[offset:]
+
+    def revision(self) -> str:
+        path = self.root / "requests.jsonl"
+        with file_lock(self.root / "requests.lock"):
+            if not path.exists():
+                return "0"
+            info = path.stat()
+            return f"{info.st_size}:{info.st_mtime_ns}"
 
     def close(self) -> None:
         self.executor.shutdown(wait=True)

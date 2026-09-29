@@ -2,6 +2,7 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 from api.eval_log import EvalLog
 
@@ -29,3 +30,26 @@ def test_concurrent_writers_and_reverse_order(tmp_path):
     finally:
         for writer in writers:
             writer.close()
+
+
+def test_filtered_history_and_revision(tmp_path):
+    audit = EvalLog(tmp_path)
+    initial = audit.revision()
+    audit.submit({
+        "id": "a" * 32, "requested_at": "2026-09-29T10:00:00+00:00",
+        "model_answered": True,
+    }, None)
+    audit.submit({
+        "id": "b" * 32, "requested_at": "2026-09-29T11:00:00+00:00",
+        "model": {"answered": False},
+    }, None)
+    audit.close()
+    assert audit.revision() != initial
+    assert [row["id"] for row in audit.recent(answered=False)] == ["b" * 32]
+    assert [
+        row["id"]
+        for row in audit.recent(
+            since=datetime(2026, 9, 29, 9, tzinfo=UTC),
+            until=datetime(2026, 9, 29, 10, 30, tzinfo=UTC),
+        )
+    ] == ["a" * 32]

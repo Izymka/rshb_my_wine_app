@@ -8,6 +8,7 @@
 import io
 import json
 import os
+from base64 import b64encode
 
 import pytest
 
@@ -284,7 +285,7 @@ def test_eval_log_records_model_photo_and_errors(monkeypatch, client, tmp_path):
         assert good.status_code == 200 and bad.status_code == 400
         assert client.get("/v1/eval/logs/data").json()[0]["status_code"] == 400
         assert client.get(rows[1]["image_url"]).content == frame()
-        assert "Запросы /v1/eval/predict" in client.get("/v1/eval/logs").text
+        assert "Журнал запросов /v1/eval/predict" in client.get("/v1/eval/logs").text
         assert len((tmp_path / "requests.jsonl").read_text(encoding="utf-8").splitlines()) == 2
         lines = (tmp_path / "requests.jsonl").read_text(encoding="utf-8").splitlines()
         assert all(json.loads(line) for line in lines)
@@ -331,5 +332,29 @@ def test_eval_log_distinguishes_internal_refusal_from_returned_slug(monkeypatch,
         assert response.json()["slug"] == "wine_a"
         assert row["model_answered"] is False
         assert row["eval_found"] is False
+        assert client.get("/v1/eval/logs/data?answered=false").json()[0]["id"] == row["id"]
+        assert client.get("/v1/eval/logs/data?answered=true").json() == []
+        assert client.get("/v1/eval/logs/revision").json()["revision"] != "0"
+    finally:
+        audit.close()
+
+
+def test_eval_log_optional_basic_auth(monkeypatch, client, tmp_path):
+    from api.eval_log import EvalLog
+
+    audit = EvalLog(tmp_path)
+    monkeypatch.setattr(main, "eval_log", audit)
+    monkeypatch.setattr(main, "EVAL_LOG_USER", "reader")
+    monkeypatch.setattr(main, "EVAL_LOG_PASSWORD", "secret")
+    try:
+        client.post("/v1/eval/predict", files={"image": ("q.png", frame(), "image/png")})
+        audit.close()
+        image_url = audit.recent()[0]["image_url"]
+        for path in ("/v1/eval/logs", "/v1/eval/logs/data", "/v1/eval/logs/revision", image_url):
+            denied = client.get(path)
+            assert denied.status_code == 401
+            assert denied.headers["www-authenticate"] == 'Basic realm="Eval logs"'
+            token = b64encode(b"reader:secret").decode()
+            assert client.get(path, headers={"Authorization": f"Basic {token}"}).status_code == 200
     finally:
         audit.close()
