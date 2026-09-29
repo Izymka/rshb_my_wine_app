@@ -47,3 +47,9 @@ scripts/extract_mac_archive.py
 scripts/recover_public_slugs.py
 scripts/compare_organizer_manual_slugs.py
 scripts/audit_catalog_equivalences.py
+alembic.ini
+migrations/
+src/wine_scanner/db.py
+src/wine_scanner/normalize/
+scripts/import_catalog_postgres.py
+scripts/preprocess_catalog_labels.py

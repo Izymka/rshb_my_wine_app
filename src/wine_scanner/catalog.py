@@ -7,7 +7,6 @@
 """
 
 import json
-import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -251,12 +250,6 @@ def load_platform(root: Path = PLATFORM_ROOT) -> list[CatalogItem]:
     пустую строку хуже, чем честно не знать вино. Сколько таких — печатается, чтобы
     пропажа не прошла незамеченной.
     """
-    # Production uses PostgreSQL.  CSV remains a deliberate offline fallback for historical
-    # notebooks and tests that do not start a database.
-    if os.environ.get("DATABASE_URL"):
-        from .db import catalog_items_from_db
-
-        return catalog_items_from_db()
     table = pd.read_csv(root / "catalog.csv", dtype={"vintage": "Int64"})
     items: list[CatalogItem] = []
     skipped = 0

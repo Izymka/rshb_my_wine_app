@@ -11,7 +11,6 @@
 import argparse
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -247,22 +246,6 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
-    if os.environ.get("DATABASE_URL"):
-        from wine_scanner.db import IndexBuild, session_factory
-
-        factory = session_factory()
-        with factory.begin() as session:
-            record = session.query(IndexBuild).filter_by(build_id=args.out.name).one_or_none()
-            if record is None:
-                record = IndexBuild(
-                    build_id=args.out.name,
-                    storage_path=str(args.out),
-                    preprocessing_version=LABEL_PREPROCESS_VERSION,
-                )
-                session.add(record)
-            record.storage_path = str(args.out)
-            record.preprocessing_version = LABEL_PREPROCESS_VERSION if prepared_labels else "legacy"
-            record.config = json.loads((args.out / "config.json").read_text(encoding="utf-8"))
     print(f"индекс сохранён: {args.out} ({index.index.ntotal} векторов)")
 
 
