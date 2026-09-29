@@ -53,7 +53,7 @@ from tqdm import tqdm
 
 from wine_scanner.catalog import TEST_MANIFEST, Query, load_equivalences, load_manifest
 from wine_scanner.decide.guard import DEFAULT_MODE as DEFAULT_GUARD
-from wine_scanner.decide.guard import GUARD_MODES
+from wine_scanner.decide.guard import GUARD_MODES, SIBLING_ENABLED
 from wine_scanner.embed import load_image
 from wine_scanner.index import VectorIndex
 from wine_scanner.ocr import TextIndex
@@ -394,7 +394,12 @@ def main() -> None:
     parser.add_argument(
         "--guard", default=DEFAULT_GUARD, choices=GUARD_MODES, help="защита от близнеца"
     )
-    parser.add_argument("--no-sibling", action="store_true", help="без выбора внутри семьи по тексту")
+    parser.add_argument(
+        "--sibling",
+        action=argparse.BooleanOptionalAction,
+        default=SIBLING_ENABLED,
+        help="выбор внутри семьи по тексту (по умолчанию как WINE_SIBLING)",
+    )
     parser.add_argument(
         "--text-scorer", default=None, choices=["ngram", "bm25"], help="текстовый скорер"
     )
@@ -461,7 +466,7 @@ def main() -> None:
         family_expansion=not args.no_family,
         window_extra=args.window_extra,
         guard=args.guard,
-        sibling=not args.no_sibling,
+        sibling=args.sibling,
     )
     print(
         f"кадров: {len(queries)} (известных {sum(q.known for q in queries)}), каталог: "
@@ -506,7 +511,7 @@ def main() -> None:
             "window_extra": scanner.window_extra,
             "family_expansion": scanner.family_expansion,
             "guard": args.guard,
-            "sibling": not args.no_sibling,
+            "sibling": args.sibling,
             "text_scorer": scanner.text_index.scorer,
             "text_fields": args.text_fields,
             "sources": sorted(sources),

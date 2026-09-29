@@ -34,6 +34,8 @@ services:
       WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
       # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.
       WINE_OCR: ${WINE_OCR:-paddle}
+      # Правило выбора внутри семьи по тексту: выключено, решающий слой v7 выбирает сам.
+      WINE_SIBLING: ${WINE_SIBLING:-0}
       YANDEX_OCR_API_KEY: ${YANDEX_OCR_API_KEY:-}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
       # VLM-судья между близнецами одной винодельни: Yandex AI Studio (без VPN) или
