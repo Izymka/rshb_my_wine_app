@@ -366,10 +366,9 @@ EXCLUDED = Path("data/splits/catalog_excluded_slugs.csv")
 class Equivalences:
     """Решения человека о дублях каталога (`data/splits/catalog_slug_equivalences.csv`).
 
-    Очередь на проверку собирает `scripts/audit_catalog_equivalences.py`; сюда попадают только
-    пары с `decision == equivalent` — одно вино, заведённое дважды. `canonical` — какой slug
-    отдавать вместо дубля (у второго, например, страница 404); у пары без канонического slug
-    сервис отвечает как есть, а метрика засчитывает любой из двух.
+    Сюда попадают только пары с `decision == equivalent` — одно вино, заведённое дважды.
+    `canonical` — какой slug отдавать вместо дубля (у второго, например, страница 404);
+    у пары без канонического slug сервис отвечает как есть, а метрика засчитывает любой из двух.
     """
 
     canonical: dict[str, str] = field(default_factory=dict)

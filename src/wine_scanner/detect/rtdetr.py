@@ -9,7 +9,7 @@
   папка `models/rtdetr_label`).
 
 RT-DETR — детектор-трансформер без якорей и NMS, реализация из HuggingFace transformers,
-Apache 2.0 (LICENSES.md). Интерфейс тот же, что у `BottleDetector`: `detect` отдаёт рамки,
+Apache 2.0. Интерфейс тот же, что у `BottleDetector`: `detect` отдаёт рамки,
 выбор целевой бутылки и поля вырезки — из общего `BoxCropper`, поэтому смена детектора не
 меняет правило «какую бутылку считать снятой».
 

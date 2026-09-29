@@ -1,10 +1,6 @@
-import zipfile
 from pathlib import Path
 
-import pytest
-
 from scripts.audit_rtdetr_crops import artifact_relative
-from scripts.extract_mac_archive import extract, member_path
 from wine_scanner.catalog import is_holdout
 from wine_scanner.detect.audit import annotations, iou, transfer_box
 
@@ -34,26 +30,6 @@ def test_annotation_classes_are_not_merged(tmp_path):
     row = next(iter(annotations(tmp_path).values()))
     assert row["bottle"] == [[0, 0, 20, 30]]
     assert row["label"] == [[5, 10, 15, 20]]
-
-
-def test_mac_zip_normalization_and_no_overwrite(tmp_path):
-    archive = tmp_path / "mac.zip"
-    with zipfile.ZipFile(archive, "w") as z:
-        z.writestr("фото/и\u0306.jpg", b"image")
-        z.writestr("__MACOSX/._photo", b"metadata")
-    out = tmp_path / "out"
-    assert extract(archive, out)["written"] == 1
-    assert (out / "фото/й.jpg").read_bytes() == b"image"
-    assert extract(archive, out)["identical"] == 1
-    (out / "фото/й.jpg").write_bytes(b"other")
-    with pytest.raises(ValueError, match="overwrite"):
-        extract(archive, out)
-
-
-@pytest.mark.parametrize("name", ["../outside", "/absolute", "C:/outside"])
-def test_zip_path_traversal_rejected(name):
-    with pytest.raises(ValueError):
-        member_path(zipfile.ZipInfo(name))
 
 
 def test_holdout_absolute_and_derived_paths():

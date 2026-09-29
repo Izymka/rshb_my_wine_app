@@ -23,7 +23,27 @@ rtdetr_data.tgz
 # Ключи внешних сервисов — только локально.
 .env
 
-# Признаки решающего слоя на каталоге платформы — десятки мегабайт, пересобираются скриптом.
-eval/results/features_platform*.jsonl
-eval/results/frames/
+# Результаты прогонов и замеров — только локально, пересобираются скриптами eval/.
+eval/results/
+data/eval/predictions_*.jsonl
 /data/eval/organizer_100
+
+# Рабочие заметки, отчёты, материалы организаторов и настройки ИИ-ассистентов — только локально.
+AGENTS.md
+CLAUDE.md
+.claude/
+docs/
+ARCHITECTURE.md
+API.md
+LICENSES.md
+DESIGN.md
+web/PWA.md
+web/SHELF.md
+web/docs/
+/*.pdf
+/*.jpeg
+scripts/shooting_list.py
+scripts/extract_mac_archive.py
+scripts/recover_public_slugs.py
+scripts/compare_organizer_manual_slugs.py
+scripts/audit_catalog_equivalences.py
