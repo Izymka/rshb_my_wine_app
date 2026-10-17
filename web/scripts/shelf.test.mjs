@@ -48,3 +48,17 @@ test('manually selected cards use their own characteristics, never stale scanner
   assert.deepEqual(result.map(r => r.slug), ['red']);
   assert.equal(winePath('a/b c'), '/wines/a%2Fb%20c');
 });
+test('device and cloud shelves merge by the latest edit, deletions included', async () => {
+  const { mergeShelves, dueWines } = await import('../utils/shelf.mjs');
+  const a = addWine([], 'a', card, [], 1000);
+  const b = addWine([], 'b', card, [], 2000);
+  const remoteA = updateWine(a, 'a', { note: 'облако' }, 5000);
+  const localA = updateWine(a, 'a', { note: 'устройство' }, 3000);
+  const merged = mergeShelves([...localA, ...b], remoteA, []);
+  assert.deepEqual(merged.map(e => e.slug), ['b', 'a']);
+  assert.equal(merged.find(e => e.slug === 'a').note, 'облако');
+  assert.deepEqual(mergeShelves(b, [], [{ slug: 'b', at: 2500 }]), []);
+  assert.equal(mergeShelves(updateWine(b, 'b', { note: 'после' }, 3000), [], [{ slug: 'b', at: 2500 }]).length, 1);
+  assert.deepEqual(dueWines(a, 1000 + 3 * DAY).map(e => e.slug), ['a']);
+  assert.equal(parseShelf(JSON.stringify({ version: 1, entries: [{ ...a[0], updatedAt: undefined }] }))[0].updatedAt, 1000);
+});
