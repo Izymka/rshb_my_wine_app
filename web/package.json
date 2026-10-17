@@ -10,7 +10,9 @@
     "test:shelf": "node --test scripts/shelf.test.mjs scripts/shelf-reminders.test.mjs scripts/pwa.test.mjs"
   },
   "dependencies": {
+    "@phosphor-icons/web": "^2.1.1",
     "nuxt": "^3.17.0",
+    "postgres": "^3.4.9",
     "vue": "^3.5.0",
     "web-push": "^3.6.7"
   }

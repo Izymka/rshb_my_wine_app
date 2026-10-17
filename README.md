@@ -106,11 +106,28 @@ cd rshb_my_wine_app
 
 ```bash
 cp .env.example .env          # ключи облачного OCR и LLM, если используются; без них тоже работает
-docker compose up --build     # сервис на :8080, интерфейс на :3000
+docker compose up --build     # сервис на :8080, интерфейс на :3000, PostgreSQL для аккаунтов
 curl -s localhost:8080/health | jq .devices   # визуальные модели — cuda, PaddleOCR — gpu:0
 ```
 
 В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
+
+### Аккаунты и отзывы
+
+Сканер и полка работают без входа: полка хранится в браузере и доступна без сети. Аккаунт
+нужен, чтобы публиковать отзывы и держать полку в облаке. Сервер Nuxt хранит в PostgreSQL
+пользователей, сессии, облачную полку и отзывы (`web/server/utils/db.ts`); схема создаётся сама
+при первом запросе к базе. Без `NUXT_DATABASE_URL` вход и отзывы просто не показываются.
+
+- Вход — по номеру телефона и четырёхзначному коду. СМС-провайдер в этой версии не подключён:
+  сервер возвращает код в ответе, и интерфейс показывает его на экране
+  (`NUXT_AUTH_DEMO_CODES=0` — не отдавать код). Кнопки Яндекс ID и VK ID пока неактивны.
+- Профиль: телефон, аватар, имя, email; при первом входе — имя и подтверждение 18+.
+- После входа полка устройства сливается с аккаунтом: по каждому вину побеждает более поздняя
+  правка, удаления тоже синхронизируются.
+- Отзыв (оценка, блюда, заметка) публикуется из шторки отзыва от имени или анонимно; карточка
+  вина показывает, сколько человек держат его на полке, долю «понравилось», с чем его пьют и
+  последние отзывы.
 
 ### Отдельный деплой фронтенда
 
@@ -124,6 +141,9 @@ uv sync --extra api --extra rerank --extra ocr --extra decide
 WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_site1810_abd \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
+# аккаунты и отзывы: PostgreSQL в Docker на 127.0.0.1:5432 (make db, остановить — make db-stop);
+# адрес базы берётся из web/.env (NUXT_DATABASE_URL, см. web/.env.example)
+make db && make web-dev
 ```
 
 Первый запрос после старта сервис делает сам (прогрев), поэтому поднимается он около минуты;
@@ -161,6 +181,10 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
 | `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
 | `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес scanner для серверного прокси Nuxt; задаётся при запуске контейнера |
+| `NUXT_DATABASE_URL` | пусто (в Docker — сервис `postgres`) | PostgreSQL для аккаунтов, облачной полки и отзывов; пусто — без входа |
+| `NUXT_AUTH_DEMO_CODES` | `1` | Код входа показывается на экране, пока СМС-провайдер не подключён; `0` — не отдавать код |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `wine` | Учётные данные сервиса `postgres` в docker-compose |
+| `POSTGRES_PORT` | `5432` | Порт базы на хосте (только 127.0.0.1) для web, запущенного вне compose |
 
 Без единого внешнего ключа сервис полностью работоспособен: PaddleOCR локально, судья и
 сомелье выключены.
@@ -290,7 +314,7 @@ uv run python -m pytest tests/                # 130+ тестов без еди�
 
 ```
 api/            FastAPI: /scan, /v1/eval/predict, /health, /catalog/image/{slug}, /sommelier
-web/            Nuxt 3, mobile-first интерфейс в стилистике портала
+web/            Nuxt 3, mobile-first интерфейс в стилистике портала; server/ — вход, полка, отзывы (PostgreSQL)
 src/wine_scanner/
   detect/       детекция бутылки и этикетки (каскад RT-DETR)
   embed/        SigLIP 2 / DINOv2 (фабрика по config.json) + whitening
