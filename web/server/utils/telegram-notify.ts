@@ -153,10 +153,9 @@ export class TelegramNotifier {
       const caption = `📷 <b>Новое фото для распознавания</b>\n<b>Задача:</b> ${escapeTelegramHtml(requestId.slice(0, 60))}\n<b>Файл:</b> ${escapeTelegramHtml(filename.slice(0, 100))}`;
       body.set("caption", caption);
       body.set("parse_mode", "HTML");
-      const isPhoto = ["image/jpeg", "image/png"].includes(type || "") && data.length <= 10_000_000;
-      const method = isPhoto ? "sendPhoto" : "sendDocument";
-      body.set(isPhoto ? "photo" : "document", new Blob([data], { type }), filename);
-      await this.post(method, body);
+      body.set("document", new Blob([data], { type }), filename);
+      body.set("disable_content_type_detection", "true");
+      await this.post("sendDocument", body);
     });
   }
 
