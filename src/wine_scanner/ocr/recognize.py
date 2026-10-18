@@ -13,6 +13,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from .worker import DEFAULT_DET, detector_name
+
 OCR_CACHE = Path("models/ocr_cache")
 
 # Сторона, до которой ужимается кадр перед распознаванием.
@@ -129,6 +131,10 @@ class LabelOCR:
             f"{image.size}:{self.min_confidence}:{self.effective_max_side()}:v{CACHE_VERSION}".encode()
         )
         digest.update(f":{self.backend}".encode())
+        # Детектор по умолчанию в ключ не входит: прежний кэш остаётся действительным.
+        detector = detector_name()
+        if detector != DEFAULT_DET:
+            digest.update(f":{detector}".encode())
         return self.cache_dir / f"{digest.hexdigest()}.json"
 
     def _paddle(self):

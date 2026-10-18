@@ -23,8 +23,11 @@ import sys
 
 import numpy as np
 
+# Детектор строк меняется переменной WINE_OCR_DET (PP-OCRv5_server_det, PP-OCRv6_small_det и
+# т. п.; PP-OCRv6 требует paddleocr 3.7). Распознаватель не меняется: в PP-OCRv6 кириллицы нет,
+# eslav_PP-OCRv5 — единственный восточнославянский. Имя детектора входит в ключ кэша OCR.
+DEFAULT_DET = "PP-OCRv5_mobile_det"
 ENGINE_KWARGS = dict(
-    text_detection_model_name="PP-OCRv5_mobile_det",
     text_recognition_model_name="eslav_PP-OCRv5_mobile_rec",
     # oneDNN на Windows-сборке Paddle 3.x падает в детекторе (ConvertPirAttribute2RuntimeAttribute).
     enable_mkldnn=False,
@@ -34,14 +37,18 @@ ENGINE_KWARGS = dict(
 )
 
 
+def detector_name() -> str:
+    return os.environ.get("WINE_OCR_DET") or DEFAULT_DET
+
+
 def new_engine(device: str = "cpu"):
-    """Движок PP-OCRv5: mobile-детектор и восточнославянский распознаватель."""
+    """Движок PaddleOCR: детектор строк из WINE_OCR_DET и восточнославянский распознаватель."""
     # Avoid a slow source reachability probe on every service startup.  PaddleX still
     # downloads a missing official model normally; installed models are used from cache.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddleocr import PaddleOCR as Engine
 
-    return Engine(device=device, **ENGINE_KWARGS)
+    return Engine(device=device, text_detection_model_name=detector_name(), **ENGINE_KWARGS)
 
 
 def payload(result) -> dict:

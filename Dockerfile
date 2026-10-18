@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --index-url https://pypi.org/simple \
         --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
         "paddlepaddle-gpu==3.3.1" \
-    && uv pip install --python /opt/ocr/bin/python "paddleocr==3.4.1"
+    && uv pip install --python /opt/ocr/bin/python "paddleocr==3.7.0"
 ENV WINE_OCR_PYTHON=/opt/ocr/bin/python \
     WINE_OCR_DEVICE=gpu:0
 
