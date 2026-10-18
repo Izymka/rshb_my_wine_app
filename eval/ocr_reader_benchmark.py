@@ -8,14 +8,16 @@ top-1 нечестно: новый читатель проигрывает уж�
 (R@1, R@5) и стоит ли она выше всех соседок по винодельне (`family_win`, только у карточек с
 соседками). Вырезка этикетки берётся тем же каскадом, что в сервисе; время — только OCR.
 
-Конфигурация `<детектор>-<кадр>[<сторона детектора>]`:
+Конфигурация `<детектор>-<кадр>[<сторона детектора>][+<распознаватель>]`:
 
 - детектор: `v5` — PP-OCRv5_mobile_det, `v5s` — PP-OCRv5_server_det, `v6` — PP-OCRv6_medium_det,
   `v6s` — PP-OCRv6_small_det;
 - кадр: `512` — квадрат эмбеддера, как в сервисе сейчас; `full` — вырезка этикетки в разрешении
   кадра (не больше 2048 по длинной стороне);
 - сторона детектора (необязательно): `max` N — детектор работает не больше чем на N пикселях,
-  строки распознаватель вырезает из присланного кадра (`WINE_OCR_DET_LIMIT=max`).
+  строки распознаватель вырезает из присланного кадра (`WINE_OCR_DET_LIMIT=max`);
+- распознаватель (необязательно): без суффикса — eslav_PP-OCRv5_mobile_rec, `+ru` — PP-OCRv6
+  medium, дообученный на русском (`models/ocr_rec/PP-OCRv6_medium_rec_ru`, onnxruntime).
 
 По умолчанию кадры — живые знакомые кадры `data/train`: выбор конфигурации делается на них,
 тест (`--manifest data/test/manifest.csv`) — только итоговая проверка.
@@ -41,8 +43,14 @@ DETECTORS = {
     "v6": "PP-OCRv6_medium_det",
     "v6s": "PP-OCRv6_small_det",
 }
+RECOGNIZERS = {
+    "": "eslav_PP-OCRv5_mobile_rec",
+    "ru": "models/ocr_rec/PP-OCRv6_medium_rec_ru",
+}
 FULL_MAX_SIDE = 2048
-CONFIG = re.compile(r"^(?P<det>v5s?|v6s?)-(?P<frame>512|full)(?P<side>\d+)?$")
+CONFIG = re.compile(
+    r"^(?P<det>v5s?|v6s?)-(?P<frame>512|full)(?P<side>\d+)?(?:\+(?P<rec>ru))?$"
+)
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -54,7 +62,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", default="v5-512,v6-512,v5-full960,v6-full960")
     parser.add_argument("--manifest", type=Path, default=TRAIN_MANIFEST)
-    parser.add_argument("--index", type=Path, default=Path("models/index_platform_sq_v3"))
+    parser.add_argument(
+        "--index", type=Path, default=Path("models/index_platform_sq_v3_site_1810")
+    )
     parser.add_argument("--decider", type=Path, default=Path("models/decider_platform_sq_v3_v7"))
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--tag", default="")
@@ -94,6 +104,7 @@ def main() -> None:
         if match is None:
             raise SystemExit(f"не понимаю конфигурацию {token!r}")
         os.environ["WINE_OCR_DET"] = DETECTORS[match["det"]]
+        os.environ["WINE_OCR_REC"] = RECOGNIZERS[match["rec"] or ""]
         os.environ.pop("WINE_OCR_DET_SIDE", None)
         os.environ.pop("WINE_OCR_DET_LIMIT", None)
         if match["side"]:
@@ -141,6 +152,7 @@ def main() -> None:
             "tag": args.tag,
             "config": token,
             "detector": os.environ["WINE_OCR_DET"],
+            "recognizer": os.environ["WINE_OCR_REC"],
             "frame": "full" if full else "512",
             "det_limit": match["side"],
             "manifest": str(args.manifest),

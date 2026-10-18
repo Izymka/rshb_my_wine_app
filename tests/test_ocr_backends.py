@@ -231,3 +231,24 @@ def test_detector_and_its_limits_enter_cache_key(tmp_path, image, monkeypatch):
     monkeypatch.setenv("WINE_OCR_DET_LIMIT", "max")
     assert detector_limits() == {"text_det_limit_side_len": 960, "text_det_limit_type": "max"}
     assert ocr._cache_path(image) not in {default, v6}
+
+
+def test_recognizer_enters_cache_key(tmp_path, image, monkeypatch):
+    from wine_scanner.ocr.worker import recognizer_key
+
+    monkeypatch.delenv("WINE_OCR_DET", raising=False)
+    monkeypatch.delenv("WINE_OCR_REC", raising=False)
+    ocr = LabelOCR(cache_dir=tmp_path)
+    default = ocr._cache_path(image)
+    # eslav, названный явно, — прежний кэш.
+    monkeypatch.setenv("WINE_OCR_REC", "eslav_PP-OCRv5_mobile_rec")
+    assert ocr._cache_path(image) == default
+    # Папка модели входит в ключ своим именем: один ключ на любой машине.
+    model = tmp_path / "models" / "PP-OCRv6_medium_rec_ru"
+    model.mkdir(parents=True)
+    monkeypatch.setenv("WINE_OCR_REC", str(model))
+    assert recognizer_key() == "PP-OCRv6_medium_rec_ru"
+    ru = ocr._cache_path(image)
+    assert ru != default
+    monkeypatch.setenv("WINE_OCR_REC", str(model) + "/")
+    assert ocr._cache_path(image) == ru

@@ -38,6 +38,7 @@ rerank = [
 ocr = [
     "paddleocr>=3.7.0",
     "paddlepaddle>=3.3.1",
+    "onnxruntime>=1.22",  # русский распознаватель PP-OCRv6 (ONNX) без отдельного окружения OCR
     "rank-bm25>=0.2.2",
     "rapidfuzz>=3.9",
     "scikit-learn>=1.5",  # TF-IDF по символьным n-граммам в текстовом индексе

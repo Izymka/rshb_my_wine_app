@@ -22,7 +22,8 @@ FOLDER_URL = f"https://drive.google.com/drive/folders/{FOLDER_ID}"
 ARCHIVES = {
     "wine_scanner_artifacts.tar": (
         "models/index_platform_sq_v3_site_1810",
-        "models/decider_platform_sq_v3_v7",
+        "models/decider_platform_sq_v3_v8",
+        "models/ocr_rec/PP-OCRv6_medium_rec_ru",
         "models/rtdetr_label_recrop_bf16",
         "data/catalog/catalog.csv",
         "data/catalog/label_overrides.csv",
@@ -31,11 +32,13 @@ ARCHIVES = {
     "siglip2.tar": ("models/siglip2",),
 }
 FILES = (*ARCHIVES, "SHA256SUMS", "README_DEPLOY.txt")
+OCR_MODELS = ("PP-OCRv6_medium_det", "PP-OCRv6_medium_rec_ru")
 ESSENTIAL = (
     "models/index_platform_sq_v3_site_1810/vectors.faiss",
     "models/index_platform_sq_v3_site_1810/meta.json",
-    "models/decider_platform_sq_v3_v7/model.cbm",
-    "models/decider_platform_sq_v3_v7/meta.json",
+    "models/decider_platform_sq_v3_v8/model.cbm",
+    "models/decider_platform_sq_v3_v8/meta.json",
+    "models/ocr_rec/PP-OCRv6_medium_rec_ru/inference.onnx",
     "models/rtdetr_label_recrop_bf16",
     "models/siglip2/model.safetensors",
     "data/catalog/catalog.csv",
@@ -168,7 +171,7 @@ def digest(paths: list[Path]) -> str:
 
 def check_health() -> None:
     index = ROOT / "models/index_platform_sq_v3_site_1810"
-    decider = ROOT / "models/decider_platform_sq_v3_v7"
+    decider = ROOT / "models/decider_platform_sq_v3_v8"
     expected_version = {
         "index": digest([index / name for name in
                          ("vectors.faiss", "meta.json", "config.json", "whitening.npz")]
@@ -191,6 +194,9 @@ def check_health() -> None:
                     not all(str(devices.get(key, "")).startswith("cuda")
                             for key in ("embed", "rerank"))):
                 raise ValueError(f"Модели работают не на GPU: {devices}")
+            # Решающий слой v8 обучен под эту пару OCR; с другой его признаки сдвигаются.
+            if (devices.get("ocr_det"), devices.get("ocr_rec")) != OCR_MODELS:
+                raise ValueError(f"OCR не тот, под который обучен решающий слой: {devices}")
             print(json.dumps(health, ensure_ascii=False, indent=2))
             return
         except (urllib.error.URLError, TimeoutError):

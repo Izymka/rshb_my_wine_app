@@ -56,6 +56,7 @@ from .embed import Whitening, build_embedder, load_image, pick_device
 from .embed.siglip import DEFAULT_SIGLIP_MODEL as DEFAULT_MODEL
 from .index import VectorIndex
 from .ocr import LabelOCR, TextIndex
+from .ocr.worker import detector_name, recognizer_key
 from .rerank import DescriptorStore, XFeatMatcher
 from .vintage import (
     Answer,
@@ -514,6 +515,9 @@ class WineScanner:
                 else str(getattr(self.ocr, "device", "cpu"))
             ),
             "ocr_fallbacks": str(getattr(self.ocr, "fallbacks", 0)),
+            # Решающий слой обучен под конкретную пару моделей OCR: другая пара сдвигает признаки.
+            "ocr_det": detector_name(),
+            "ocr_rec": recognizer_key(),
         }
 
     def _build_cropper(self, weights: Path, device, crop_cache: Path | None):

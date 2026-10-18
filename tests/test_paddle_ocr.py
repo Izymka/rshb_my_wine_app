@@ -1,5 +1,6 @@
 """PaddleOCR adapter: parsing stays independent from model downloads."""
 
+import pytest
 from PIL import Image
 
 from wine_scanner.ocr.paddle import PaddleOCR
@@ -64,3 +65,39 @@ def test_subprocess_worker_gets_absolute_interpreter_path(tmp_path, monkeypatch)
     except Stop:
         pass
     assert seen["args"][0] == "python"
+
+
+def test_recognizer_from_env_name_or_model_dir(tmp_path, monkeypatch):
+    from wine_scanner.ocr.worker import DEFAULT_REC, recognizer_kwargs
+
+    monkeypatch.delenv("WINE_OCR_REC", raising=False)
+    assert recognizer_kwargs() == {"text_recognition_model_name": DEFAULT_REC}
+    monkeypatch.setenv("WINE_OCR_REC", "PP-OCRv5_server_rec")
+    assert recognizer_kwargs() == {"text_recognition_model_name": "PP-OCRv5_server_rec"}
+    # Папка Paddle-модели: имя берётся из inference.yml, движок остаётся Paddle.
+    model = tmp_path / "rec_ru"
+    model.mkdir()
+    (model / "inference.yml").write_text("Global:\n  model_name: PP-OCRv6_medium_rec\n")
+    (model / "inference.json").write_text("{}")
+    monkeypatch.setenv("WINE_OCR_REC", str(model))
+    assert recognizer_kwargs() == {
+        "text_recognition_model_name": "PP-OCRv6_medium_rec",
+        "text_recognition_model_dir": str(model),
+    }
+
+
+def test_onnx_recognizer_runs_on_onnxruntime(tmp_path, monkeypatch):
+    pytest.importorskip("paddlex")
+    from wine_scanner.ocr.worker import recognizer_kwargs
+
+    model = tmp_path / "rec_ru"
+    model.mkdir()
+    (model / "inference.yml").write_text("Global:\n  model_name: PP-OCRv6_medium_rec\n")
+    (model / "inference.onnx").write_bytes(b"")
+    monkeypatch.setenv("WINE_OCR_REC", str(model))
+    kwargs = recognizer_kwargs()
+    assert kwargs["text_recognition_model_dir"] == str(model)
+    config = kwargs["paddlex_config"]
+    assert config["SubModules"]["TextRecognition"]["engine"] == "onnxruntime"
+    # Остальная конфигурация конвейера на месте: переопределение подмешано, а не подменило её.
+    assert "TextDetection" in config["SubModules"]

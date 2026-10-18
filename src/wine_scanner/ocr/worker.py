@@ -24,11 +24,14 @@ import sys
 import numpy as np
 
 # Детектор строк меняется переменной WINE_OCR_DET (PP-OCRv5_server_det, PP-OCRv6_small_det и
-# т. п.; PP-OCRv6 требует paddleocr 3.7). Распознаватель не меняется: в PP-OCRv6 кириллицы нет,
-# eslav_PP-OCRv5 — единственный восточнославянский. Имя детектора входит в ключ кэша OCR.
+# т. п.; PP-OCRv6 требует paddleocr 3.7). Распознаватель — переменной WINE_OCR_REC: имя модели
+# PaddleOCR или папка с моделью. В официальном PP-OCRv6 кириллицы нет, поэтому по умолчанию
+# остаётся восточнославянский eslav_PP-OCRv5_mobile_rec. Папка с `inference.onnx` (например,
+# models/ocr_rec/PP-OCRv6_medium_rec_ru — PP-OCRv6 medium, дообученный на русском) читается через
+# onnxruntime, детектор при этом остаётся на Paddle. Детектор и распознаватель входят в ключ кэша.
 DEFAULT_DET = "PP-OCRv5_mobile_det"
+DEFAULT_REC = "eslav_PP-OCRv5_mobile_rec"
 ENGINE_KWARGS = dict(
-    text_recognition_model_name="eslav_PP-OCRv5_mobile_rec",
     # oneDNN на Windows-сборке Paddle 3.x падает в детекторе (ConvertPirAttribute2RuntimeAttribute).
     enable_mkldnn=False,
     use_doc_orientation_classify=False,
@@ -39,6 +42,47 @@ ENGINE_KWARGS = dict(
 
 def detector_name() -> str:
     return os.environ.get("WINE_OCR_DET") or DEFAULT_DET
+
+
+def recognizer_name() -> str:
+    """Распознаватель строк: имя модели PaddleOCR или папка с моделью (WINE_OCR_REC)."""
+    return os.environ.get("WINE_OCR_REC") or DEFAULT_REC
+
+
+def recognizer_key() -> str:
+    """Как распознаватель входит в ключ кэша: у папки — её имя, а не путь на этой машине."""
+    name = recognizer_name()
+    return os.path.basename(os.path.normpath(name)) if os.path.isdir(name) else name
+
+
+def recognizer_kwargs() -> dict:
+    """Аргументы PaddleOCR для распознавателя из WINE_OCR_REC.
+
+    Папка модели несёт своё имя в `inference.yml` (Global.model_name): по нему PaddleX выбирает
+    предобработку и декодер. Если в папке только `inference.onnx`, подмодуль распознавания
+    переключается на движок onnxruntime: строки готовятся и декодируются как у PaddleX, меняется
+    лишь исполнитель сети. Устройство onnxruntime берёт у конвейера (gpu:0 → CUDA).
+    """
+    name = recognizer_name()
+    if not os.path.isdir(name):
+        return {"text_recognition_model_name": name}
+    import yaml
+
+    with open(os.path.join(name, "inference.yml"), encoding="utf-8") as stream:
+        model_name = yaml.safe_load(stream)["Global"]["model_name"]
+    kwargs = {"text_recognition_model_name": model_name, "text_recognition_model_dir": name}
+    has_paddle = os.path.exists(os.path.join(name, "inference.json"))
+    if os.path.exists(os.path.join(name, "inference.onnx")) and not has_paddle:
+        from paddleocr._pipelines.base import _merge_dicts
+        from paddlex.inference.pipelines import load_pipeline_config
+
+        # Словарь paddlex_config заменяет конфигурацию конвейера целиком, поэтому переопределение
+        # подмешивается к стандартной конфигурации OCR.
+        kwargs["paddlex_config"] = _merge_dicts(
+            load_pipeline_config("OCR"),
+            {"SubModules": {"TextRecognition": {"engine": "onnxruntime"}}},
+        )
+    return kwargs
 
 
 def detector_limits() -> dict:
@@ -58,7 +102,7 @@ def detector_limits() -> dict:
 
 
 def new_engine(device: str = "cpu"):
-    """Движок PaddleOCR: детектор строк из WINE_OCR_DET и восточнославянский распознаватель."""
+    """Движок PaddleOCR: детектор строк из WINE_OCR_DET, распознаватель из WINE_OCR_REC."""
     # Avoid a slow source reachability probe on every service startup.  PaddleX still
     # downloads a missing official model normally; installed models are used from cache.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -67,6 +111,7 @@ def new_engine(device: str = "cpu"):
     return Engine(
         device=device,
         text_detection_model_name=detector_name(),
+        **recognizer_kwargs(),
         **detector_limits(),
         **ENGINE_KWARGS,
     )

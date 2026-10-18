@@ -50,14 +50,16 @@ WORKDIR /app
 # этим интерпретатором и общается с ним по stdin/stdout. Замер 28.09: OCR 27 мс на GPU против
 # 1.4 с на CPU, /scan на живых кадрах train p95 3.3 → 1.9 с.
 # Два шага: у индекса Paddle есть свой старый paddleocr, а uv берёт пакет из первого индекса,
-# где его нашёл, — paddleocr ставится отдельно, только с PyPI.
+# где его нашёл, — paddleocr ставится отдельно, только с PyPI. onnxruntime-gpu — для русского
+# распознавателя PP-OCRv6 medium (models/ocr_rec/PP-OCRv6_medium_rec_ru, формат ONNX): PaddleX
+# запускает им только подмодуль распознавания, детектор строк остаётся на Paddle.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/ocr --python python3.12 \
     && uv pip install --python /opt/ocr/bin/python \
         --index-url https://pypi.org/simple \
         --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
         "paddlepaddle-gpu==3.3.1" \
-    && uv pip install --python /opt/ocr/bin/python "paddleocr==3.7.0"
+    && uv pip install --python /opt/ocr/bin/python "paddleocr==3.7.0" "onnxruntime-gpu==1.22.0"
 ENV WINE_OCR_PYTHON=/opt/ocr/bin/python \
     WINE_OCR_DEVICE=gpu:0
 

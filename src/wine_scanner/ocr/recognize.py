@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .worker import DEFAULT_DET, detector_limits, detector_name
+from .worker import DEFAULT_DET, DEFAULT_REC, detector_limits, detector_name, recognizer_key
 
 OCR_CACHE = Path("models/ocr_cache")
 
@@ -135,6 +135,10 @@ class LabelOCR:
         detector = detector_name()
         if detector != DEFAULT_DET:
             digest.update(f":{detector}".encode())
+        # Распознаватель по умолчанию (eslav) — так же: в ключ входит только другой.
+        recognizer = recognizer_key()
+        if recognizer != DEFAULT_REC:
+            digest.update(f":rec={recognizer}".encode())
         limits = detector_limits()
         if limits:
             digest.update(f":{sorted(limits.items())}".encode())
