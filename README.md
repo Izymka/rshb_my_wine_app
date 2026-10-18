@@ -121,7 +121,7 @@ scanner может оставаться на локальном сервере �
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform_sq_v3_fix WINE_DECIDER=models/decider_platform_sq_v3_v7 \
+WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_platform_sq_v3_v7 \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -135,9 +135,10 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
-| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3_fix`) |
+| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3_site_1810`: 2272 карточки, каталог сайта на 18.10.2026) |
 | `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_v7`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
+| `WINE_OCR_DET` | `PP-OCRv5_mobile_det` (в Docker и `.env.example` — `PP-OCRv6_medium_det`) | Детектор строк PaddleOCR; распознаватель всегда `eslav_PP-OCRv5_mobile_rec`. PP-OCRv6 medium на тесте 18.10: текст R@5 0.82 → 0.89, верных при пороге 0.4 87 → 89 из 100, общее время не растёт. Имя детектора входит в ключ кэша OCR |
 | `WINE_OCR_PYTHON`, `WINE_OCR_DEVICE` | —, `gpu:0` | Интерпретатор отдельного окружения с `paddlepaddle-gpu` и устройство PaddleOCR (`src/wine_scanner/ocr/worker.py`); в Docker заданы в образе (`/opt/ocr`). Пусто — OCR на CPU в отдельном процессе (`WINE_OCR_PROCESS=0` — в потоке сервиса) |
 | `WINE_VLM` | `0` (в Docker `1`) | `1` — VLM-судья между близнецами одной винодельни; работает только в `/v1/eval/predict` |
 | `WINE_EVAL_LOG`, `WINE_EVAL_LOG_DIR` | `0`, `data/eval_requests` | `WINE_EVAL_LOG=1` включает журнал всех POST-запросов `/v1/eval/predict`. В Docker каталог `./data/eval_requests` смонтирован в контейнер и сохраняет JSONL и оригинальные фото между перезапусками. Просмотр: `http://localhost:8080/v1/eval/logs` (или `/v1/eval/logs/data` для JSON). |
@@ -218,15 +219,22 @@ uv run python scripts/patch_index_crops.py --index models/index_platform_sq_v3_f
 
 Вина, появившиеся на сайте после дампа, заводит `add_site_wines.py`: свежий sitemap против
 `catalog.csv` → карточка со страницы вина → эталон → проверка вырезки (как
-`check_catalog_crops.py`) → ближайший сосед после whitening (почти совпадение — дубль) →
-самопоиск по трём псевдофото через весь пайплайн. В новый индекс и `catalog.csv` попадают только
-прошедшие; остальное — в `data/derived/site_add/report.jsonl` и `review.jpg`, код выхода 1.
+`check_catalog_crops.py`, плюс проверка содержимого вырезки SigLIP 2 — этикетка, а не горлышко) →
+ближайший сосед после whitening (почти совпадение — дубль) → самопоиск по трём псевдофото через
+весь пайплайн. В новый индекс и `catalog.csv` попадают только прошедшие; остальное — в
+`data/derived/site_add/report.jsonl` и `review.jpg`, код выхода 1. Обновлять раз в неделю и
+перед каждой проверкой: пробный проход → разбор `review.jpg` (свой квадрат — `source=manual` в
+`label_overrides.csv`, вырезка годится — `source=accepted`) → копия `catalog.csv` и
+`label_overrides.csv` → боевой проход в новую папку → `platform_benchmark.py` на новом индексе →
+`WINE_INDEX` в `.env`, `docker-compose.yml` и `scripts/release_scanner.py`. Фотографии,
+сменившиеся на сайте (`--update-images`), заменять только после просмотра: 18.10 у
+`muskat-premium` на сайте стояла фотография красного «Merlot».
 
 ```bash
-uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_partial \
+uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_site_1810 \
   --decider models/decider_platform_sq_v3_v7 --dry-run          # только проверки, ничего не пишет
-uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_partial \
-  --decider models/decider_platform_sq_v3_v7 --out models/index_platform_sq_v3_site
+uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_site_1810 \
+  --decider models/decider_platform_sq_v3_v7 --out models/index_platform_sq_v3_site_<дата>
 ```
 
 Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.

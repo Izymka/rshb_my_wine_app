@@ -21,7 +21,7 @@ FOLDER_ID = "1xZ1ye2XNLb3Zd6witTz5ZjVWpEfFdTmQ"
 FOLDER_URL = f"https://drive.google.com/drive/folders/{FOLDER_ID}"
 ARCHIVES = {
     "wine_scanner_artifacts.tar": (
-        "models/index_platform_sq_v3_fix",
+        "models/index_platform_sq_v3_site_1810",
         "models/decider_platform_sq_v3_v7",
         "models/rtdetr_label_recrop_bf16",
         "data/catalog/catalog.csv",
@@ -32,8 +32,8 @@ ARCHIVES = {
 }
 FILES = (*ARCHIVES, "SHA256SUMS", "README_DEPLOY.txt")
 ESSENTIAL = (
-    "models/index_platform_sq_v3_fix/vectors.faiss",
-    "models/index_platform_sq_v3_fix/meta.json",
+    "models/index_platform_sq_v3_site_1810/vectors.faiss",
+    "models/index_platform_sq_v3_site_1810/meta.json",
     "models/decider_platform_sq_v3_v7/model.cbm",
     "models/decider_platform_sq_v3_v7/meta.json",
     "models/rtdetr_label_recrop_bf16",
@@ -167,7 +167,7 @@ def digest(paths: list[Path]) -> str:
 
 
 def check_health() -> None:
-    index = ROOT / "models/index_platform_sq_v3_fix"
+    index = ROOT / "models/index_platform_sq_v3_site_1810"
     decider = ROOT / "models/decider_platform_sq_v3_v7"
     expected_version = {
         "index": digest([index / name for name in
