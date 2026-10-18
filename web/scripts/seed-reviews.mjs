@@ -10,9 +10,8 @@
 // телефон в цифры), а повторный запуск сначала удаляет прежних синтетических авторов вместе
 // с их полками и отзывами. Настоящие пользователи и их отзывы не трогаются.
 //
-// Скрипт самодостаточный (из пакетов — только postgres), поэтому в production его можно
-// запустить прямо в контейнере web: там postgres лежит в .output/server/node_modules.
-//   docker cp seed-reviews.mjs wine-scanner-web:/app/.output/server/
+// Скрипт самодостаточный (из пакетов — только postgres): образ web кладёт его рядом с
+// собранным сервером, и в production он запускается в контейнере web с его NUXT_DATABASE_URL:
 //   docker exec wine-scanner-web node .output/server/seed-reviews.mjs
 //
 // Флаги: --coverage 0.85 (доля вин с отзывами), --authors 240, --seed 42 (повторяемый набор),
