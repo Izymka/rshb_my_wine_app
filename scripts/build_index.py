@@ -24,7 +24,12 @@ from wine_scanner.detect import (
     build_cropper,
     detector_kind,
 )
-from wine_scanner.detect.reference_check import OVERRIDES, OverrideCropper, load_overrides
+from wine_scanner.detect.reference_check import (
+    ACCEPTED,
+    OVERRIDES,
+    OverrideCropper,
+    load_overrides,
+)
 from wine_scanner.embed import build_embedder, load_image, pick_device
 from wine_scanner.image_preprocess import LABEL_PREPROCESS_VERSION
 from wine_scanner.index import VectorIndex
@@ -154,7 +159,16 @@ def main() -> None:
     prepared_labels = bool(items) and all(item.payload.get("prepared_label") for item in items)
     # Поправки вырезки эталонов (scripts/check_catalog_crops.py): у этих карточек квадрат
     # этикетки задан файлом, а не каскадом. Запрос они не трогают.
-    overrides = load_overrides(args.label_overrides) if args.detect and not prepared_labels else {}
+    # source=accepted — вырезка каскада оставлена человеком: такая строка ничего не меняет.
+    overrides = (
+        {
+            slug: row
+            for slug, row in load_overrides(args.label_overrides).items()
+            if row.get("source") != ACCEPTED
+        }
+        if args.detect and not prepared_labels
+        else {}
+    )
     cropper = (
         CachedCropper(
             build_cropper(args.detect, args.weights, device, partial_min_score=args.bottle_partial),
@@ -194,7 +208,7 @@ def main() -> None:
             raise ValueError("Cannot reuse descriptors with different detector/preprocessing")
         old_meta = json.loads((args.reuse_from / "meta.json").read_text(encoding="utf-8"))
         for item_id, payload in zip(old_meta["item_ids"], old_meta["payloads"], strict=True):
-            if payload.get("vintage_box"):
+            if payload.get("vintage_box") and item_id not in overrides:
                 reused_boxes[item_id] = tuple(payload["vintage_box"])
         old_descriptors = args.reuse_from / "descriptors"
         if old_descriptors.exists() and not args.no_descriptors:
@@ -202,14 +216,24 @@ def main() -> None:
             if not target.exists():
                 args.out.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(old_descriptors, target)
+            # У карточек с поправкой вырезки дескрипторы старого индекса посчитаны по другому
+            # квадрату (той самой ошибке каскада): их пересчитывает цикл дескрипторов ниже.
+            store = DescriptorStore(target)
+            for slug in overrides:
+                path = store.path_for(slug)
+                if path.exists():
+                    path.unlink()
             print(
-                f"дескрипторы и боксы года взяты из {args.reuse_from}: боксов {len(reused_boxes)}"
+                f"дескрипторы и боксы года взяты из {args.reuse_from}: боксов {len(reused_boxes)}, "
+                f"пересчитываются у {len(overrides)} карточек с поправкой вырезки"
             )
 
     if args.no_vintage_boxes:
         boxes = {}
     elif reused_boxes:
         boxes = reused_boxes
+        # Боксы года у поправленных карточек тоже зависят от вырезки — считаются заново.
+        boxes.update(year_boxes([it for it in items if it.item_id in overrides], embedder.cropper))
     else:
         boxes = year_boxes(items, embedder.cropper)
 

@@ -41,6 +41,22 @@ def detector_name() -> str:
     return os.environ.get("WINE_OCR_DET") or DEFAULT_DET
 
 
+def detector_limits() -> dict:
+    """До какого размера детектор строк приводит кадр: WINE_OCR_DET_SIDE и WINE_OCR_DET_LIMIT.
+
+    По умолчанию у PaddleOCR 3.x `min` 64, то есть кадр идёт в детектор как есть. `max` N
+    ограничивает детектор N пикселями по длинной стороне, а строки для распознавателя всё равно
+    вырезаются из присланного кадра: на кадре в полном разрешении детектор работает на малом
+    размере, а распознаватель читает чёткие строки.
+    """
+    limits = {}
+    if os.environ.get("WINE_OCR_DET_SIDE"):
+        limits["text_det_limit_side_len"] = int(os.environ["WINE_OCR_DET_SIDE"])
+    if os.environ.get("WINE_OCR_DET_LIMIT"):
+        limits["text_det_limit_type"] = os.environ["WINE_OCR_DET_LIMIT"]
+    return limits
+
+
 def new_engine(device: str = "cpu"):
     """Движок PaddleOCR: детектор строк из WINE_OCR_DET и восточнославянский распознаватель."""
     # Avoid a slow source reachability probe on every service startup.  PaddleX still
@@ -48,7 +64,12 @@ def new_engine(device: str = "cpu"):
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddleocr import PaddleOCR as Engine
 
-    return Engine(device=device, text_detection_model_name=detector_name(), **ENGINE_KWARGS)
+    return Engine(
+        device=device,
+        text_detection_model_name=detector_name(),
+        **detector_limits(),
+        **ENGINE_KWARGS,
+    )
 
 
 def payload(result) -> dict:

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .worker import DEFAULT_DET, detector_name
+from .worker import DEFAULT_DET, detector_limits, detector_name
 
 OCR_CACHE = Path("models/ocr_cache")
 
@@ -135,6 +135,9 @@ class LabelOCR:
         detector = detector_name()
         if detector != DEFAULT_DET:
             digest.update(f":{detector}".encode())
+        limits = detector_limits()
+        if limits:
+            digest.update(f":{sorted(limits.items())}".encode())
         return self.cache_dir / f"{digest.hexdigest()}.json"
 
     def _paddle(self):

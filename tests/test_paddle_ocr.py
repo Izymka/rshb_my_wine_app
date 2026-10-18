@@ -29,3 +29,38 @@ def test_paddle_adapter_filters_confidence_and_normalizes_box():
     lines = ocr.read(Image.new("RGB", (200, 100), "white"))
     assert [(line.text, line.source) for line in lines] == [("МАССАНДРА", "paddle")]
     assert lines[0].box == (0.05, 0.2, 0.95, 0.4)
+
+
+def test_subprocess_worker_gets_absolute_interpreter_path(tmp_path, monkeypatch):
+    """`.venv-ocr/Scripts/python.exe` из .env: CreateProcess на Windows не находит путь с «/»."""
+    import subprocess
+
+    from wine_scanner.ocr.paddle import SubprocessPaddleOCR
+
+    python = tmp_path / "venv" / "python.exe"
+    python.parent.mkdir()
+    python.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_popen(args, **kwargs):
+        seen["args"] = args
+        raise Stop
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    ocr = SubprocessPaddleOCR(python="venv/python.exe", device="gpu:0")
+    try:
+        ocr._start()
+    except Stop:
+        pass
+    assert seen["args"][0] == str(python.resolve())
+    # Не файл (имя из PATH) — передаётся как есть.
+    ocr = SubprocessPaddleOCR(python="python", device="cpu")
+    try:
+        ocr._start()
+    except Stop:
+        pass
+    assert seen["args"][0] == "python"

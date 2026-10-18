@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw
 from ..image_preprocess import border_color, centered_square, crop_square, prepare_label_image
 from .audit import iou
 from .bottle import Box, CascadeCropper
+from .label_semantics import NOT_LABEL_BELOW
 
 # Поправки вырезки эталонов: slug → квадрат этикетки в пикселях исходного эталона. Пишет
 # `scripts/check_catalog_crops.py` (source=auto) или человек (source=manual); читают сборка
@@ -225,6 +226,8 @@ class ReferenceReview:
     crop: tuple[int, int, int, int]
     rect: tuple[int, int, int, int] | None = None
     retry: ReferenceCheck | None = None
+    # Оценка «этикетка минус горлышко/стекло» итоговой вырезки (label_semantics), если считали.
+    semantic: float | None = None
 
     @property
     def passed(self) -> bool:
@@ -237,9 +240,32 @@ class ReferenceReview:
 
 
 def review_reference(
-    cascade: CascadeCropper, image: Image.Image, decision: dict | None = None
+    cascade: CascadeCropper,
+    image: Image.Image,
+    decision: dict | None = None,
+    semantics=None,
 ) -> ReferenceReview:
-    """Проверить эталон и, если можно, починить вырезку. `decision` — строка поправок."""
+    """Проверить эталон и, если можно, починить вырезку. `decision` — строка поправок.
+
+    `semantics` (`label_semantics.LabelSemantics`) — вторая, независимая от рамок проверка:
+    итоговая вырезка, по которой считается вектор индекса, должна быть похожа на этикетку, а не
+    на горлышко, капсулу или пустое стекло. Не похожа — флаг `not_label` и разбор человеком.
+    Решение человека (`manual`, `accepted`) этой проверкой не перепроверяется.
+    """
+    review = _review_geometry(cascade, image, decision)
+    if semantics is None or review.status not in {"ok", "repaired"}:
+        return review
+    review.semantic = semantics.score(prepare_label_image(crop_square(image, review.square)))
+    if review.semantic < NOT_LABEL_BELOW:
+        review.check.flags.append("not_label")
+        review.status = "review"
+    return review
+
+
+def _review_geometry(
+    cascade: CascadeCropper, image: Image.Image, decision: dict | None
+) -> ReferenceReview:
+    """Геометрическая часть `review_reference`: флаги рамок и починка по маске."""
     check = check_reference(cascade, image)
     crop = label_square(cascade, check)
     if decision and decision.get("source") == ACCEPTED:

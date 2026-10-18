@@ -210,3 +210,24 @@ def test_yandex_without_key_is_backend_error(image, monkeypatch):
     monkeypatch.delenv("YANDEX_OCR_API_KEY", raising=False)
     with pytest.raises(OCRBackendError):
         YandexOCR(api_key=None, client=transport(lambda r: httpx.Response(200))).read(image)
+
+
+def test_detector_and_its_limits_enter_cache_key(tmp_path, image, monkeypatch):
+    from wine_scanner.ocr.worker import detector_limits
+
+    monkeypatch.delenv("WINE_OCR_DET", raising=False)
+    monkeypatch.delenv("WINE_OCR_DET_SIDE", raising=False)
+    monkeypatch.delenv("WINE_OCR_DET_LIMIT", raising=False)
+    ocr = LabelOCR(cache_dir=tmp_path)
+    default = ocr._cache_path(image)
+    assert detector_limits() == {}
+    # Детектор по умолчанию, названный явно, — тот же кэш: прежние файлы остаются годными.
+    monkeypatch.setenv("WINE_OCR_DET", "PP-OCRv5_mobile_det")
+    assert ocr._cache_path(image) == default
+    monkeypatch.setenv("WINE_OCR_DET", "PP-OCRv6_medium_det")
+    v6 = ocr._cache_path(image)
+    assert v6 != default
+    monkeypatch.setenv("WINE_OCR_DET_SIDE", "960")
+    monkeypatch.setenv("WINE_OCR_DET_LIMIT", "max")
+    assert detector_limits() == {"text_det_limit_side_len": 960, "text_det_limit_type": "max"}
+    assert ocr._cache_path(image) not in {default, v6}

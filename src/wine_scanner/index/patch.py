@@ -48,7 +48,13 @@ class IndexPatch:
         device=None,
         rerank_max_side: int = 640,
         rerank_points: int = 2048,
+        share: "IndexPatch | None" = None,
     ):
+        """`share` — уже открытый патч того же индекса: эмбеддер, XFeat и OCR берутся у него.
+
+        Без этого каждая копия грузила бы свой SigLIP 2 и поднимала свой OCR-воркер, а на 8 ГБ
+        видеопамяти три копии рядом со сканером самопоиска уже не помещаются.
+        """
         self.source = Path(index_dir)
         self.config = json.loads((self.source / "config.json").read_text(encoding="utf-8"))
         self.meta = json.loads((self.source / "meta.json").read_text(encoding="utf-8"))
@@ -57,21 +63,25 @@ class IndexPatch:
         self.vectors = index.reconstruct_n(0, index.ntotal)
         self.device = device or pick_device()
         self.weights = Path(str(self.config["weights"]).replace("\\", "/"))
-        self.embedder = build_embedder(
-            model_name=self.config["model"],
-            device=self.device,
-            cropper=None,
-            fit=self.config.get("fit", "pad"),
-            precision=self.config.get("precision", "fp32"),
-            size=self.config.get("size"),
-            descriptor=self.config.get("descriptor"),
-            pad_color=tuple(self.config.get("pad_color", (255, 255, 255))),
+        self.embedder = (
+            share.embedder
+            if share is not None
+            else build_embedder(
+                model_name=self.config["model"],
+                device=self.device,
+                cropper=None,
+                fit=self.config.get("fit", "pad"),
+                precision=self.config.get("precision", "fp32"),
+                size=self.config.get("size"),
+                descriptor=self.config.get("descriptor"),
+                pad_color=tuple(self.config.get("pad_color", (255, 255, 255))),
+            )
         )
         self.rerank_max_side = rerank_max_side
         self.rerank_points = rerank_points
-        self._cascade = None
-        self._matcher = None
-        self._ocr = None
+        self._cascade = share._cascade if share is not None else None
+        self._matcher = share._matcher if share is not None else None
+        self._ocr = share._ocr if share is not None else None
         self.target: Path | None = None
         self.store: DescriptorStore | None = None
 

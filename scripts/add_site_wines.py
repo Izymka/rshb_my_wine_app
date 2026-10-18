@@ -16,7 +16,10 @@
 2. **Вырезка этикетки** — `review_reference`, та же проверка, что `check_catalog_crops.py`:
    каскад индекса против маски переднего плана. `ok` и `repaired` (квадрат по маске, пишется в
    `label_overrides.csv`) проходят; `review` — лист `review.jpg`, человек ставит квадрат руками
-   (`source=manual`) или оставляет каскад (`source=accepted`) и запускает скрипт заново.
+   (`source=manual`) или оставляет каскад (`source=accepted`) и запускает скрипт заново. Итоговая
+   вырезка, по которой считается вектор, вдобавок проверяется по содержимому (`label_semantics`,
+   SigLIP 2): похожа на горлышко, капсулу или пустое стекло больше, чем на этикетку, — флаг
+   `not_label` и тоже `review` (`--no-semantic` выключает).
 3. **Вектор**: воспроизводимость индекса (пересчёт трёх старых карточек, cos ≥ 0.995), затем
    ближайший сосед нового вектора после whitening. Почти совпадение (cos ≥ `--dup-cos`) с
    карточкой, у которой другая картинка, — подозрение на дубль или хаб, на ручной разбор.
@@ -25,7 +28,9 @@
    `WineScanner` на временном индексе с новыми карточками. Вино должно быть top-1 хотя бы в
    `--min-hits` из них. Это проверка всей цепочки: вырезки запроса, вектора, дескрипторов XFeat
    и текстовой ветки по новой карточке. Фон размыт намеренно: на обычной полке каскад иногда
-   режет фоновую бутылку, и проба проверяла бы выбор бутылки, а не карточку.
+   режет фоновую бутылку, и проба проверяла бы выбор бутылки, а не карточку. Ошибку вырезки
+   эталона самопоиск не ловит: псевдофото сделано из той же картинки, и каскад на нём повторяет
+   ту же ошибку (кольеретка найдёт кольеретку). Её ловит только шаг 2.
 
 Итоговый индекс собирается из исходного заново и только с прошедшими винами, в `--out`
 (исходный не трогается: сервис читает `models/`). Строки `catalog.csv`, эталоны в
@@ -45,6 +50,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from PIL import Image
 
 from wine_scanner.catalog import PLATFORM_ROOT, vintage_from_name
@@ -194,6 +200,7 @@ def main() -> None:
     parser.add_argument("--min-hits", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-semantic", action="store_true", help="без проверки SigLIP 2")
     args = parser.parse_args()
     if not args.dry_run and args.out is None:
         parser.error("--out обязателен без --dry-run")
@@ -225,6 +232,12 @@ def main() -> None:
     md5_to_slugs = catalog.groupby("image_md5")["slug"].apply(list).to_dict()
     overrides = load_overrides(args.overrides)
     cascade = patch.cascade.detector
+    semantics = None
+    if not args.no_semantic:
+        from wine_scanner.detect.label_semantics import LabelSemantics
+
+        model = Path(str(patch.config["model"]).replace("\\", "/"))
+        semantics = LabelSemantics(model, patch.device)
 
     report: dict[str, dict] = {}
     wines: dict[str, dict] = {}
@@ -251,8 +264,12 @@ def main() -> None:
         image = load_image(flat)
         # Поправка вырезки относится к картинке: у сменившегося эталона старая не годится.
         decision = None if slug in changed else overrides.get(slug)
-        review = review_reference(cascade, image, decision)
-        entry["crop"] = {"status": review.status, "flags": review.check.flags}
+        review = review_reference(cascade, image, decision, semantics)
+        entry["crop"] = {
+            "status": review.status,
+            "flags": review.check.flags,
+            "semantic": None if review.semantic is None else round(review.semantic, 4),
+        }
         if not review.passed:
             review_tiles.append(
                 tile(
@@ -296,18 +313,25 @@ def main() -> None:
             else None,
         }
 
+    # Модель смысловой проверки больше не нужна, а видеопамять нужна сканеру самопоиска.
+    semantics = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # Шаг 4: самопоиск на временном индексе со всеми кандидатами.
+    trial = None
     if wines and args.probes:
         from wine_scanner.pipeline import WineScanner  # noqa: PLC0415 — тяжёлый
 
         temp = args.report / "index_staging"
         if temp.exists():
             shutil.rmtree(temp)
-        trial = IndexPatch(args.index, device=patch.device)
+        trial = IndexPatch(args.index, device=patch.device, share=patch)
         trial.open_target(temp)
         apply(trial, wines, originals_root=None)
         trial.save("added_from_site", {"staging": True})
-        scanner = WineScanner(index_dir=temp, decider_dir=args.decider)
+        # OCR-воркер общий с патчем: второй процесс Paddle на видеокарте не нужен.
+        scanner = WineScanner(index_dir=temp, decider_dir=args.decider, ocr=trial._ocr)
         for slug, wine in list(wines.items()):
             ranks = self_search(scanner, wine["source"], slug, args.probes, args.seed)
             report[slug]["self_search_ranks"] = ranks
@@ -334,7 +358,7 @@ def main() -> None:
 
     if wines and not args.dry_run:
         originals = args.catalog / "originals"
-        final = IndexPatch(args.index, device=patch.device)
+        final = IndexPatch(args.index, device=patch.device, share=trial or patch)
         final.open_target(args.out)
         apply(final, wines, originals_root=originals)
         final.save(

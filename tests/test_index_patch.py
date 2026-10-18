@@ -67,12 +67,12 @@ def test_add_appends_card_without_touching_source(index_dir, tmp_path):
     patch.save("added_from_site", {"added": ["c"]})
 
     out = tmp_path / "out"
-    meta = json.loads((out / "meta.json").read_text())
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
     assert meta["item_ids"] == ["a", "b", "c"] and meta["payloads"][2]["name"] == "Новое"
     saved = faiss.read_index(str(out / "vectors.faiss"))
     assert saved.ntotal == 3
     assert np.allclose(saved.reconstruct(2), vector)
-    config = json.loads((out / "config.json").read_text())
+    config = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert config["items"] == 3 and config["added_from_site"] == {"added": ["c"]}
     assert (out / "descriptors" / "c.npz").exists()
     # Исходный индекс не тронут.
@@ -89,3 +89,20 @@ def test_replace_breaks_hard_link_before_writing(index_dir, tmp_path):
     # Дескриптор исходного индекса (жёсткая ссылка) остался прежним, у копии — новый файл.
     assert (index_dir / "descriptors" / "a.npz").read_bytes() == b"old-a"
     assert (tmp_path / "out" / "descriptors" / "a.npz").read_bytes() != b"old-a"
+
+
+def test_shared_patch_reuses_models(index_dir, tmp_path, monkeypatch):
+    """Копия индекса для самопоиска и итоговая берут модели у первого патча, а не грузят свои."""
+    built = []
+    monkeypatch.setattr(
+        patch_module, "build_embedder", lambda **kwargs: built.append(1) or ColorEmbedder()
+    )
+    first = IndexPatch(index_dir, device="cpu")
+    first.open_target(tmp_path / "first")
+    first.add("c", {"slug": "c"}, Image.new("RGB", (8, 8), "red"))
+    second = IndexPatch(index_dir, device="cpu", share=first)
+    assert len(built) == 1
+    assert second.embedder is first.embedder
+    assert second._matcher is first._matcher and second._ocr is first._ocr
+    # Состояние индекса у копии своё: карточка первого патча в неё не попала.
+    assert "c" not in second.position and len(second.vectors) == 2

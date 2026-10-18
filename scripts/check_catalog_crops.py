@@ -15,6 +15,11 @@
   бутылка без бумажной этикетки, тетрапак, — запрос режется так же, и править один эталон вредно);
 - ``review`` — починить автоматически не удалось, нужен квадрат руками (лист `review.jpg`).
 
+Вторая, независимая от рамок проверка — `detect.label_semantics`: итоговая вырезка, по которой
+считается вектор индекса, должна быть похожа на этикетку, а не на горлышко, капсулу или пустое
+стекло (нулевой классификатор SigLIP 2). Не похожа — флаг ``not_label`` и ``review``.
+`--no-semantic` её выключает.
+
 Код выхода 1, если остались ``review``: так проверку можно ставить в сценарий заведения вин.
 Флаги ``no_bottle``, ``small_label``, ``low_score`` — предупреждения, а не ошибки вырезки.
 """
@@ -49,6 +54,7 @@ def main() -> None:
     parser.add_argument("--overrides", type=Path, default=OVERRIDES)
     parser.add_argument("--out", type=Path, default=Path("data/derived/catalog_crop_check"))
     parser.add_argument("--write-overrides", action="store_true")
+    parser.add_argument("--no-semantic", action="store_true", help="без проверки SigLIP 2")
     parser.add_argument(
         "--bottle-partial",
         type=float,
@@ -63,7 +69,13 @@ def main() -> None:
         if args.bottle_partial is not None
         else config.get("bottle_partial_min_score", 0.0)
     )
-    cascade = build_cropper("cascade", weights, pick_device(), partial_min_score=partial).detector
+    device = pick_device()
+    cascade = build_cropper("cascade", weights, device, partial_min_score=partial).detector
+    semantics = None
+    if not args.no_semantic:
+        from wine_scanner.detect.label_semantics import LabelSemantics
+
+        semantics = LabelSemantics(Path(str(config["model"]).replace("\\", "/")), device)
     items = load_platform()
     if args.slugs:
         wanted = set(args.slugs)
@@ -77,12 +89,13 @@ def main() -> None:
     report, tiles = [], {"repaired": [], "review": [], "manual": [], "accepted": []}
     for item in tqdm(items, desc="эталоны"):
         image = load_image(item.image_path)
-        review = review_reference(cascade, image, overrides.get(item.item_id))
+        review = review_reference(cascade, image, overrides.get(item.item_id), semantics)
         check, old_rect, new_rect, status = review.check, review.crop, review.rect, review.status
         row = {"slug": item.item_id, "name": item.payload.get("name"), **check.to_dict()}
         if review.retry is not None:
             row["retry"] = review.retry.to_dict()
         row.update(status=status, crop=list(old_rect), fixed=list(new_rect) if new_rect else None)
+        row["semantic"] = None if review.semantic is None else round(review.semantic, 4)
         report.append(row)
         if status != "ok":
             flags = ",".join(check.flags)

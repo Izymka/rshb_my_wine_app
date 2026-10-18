@@ -146,8 +146,11 @@ class SubprocessPaddleOCR(PaddleOCR):
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         # Путь к пакету воркеру не нужен и вреден: в его окружении нет torch.
         env.pop("PYTHONPATH", None)
+        # Относительный путь с «/» (.venv-ocr/Scripts/python.exe из .env) CreateProcess на
+        # Windows не находит — WinError 2. Существующий файл передаём абсолютным путём.
+        python = os.path.abspath(self.python) if os.path.isfile(self.python) else self.python
         process = subprocess.Popen(
-            [self.python, str(script), "--device", self.device],
+            [python, str(script), "--device", self.device],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             env=env,

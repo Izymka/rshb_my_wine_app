@@ -145,3 +145,38 @@ def test_review_reference_statuses():
     ImageDraw.Draw(neck).rectangle((170, 120, 230, 200), fill=(230, 10, 10))
     review = review_reference(good, neck)
     assert review.status == "review" and not review.passed
+
+
+class FakeSemantics:
+    """Оценка «этикетка минус горлышко» без модели: задаётся числом."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+
+    def score(self, crop):
+        self.calls += 1
+        return self.value
+
+
+def test_semantic_check_sends_non_label_crop_to_review():
+    from wine_scanner.detect.reference_check import review_reference
+
+    image = reference()
+    good = CascadeCropper(FixedBottle((100, 50, 300, 950)), RedLabel())
+    ok = review_reference(good, image, semantics=FakeSemantics(0.03))
+    assert ok.status == "ok" and ok.semantic == 0.03 and "not_label" not in ok.check.flags
+
+    # Геометрия довольна, но вырезка похожа на горлышко или стекло — нужен человек.
+    neck = review_reference(good, image, semantics=FakeSemantics(-0.02))
+    assert neck.status == "review" and not neck.passed and "not_label" in neck.check.flags
+
+    # Починенная вырезка проверяется тоже — по своему новому квадрату.
+    short = CascadeCropper(FixedBottle((100, 50, 300, 700)), RedLabel())
+    repaired = review_reference(short, image, semantics=FakeSemantics(-0.02))
+    assert repaired.status == "review" and repaired.rect is not None
+
+    # Решение человека смысловой проверкой не перепроверяется.
+    semantics = FakeSemantics(-0.5)
+    manual = review_reference(short, image, {"rect": (1, 2, 3, 4), "source": "manual"}, semantics)
+    assert manual.status == "manual" and semantics.calls == 0
