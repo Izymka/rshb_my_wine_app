@@ -1,12 +1,14 @@
 """Shared box selection, rectangular crops and cascade for RT-DETR."""
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
 
 from ..image_preprocess import centered_square, crop_square, square_rect
+from .audit import axis_iou, contains
 
 
 @dataclass
@@ -40,6 +42,14 @@ class BoxCropper:
     # этикетки (так каскад вёл себя и раньше, когда бутылка не находилась). Faster R-CNN: выкл.
     require_center: bool = False
     square_label: bool = False
+    # Победитель выбирается только среди рамок не ниже этого порога; рамки ниже участвуют лишь
+    # как расширение частичной (`partial_min_score`). 0 — все рамки, что отдал `detect`.
+    score_threshold: float = 0.0
+    # Расширение частичной рамки до полной (ступень бутылки). DETR без NMS на высокой вырезке
+    # уверенней находит «плечи и горлышко», чем бутылку целиком (0.75 против 0.20 у Endemy
+    # брют), а полная рамка при этом есть и содержит частичную. Если такая рамка не ниже этого
+    # порога — берём её. 0 — выключено (индексы, собранные до 18.10.2026).
+    partial_min_score: float = 0.0
 
     def detect(self, image: Image.Image) -> list[Box]:
         raise NotImplementedError
@@ -57,7 +67,8 @@ class BoxCropper:
         boxes = [b for b in boxes if b.area >= self.min_area_share * frame_area]
         if self.require_center:
             boxes = [b for b in boxes if b.x1 <= width / 2 <= b.x2 and b.y1 <= height / 2 <= b.y2]
-        if not boxes:
+        primary = [b for b in boxes if b.score >= self.score_threshold]
+        if not primary:
             return None
 
         def rank(box: Box) -> float:
@@ -67,7 +78,30 @@ class BoxCropper:
             centrality = 1.0 - (abs(cx - 0.5) + abs(cy - 0.5))
             return box.score * (box.area / frame_area) ** 0.5 * centrality
 
-        return max(boxes, key=rank)
+        best = max(primary, key=rank)
+        return self.expand_partial(best, boxes) if self.partial_min_score else best
+
+    # Полная рамка содержит частичную почти целиком, стоит на той же вертикали (а не накрывает
+    # соседнюю бутылку) и заметно выше её.
+    PARTIAL_INSIDE = 0.9
+    PARTIAL_X_IOU = 0.8
+    PARTIAL_TALLER = 1.2
+
+    def expand_partial(self, best: Box, boxes: list[Box]) -> Box:
+        """Рамка всей бутылки вместо рамки её верха, если детектор такую тоже нашёл."""
+        inner = (best.x1, best.y1, best.x2, best.y2)
+
+        def whole(box: Box) -> bool:
+            return (
+                box is not best
+                and box.score >= self.partial_min_score
+                and contains((box.x1, box.y1, box.x2, box.y2), inner) >= self.PARTIAL_INSIDE
+                and axis_iou(box.x1, box.x2, best.x1, best.x2) >= self.PARTIAL_X_IOU
+                and box.y2 - box.y1 >= self.PARTIAL_TALLER * (best.y2 - best.y1)
+            )
+
+        taller = [box for box in boxes if whole(box)]
+        return max(taller, key=lambda box: box.score) if taller else best
 
     def label_window(self, box: Box, size: tuple[int, int]) -> tuple[int, int, int, int]:
         """Оценить прямоугольник этикетки по рамке бутылки.
@@ -199,7 +233,10 @@ class CachedCropper:
             return Image.open(cached).convert("RGB")
         cropped = self.detector.crop(image)
         # Lossless cache: a cache hit must not change pixels relative to the first call.
-        cropped.save(cached, compress_level=1)
+        # Written via a temporary file: a parallel run must never read a half-written PNG.
+        partial = cached.with_name(f"{cached.stem}.{os.getpid()}.tmp")
+        cropped.save(partial, format="PNG", compress_level=1)
+        os.replace(partial, cached)
         return cropped
 
 

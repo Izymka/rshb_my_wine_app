@@ -36,7 +36,9 @@ services:
       WINE_EVAL_LOG_DIR: /app/data/eval_requests
       WINE_EVAL_LOG_USER: ${WINE_EVAL_LOG_USER:-}
       WINE_EVAL_LOG_PASSWORD: ${WINE_EVAL_LOG_PASSWORD:-}
-      WINE_INDEX: /app/models/index_platform_sq_v3
+      # Индекс с поправленной вырезкой 10 эталонов (data/catalog/label_overrides.csv,
+      # scripts/patch_index_crops.py); собран из index_platform_sq_v3.
+      WINE_INDEX: /app/models/index_platform_sq_v3_fix
       WINE_DECIDER: /app/models/decider_platform_sq_v3_v7
       # Порог отказа /scan вместо 0.533 из meta.json решающего слоя (см. api/main.py).
       WINE_THRESHOLD: ${WINE_THRESHOLD:-0.4}

@@ -17,7 +17,14 @@ from pathlib import Path
 from tqdm import tqdm
 
 from wine_scanner.catalog import CatalogItem, load_own, load_platform, load_xwines
-from wine_scanner.detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper, detector_kind
+from wine_scanner.detect import (
+    BOTTLE_PARTIAL_MIN_SCORE,
+    COCO_BOTTLE_MODEL,
+    CachedCropper,
+    build_cropper,
+    detector_kind,
+)
+from wine_scanner.detect.reference_check import OVERRIDES, OverrideCropper, load_overrides
 from wine_scanner.embed import build_embedder, load_image, pick_device
 from wine_scanner.image_preprocess import LABEL_PREPROCESS_VERSION
 from wine_scanner.index import VectorIndex
@@ -120,6 +127,18 @@ def main() -> None:
         "--ocr-preprocess", choices=["rgb", "gray", "clahe2", "clahe4"], default="rgb"
     )
     parser.add_argument("--pad-color", default="255,255,255")
+    parser.add_argument(
+        "--label-overrides",
+        type=Path,
+        default=OVERRIDES,
+        help="квадраты этикетки для эталонов, где каскад ошибается (check_catalog_crops.py)",
+    )
+    parser.add_argument(
+        "--bottle-partial",
+        type=float,
+        default=BOTTLE_PARTIAL_MIN_SCORE,
+        help="порог расширения частичной рамки бутылки до полной; 0 — как до 18.10.2026",
+    )
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp16")
     args = parser.parse_args()
     from wine_scanner.embed.branches import branch_image
@@ -133,14 +152,24 @@ def main() -> None:
     # PostgreSQL catalogue records point at already materialized canonical labels.  Sending
     # those through RT-DETR again would make index and online query use different pixels.
     prepared_labels = bool(items) and all(item.payload.get("prepared_label") for item in items)
+    # Поправки вырезки эталонов (scripts/check_catalog_crops.py): у этих карточек квадрат
+    # этикетки задан файлом, а не каскадом. Запрос они не трогают.
+    overrides = load_overrides(args.label_overrides) if args.detect and not prepared_labels else {}
+    cropper = (
+        CachedCropper(
+            build_cropper(args.detect, args.weights, device, partial_min_score=args.bottle_partial),
+            CROP_CACHE,
+        )
+        if args.detect and not prepared_labels
+        else None
+    )
+    if overrides:
+        cropper = OverrideCropper(cropper, overrides)
+        print(f"поправок вырезки: {len(overrides)} ({args.label_overrides})")
     embedder = build_embedder(
         model_name=args.model,
         device=device,
-        cropper=(
-            CachedCropper(build_cropper(args.detect, args.weights, device), CROP_CACHE)
-            if args.detect and not prepared_labels
-            else None
-        ),
+        cropper=cropper,
         fit="pad" if prepared_labels else args.fit,
         precision=args.precision,
         pad_color=tuple(map(int, args.pad_color.split(","))),
@@ -159,7 +188,9 @@ def main() -> None:
             "detect": args.detect,
             "label_sha256": file_hash(args.weights / "model.safetensors"),
         }
-        if any(old_config.get(k) != v for k, v in expected.items()):
+        # Порог расширения рамки бутылки меняет вырезку, а значит, и дескрипторы с боксами года.
+        partial_differs = old_config.get("bottle_partial_min_score", 0.0) != args.bottle_partial
+        if partial_differs or any(old_config.get(k) != v for k, v in expected.items()):
             raise ValueError("Cannot reuse descriptors with different detector/preprocessing")
         old_meta = json.loads((args.reuse_from / "meta.json").read_text(encoding="utf-8"))
         for item_id, payload in zip(old_meta["item_ids"], old_meta["payloads"], strict=True):
@@ -228,6 +259,7 @@ def main() -> None:
                 "detect": args.detect,
                 "detector": detector_kind(args.weights),
                 "bottle_model": COCO_BOTTLE_MODEL,
+                "bottle_partial_min_score": args.bottle_partial,
                 "fit": "pad" if prepared_labels else args.fit,
                 "preprocessing_version": LABEL_PREPROCESS_VERSION if prepared_labels else None,
                 "weights": str(args.weights),
@@ -240,6 +272,13 @@ def main() -> None:
                 "local_preprocess": args.local_preprocess,
                 "ocr_preprocess": args.ocr_preprocess,
                 "precision": args.precision,
+                "label_overrides": {
+                    "file": str(args.label_overrides),
+                    "sha256": file_hash(args.label_overrides),
+                    "slugs": sorted(overrides),
+                }
+                if overrides
+                else None,
             },
             ensure_ascii=False,
             indent=2,

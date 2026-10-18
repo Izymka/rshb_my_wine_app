@@ -23,14 +23,10 @@
 """
 
 import argparse
-import hashlib
-import re
-import time
-import urllib.request
 from pathlib import Path
 
 import pandas as pd
-from PIL import Image, ImageOps
+from PIL import Image
 from tqdm import tqdm
 
 from wine_scanner.catalog import (
@@ -42,54 +38,7 @@ from wine_scanner.catalog import (
     strapi_key,
     vintage_from_name,
 )
-
-SITEMAP = "https://vino-svoe.ru/wines-sitemap.xml"
-# Нулевые размеры — «не уменьшать»: отдаёт оригинал, проверено на нескольких карточках.
-SITE_ORIGINAL = "https://api.vino-svoe.ru/v1/img/str-api/0/0/resize/uploads/{file}"
-USER_AGENT = "Mozilla/5.0 (wine-scanner catalog builder)"
-SITEMAP_ENTRY = re.compile(
-    r"<url><loc>https://vino-svoe\.ru/wines/(?P<slug>[^<]+)</loc>"
-    r"(?:<lastmod>(?P<lastmod>[^<]*)</lastmod>)?.*?<image:loc>[^<]*/uploads/(?P<file>[^<]+)</image:loc>",
-    re.S,
-)
-
-BACKGROUND = (255, 255, 255)
-
-
-def digest(path: Path) -> str:
-    return hashlib.md5(path.read_bytes()).hexdigest()
-
-
-def fetch(url: str, timeout: float = 20.0, retries: int = 1) -> bytes | None:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read()
-        except Exception:  # noqa: BLE001 — любая сетевая беда лечится одинаково: повтором
-            if attempt == retries:
-                return None
-            time.sleep(1.0)
-    return None
-
-
-def load_sitemap(cache_path: Path, refresh: bool) -> pd.DataFrame:
-    """Опубликованные вина сайта: slug, файл эталона, дата правки.
-
-    Свежий sitemap качается, если кэша нет или попросили обновить; иначе читается кэш — сборка
-    каталога не должна зависеть от сети. Пустая таблица означает «sitemap недоступен», и тогда
-    всё сопоставление идёт по транслитерации.
-    """
-    if refresh or not cache_path.exists():
-        payload = fetch(SITEMAP)
-        if payload:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(payload)
-    if not cache_path.exists():
-        return pd.DataFrame(columns=["slug", "lastmod", "file"])
-    xml = cache_path.read_text(encoding="utf-8")
-    rows = [(m["slug"], m["lastmod"] or "", m["file"]) for m in SITEMAP_ENTRY.finditer(xml)]
-    return pd.DataFrame(rows, columns=["slug", "lastmod", "file"])
+from wine_scanner.site import SITE_ORIGINAL, digest, fetch, flatten, load_sitemap
 
 
 def match_by_sitemap(
@@ -133,22 +82,6 @@ def match_by_name(dump: pd.DataFrame, uploads: dict[str, list[Path]]) -> pd.Data
         else:
             rows.append((row.slug, "missing", None))
     return pd.DataFrame(rows, columns=["slug", "match", "source_file"])
-
-
-def flatten(source: Path, target: Path) -> tuple[int, int, str]:
-    """Сохранить эталон композитным RGB. Возвращает размер и исходный режим."""
-    image = ImageOps.exif_transpose(Image.open(source))
-    width, height = image.size
-    mode = image.mode
-    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
-        rgba = image.convert("RGBA")
-        canvas = Image.new("RGB", rgba.size, BACKGROUND)
-        canvas.paste(rgba, mask=rgba.getchannel("A"))
-        image = canvas
-    else:
-        image = image.convert("RGB")
-    image.save(target, format="PNG")
-    return width, height, mode
 
 
 def main() -> None:

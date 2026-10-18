@@ -520,7 +520,11 @@ class WineScanner:
         """Обрезка ровно та же, которой строился индекс."""
         detect = self.config.get("detect", "cascade")
         detector = build_cropper(
-            detect, weights, device, bottle_model=self.config.get("bottle_model", COCO_BOTTLE_MODEL)
+            detect,
+            weights,
+            device,
+            bottle_model=self.config.get("bottle_model", COCO_BOTTLE_MODEL),
+            partial_min_score=self.config.get("bottle_partial_min_score", 0.0),
         )
         # Кэш кропов ключуется путём файла и его временем правки — для загруженного по сети
         # снимка это бессмысленно, поэтому в сервисе он выключен.

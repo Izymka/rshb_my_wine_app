@@ -32,6 +32,22 @@ def iou(a, b):
     return intersection / union if union else 0.0
 
 
+def contains(outer, inner) -> float:
+    """Доля площади `inner`, лежащая внутри `outer` (1.0 — целиком внутри)."""
+    intersection = max(0, min(outer[2], inner[2]) - max(outer[0], inner[0])) * max(
+        0, min(outer[3], inner[3]) - max(outer[1], inner[1])
+    )
+    area = max(0, inner[2] - inner[0]) * max(0, inner[3] - inner[1])
+    return intersection / area if area else 0.0
+
+
+def axis_iou(a0, a1, b0, b1) -> float:
+    """IoU двух отрезков на одной оси."""
+    intersection = max(0, min(a1, b1) - max(a0, b0))
+    union = max(a1, b1) - min(a0, b0)
+    return intersection / union if union > 0 else 0.0
+
+
 def annotations(root: Path) -> dict:
     """Preserve label/bottle classes; never mistake a bottle for a label."""
     records = {}

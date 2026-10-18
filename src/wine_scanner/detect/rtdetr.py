@@ -41,6 +41,7 @@ class RTDetrDetector(BoxCropper):
         margin: float = 0.08,
         mode: str = "bottle",
         square_label: bool = False,
+        partial_min_score: float = 0.0,
     ):
         from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 
@@ -53,6 +54,11 @@ class RTDetrDetector(BoxCropper):
         # уверенность в нужной бутылке 0.3–0.45, а 0.6 достаётся горлышку соседа. От горлышка
         # защищает минимальная площадь рамки, а не порог (замер 18.09 на кадрах eval и полки).
         self.score_threshold = score_threshold
+        # Рамки ниже порога нужны только как кандидаты на расширение частичной (BoxCropper.pick).
+        self.partial_min_score = partial_min_score
+        self.detect_threshold = (
+            min(score_threshold, partial_min_score) if partial_min_score else score_threshold
+        )
         self.min_area_share = min_area_share
         self.require_center = require_center
         self.margin = margin
@@ -72,6 +78,7 @@ class RTDetrDetector(BoxCropper):
         self.cache_tag = (
             f"rtdetr:{name}:{target}:{mode}:t{score_threshold}"
             f":a{min_area_share}:c{int(require_center)}"
+            + (f":e{partial_min_score}" if partial_min_score else "")
         )
 
     @torch.inference_mode()
@@ -88,7 +95,7 @@ class RTDetrDetector(BoxCropper):
         outputs = self.model(pixel_values=inputs["pixel_values"].to(self.device))
         results = self.processor.post_process_object_detection(
             outputs,
-            threshold=self.score_threshold,
+            threshold=self.detect_threshold,
             target_sizes=torch.tensor([[im.height, im.width] for im in images]),
         )
         batches = []

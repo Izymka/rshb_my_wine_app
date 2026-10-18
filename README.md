@@ -121,7 +121,7 @@ scanner может оставаться на локальном сервере �
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform_sq_v3 WINE_DECIDER=models/decider_platform_sq_v3_v7 \
+WINE_INDEX=models/index_platform_sq_v3_fix WINE_DECIDER=models/decider_platform_sq_v3_v7 \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -135,7 +135,7 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
-| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3`) |
+| `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3_fix`) |
 | `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_v7`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_OCR_PYTHON`, `WINE_OCR_DEVICE` | —, `gpu:0` | Интерпретатор отдельного окружения с `paddlepaddle-gpu` и устройство PaddleOCR (`src/wine_scanner/ocr/worker.py`); в Docker заданы в образе (`/opt/ocr`). Пусто — OCR на CPU в отдельном процессе (`WINE_OCR_PROCESS=0` — в потоке сервиса) |
@@ -169,6 +169,7 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 
 ```bash
 uv run python scripts/build_catalog.py                      # data/catalog/: catalog.csv + originals/<slug>.png
+uv run python scripts/check_catalog_crops.py --write-overrides  # вырезка этикетки на эталонах -> label_overrides.csv
 uv run python scripts/build_index.py --catalog platform --detect cascade --fit pad \
   --model models/siglip2 --weights models/rtdetr_label_recrop_bf16 --local-preprocess clahe2 \
   --out models/index_platform_sq_v3                          # ~1 ч на RTX 4060 Ti
@@ -185,6 +186,47 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
   --out models/decider_platform_sq_v3_v7                    # параметры v6, признаки v7
 uv run python eval/threshold_selection.py --decider models/decider_platform_sq_v3_v7 \
   --apply utility                                           # порог по пользе, бутстреп по винодельням
+```
+
+Вырезка этикетки на эталоне каталога проверяется отдельно: ошибка детектора на эталоне не видна
+нигде, кроме ответов, а повторяется на каждом запросе этого вина. `check_catalog_crops.py`
+сравнивает рамку бутылки с маской переднего плана вырезки (эталон — бутылка на белом), ищет
+этикетку, обрезанную краем рамки, найденную в горлышке или не найденную вовсе, и при обрезанной
+бутылке повторяет каскад с бутылкой по маске. Починенные квадраты пишутся в
+`data/catalog/label_overrides.csv` (`source=auto`); туда же человек вписывает свой квадрат
+(`manual`) или решение «оставить как есть» (`accepted`). `build_index.py` применяет поправки
+сам. Чтобы не пересобирать весь каталог, исправленные карточки можно пересчитать в копии индекса:
+
+```bash
+uv run python scripts/check_catalog_crops.py --slugs <новые slug> --write-overrides  # при заведении вин
+uv run python scripts/patch_index_crops.py --index models/index_platform_sq_v3 \
+  --out models/index_platform_sq_v3_fix                      # вектор, XFeat, бокс года — только у поправок
+```
+
+Главный режим ошибки на эталонах — первая ступень каскада: на высокой вырезке детектор бутылки
+уверенней находит её верх, чем бутылку целиком, хотя полная рамка у него тоже есть.
+`BoxCropper.partial_min_score` берёт полную рамку, если она содержит выбранную, стоит на той же
+вертикали и уверенность не ниже порога (0.15). Порог хранится в `config.json` индекса
+(`bottle_partial_min_score`) и тем же значением режет запрос; у индекса без поля правило выключено.
+Перевести готовый индекс на правило без пересборки (пересчитываются только карточки, у которых
+сменилась вырезка):
+
+```bash
+uv run python scripts/patch_index_crops.py --index models/index_platform_sq_v3_fix \
+  --out models/index_platform_sq_v3_partial --recrop 0.15
+```
+
+Вина, появившиеся на сайте после дампа, заводит `add_site_wines.py`: свежий sitemap против
+`catalog.csv` → карточка со страницы вина → эталон → проверка вырезки (как
+`check_catalog_crops.py`) → ближайший сосед после whitening (почти совпадение — дубль) →
+самопоиск по трём псевдофото через весь пайплайн. В новый индекс и `catalog.csv` попадают только
+прошедшие; остальное — в `data/derived/site_add/report.jsonl` и `review.jpg`, код выхода 1.
+
+```bash
+uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_partial \
+  --decider models/decider_platform_sq_v3_v7 --dry-run          # только проверки, ничего не пишет
+uv run python scripts/add_site_wines.py --index models/index_platform_sq_v3_partial \
+  --decider models/decider_platform_sq_v3_v7 --out models/index_platform_sq_v3_site
 ```
 
 Веса детектора этикетки (`models/rtdetr_label`) обучаются `scripts/train_rtdetr.py`.

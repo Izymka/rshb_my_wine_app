@@ -6,6 +6,7 @@ from .dataset import CocoDetectionDataset, collate, split_by_wine
 from .rtdetr import COCO_BOTTLE_MODEL, RTDetrDetector
 
 __all__ = [
+    "BOTTLE_PARTIAL_MIN_SCORE",
     "COCO_BOTTLE_MODEL",
     "Box",
     "BoxCropper",
@@ -31,7 +32,18 @@ def detector_kind(weights: str | Path) -> str:
     return "rtdetr"
 
 
-def bottle_detector(kind: str, device, mode: str = "bottle", bottle_model: str = COCO_BOTTLE_MODEL):
+# Порог расширения частичной рамки бутылки для новых индексов (BoxCropper.partial_min_score).
+# Индекс хранит своё значение в config.json → `bottle_partial_min_score`; нет поля — 0, выкл.
+BOTTLE_PARTIAL_MIN_SCORE = 0.15
+
+
+def bottle_detector(
+    kind: str,
+    device,
+    mode: str = "bottle",
+    bottle_model: str = COCO_BOTTLE_MODEL,
+    partial_min_score: float = 0.0,
+):
     if kind != "rtdetr":
         raise ValueError("Only RT-DETR is supported")
     return RTDetrDetector(
@@ -41,22 +53,27 @@ def bottle_detector(kind: str, device, mode: str = "bottle", bottle_model: str =
         mode=mode,
         min_area_share=0.05,
         require_center=True,
+        partial_min_score=partial_min_score,
     )
 
 
 def build_cropper(
-    detect: str | None, weights: str | Path, device, bottle_model: str = COCO_BOTTLE_MODEL
+    detect: str | None,
+    weights: str | Path,
+    device,
+    bottle_model: str = COCO_BOTTLE_MODEL,
+    partial_min_score: float = 0.0,
 ):
     """Shared crop path for catalog, API and benchmarks."""
     if detect is None:
         return None
     if detect in {"bottle", "label"}:
-        return bottle_detector("rtdetr", device, detect, bottle_model)
+        return bottle_detector("rtdetr", device, detect, bottle_model, partial_min_score)
     if detect not in {"cascade", "trained"}:
         raise ValueError(f"Unknown crop mode: {detect}")
     detector_kind(weights)
     label = RTDetrDetector(Path(weights), target="label", device=device, square_label=True)
     if detect == "trained":
         return PreparedLabelCropper(label)
-    bottle = bottle_detector("rtdetr", device, "bottle", bottle_model)
+    bottle = bottle_detector("rtdetr", device, "bottle", bottle_model, partial_min_score)
     return PreparedLabelCropper(CascadeCropper(bottle, label))
