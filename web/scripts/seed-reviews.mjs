@@ -10,12 +10,16 @@
 // телефон в цифры), а повторный запуск сначала удаляет прежних синтетических авторов вместе
 // с их полками и отзывами. Настоящие пользователи и их отзывы не трогаются.
 //
+// Скрипт самодостаточный (из пакетов — только postgres), поэтому в production его можно
+// запустить прямо в контейнере web: там postgres лежит в .output/server/node_modules.
+//   docker cp seed-reviews.mjs wine-scanner-web:/app/.output/server/
+//   docker exec wine-scanner-web node .output/server/seed-reviews.mjs
+//
 // Флаги: --coverage 0.85 (доля вин с отзывами), --authors 240, --seed 42 (повторяемый набор),
 // --wines файл.json (список вин вместо портала, формат ответа items[]), --clear (только удалить),
 // --dry-run (посчитать и ничего не писать).
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { DISHES } from "../utils/shelf.mjs";
 
 const PORTAL = "https://api.vino-svoe.ru/v1/wines";
 const SEED_PHONE = "seed:";
@@ -119,7 +123,7 @@ function dishesFor(style) {
   if (chance(0.1)) return ["Без еды"];
   const out = sample(PAIRINGS[style].filter((d) => d !== "Без еды"), chance(0.55) ? 1 : 2);
   if (chance(0.05)) out.push("Другое");
-  return [...new Set(out)].filter((d) => DISHES.includes(d));
+  return [...new Set(out)];
 }
 
 const LIKED = {
