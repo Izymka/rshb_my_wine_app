@@ -1,26 +1,36 @@
 <script setup lang="ts">
-// Экран 1 (камера) и экран 2 (ожидание). Камера — системная: <input capture>
-// открывает её на телефоне без разрешений и без своего видоискателя, а на компьютере
-// превращается в выбор файла. После ответа — переход на карточку или отказ.
-const { preview, error, busy, elapsedMs, scan, retry, canRetry, cancel, reset } = useScan();
+// Главная (1a) и распознавание (1b). Камера — системная: <input capture> открывает её на телефоне
+// без разрешений и без своего видоискателя, а на компьютере превращается в выбор файла.
+// Шаги распознавания идут по таймеру: сервис отвечает одним ответом, а видимый ход работы
+// делает ожидание короче. Последний шаг закрывается только ответом сервиса.
+import { winePath } from "~/utils/shelf.mjs";
+const { preview, error, busy, scan, retry, canRetry, cancel, reset } = useScan();
 const router = useRouter();
 const { online } = useConnectivity();
+const { entries } = useShelf();
 const cameraInput = ref<HTMLInputElement>();
 const galleryInput = ref<HTMLInputElement>();
-const slow = ref(false);
-let slowTimer: ReturnType<typeof setTimeout> | null = null;
+const step = ref(0);
+const found = useState("scan.found", () => false);
+let timers: ReturnType<typeof setTimeout>[] = [];
 
-// Сбой сервиса или сети — тот же кадр можно отправить ещё раз; нечитаемый файл — нет.
-const retryable = computed(
-  () => error.value !== null && error.value !== "unreadable" && canRetry(),
-);
+const steps = ["Нашли бутылку в кадре", "Читаем этикетку", "Сравниваем с каталогом"];
+const recent = computed(() => entries.value.slice(0, 3));
+const retryable = computed(() => error.value !== null && error.value !== "unreadable" && canRetry());
 
+function clearTimers() { timers.forEach(clearTimeout); timers = []; }
 async function run(send: () => Promise<boolean>) {
-  slow.value = false;
-  slowTimer = setTimeout(() => (slow.value = true), 3000);
+  clearTimers();
+  step.value = 0;
+  found.value = false;
+  timers.push(setTimeout(() => (step.value = 1), 700), setTimeout(() => (step.value = 2), 1700));
   const ok = await send();
-  if (slowTimer) clearTimeout(slowTimer);
-  if (ok) router.push("/result");
+  clearTimers();
+  if (!ok) return;
+  step.value = 3;
+  found.value = true;
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  router.push("/result");
 }
 
 async function onFile(event: Event) {
@@ -31,67 +41,91 @@ async function onFile(event: Event) {
   await run(() => scan(file));
 }
 
-function onRetry() {
-  run(retry);
-}
-
-onMounted(reset);
+function stop() { clearTimers(); cancel(); }
+onMounted(() => { found.value = false; reset(); });
+onBeforeUnmount(clearTimers);
 </script>
 
 <template>
-  <div class="page">
+  <!-- 1b: распознавание -->
+  <div v-if="busy || found" class="page">
+    <div class="viewfinder busy">
+      <img v-if="preview" class="frame-photo" :src="preview" alt="ваш кадр" />
+      <div class="corners"><span /><span /><span /><span /></div>
+      <div class="scan-line" />
+      <div class="frame-label"><i class="ph ph-image" />Ваш кадр</div>
+    </div>
+    <div class="row" style="gap: 14px; padding: 4px 4px 0">
+      <Mascot :size="64" mood="wow" />
+      <div class="grow">
+        <div class="serif" style="font-size: 22px; line-height: 1.2">{{ found ? "Нашли! Открываем карточку" : "Ищем в каталоге…" }}</div>
+        <div class="small muted" style="margin-top: 4px">Обычно это 2–3 секунды</div>
+      </div>
+    </div>
+    <div class="steps" style="padding: 0 4px" role="status" aria-live="polite">
+      <div v-for="(label, i) in steps" :key="label" :class="{ pending: i > step }">
+        <span class="mark">
+          <span v-if="i === step" class="spinner" />
+          <i v-else-if="i < step" class="ph-fill ph-check-circle" />
+        </span>
+        {{ label }}
+      </div>
+    </div>
+    <div style="margin-top: auto">
+      <button v-if="!found" class="btn btn-outline" @click="stop">Отменить</button>
+    </div>
+  </div>
+
+  <!-- 1a: главная -->
+  <div v-else class="page with-tabs">
     <header class="topbar">
-      <img src="/icon.png" alt="" />
-      <div>
+      <img class="logo" src="/icon.png" alt="" />
+      <div class="grow">
         <div class="brand">Своё Вино</div>
         <div class="sub">сканер этикеток российских вин</div>
       </div>
+      <span class="pill" :class="online ? 'online' : 'offline'"><span class="dot" />{{ online ? "онлайн" : "без сети" }}</span>
     </header>
 
-    <NuxtLink class="shelf-nav" to="/wines">Мои вина →</NuxtLink>
-
-    <div class="viewfinder">
-      <img v-if="preview" :src="preview" alt="снятый кадр" :class="{ pulse: busy }" />
-      <div v-else class="placeholder">
-        <div class="glyph">🍷</div>
-        <div>Наведите камеру на этикетку</div>
-        <div class="small muted" style="margin-top: 6px">Бутылка — главная в кадре, этикетка целиком</div>
-      </div>
-      <div class="frame"><i /></div>
-      <div v-if="busy" class="hint row" style="justify-content: center">
-        <span class="spinner" style="width: 18px; height: 18px; border-width: 2px" />
-        <span>{{ slow ? "Ещё ищем — сравниваем с каталогом…" : "Ищем в каталоге…" }}</span>
-      </div>
+    <div class="viewfinder idle">
+      <div class="corners"><span /><span /><span /><span /></div>
+      <div class="scan-line" />
+      <div class="bubble-say">{{ online ? "Наведите на этикетку — я найду вино в каталоге" : "Без сети не найду вино, но полка работает" }}</div>
+      <Mascot :size="84" :mood="online ? 'happy' : 'meh'" />
     </div>
 
-    <div v-if="error" class="error">
+    <div v-if="error" class="error" role="alert">
       <template v-if="error === 'unreadable'">Файл не похож на фотографию. Попробуйте снять ещё раз.</template>
       <template v-else-if="error === 'network'">Нет связи с сервисом. Проверьте сеть и повторите.</template>
       <template v-else-if="error === 'starting'">Сервис ещё запускается — подождите полминуты.</template>
       <template v-else>Сервис временно недоступен. Попробуйте чуть позже.</template>
-      <button v-if="retryable" class="btn btn-secondary error-retry" :disabled="!online" @click="onRetry">
-        Повторить запрос
-      </button>
+      <div class="row" style="margin-top: 10px">
+        <button v-if="retryable" class="btn btn-primary error-retry" style="min-height: 44px; margin: 0" :disabled="!online" @click="run(retry)">Повторить запрос</button>
+        <button class="btn btn-text" style="min-height: 44px; width: auto" @click="reset">Скрыть</button>
+      </div>
     </div>
 
-    <template v-if="!busy">
-      <button class="btn btn-primary" :disabled="!online" @click="cameraInput?.click()">
-        <span>📷</span> Сканировать этикетку
-      </button>
-      <button class="btn btn-secondary" :disabled="!online" @click="galleryInput?.click()">Выбрать из галереи</button>
+    <div class="stack" style="gap: 8px">
+      <button class="btn btn-primary btn-big" :disabled="!online" @click="cameraInput?.click()"><i class="ph-bold ph-camera" />Сканировать этикетку</button>
+      <button class="btn btn-text" :disabled="!online" @click="galleryInput?.click()"><i class="ph ph-images" style="font-size: 19px" />Выбрать из галереи</button>
       <input ref="cameraInput" type="file" accept="image/*" capture="environment" hidden @change="onFile" />
       <input ref="galleryInput" type="file" accept="image/*,.heic" hidden @change="onFile" />
-    </template>
-    <button v-else class="btn btn-ghost" @click="cancel">Отменить</button>
-
-    <p v-if="error" class="small muted" style="text-align: center; margin: 0">
-      <a href="#" @click.prevent="reset">Скрыть сообщение</a>
-    </p>
-
-    <div class="card cream small">
-      <b>Как снимать.</b> Сфотографируйте этикетку на бутылке, можно взять бутылку в руки. Блики и наклон не мешают.
     </div>
 
-    <div class="footer">каталог платформы «Своё Вино» · {{ elapsedMs ? `последний ответ ${elapsedMs} мс` : "" }}</div>
+    <div class="tips">
+      <div><i class="ph ph-frame-corners" />Этикетка целиком</div>
+      <div><i class="ph ph-sun" />Блики не мешают</div>
+      <div><i class="ph ph-hand" />Можно в руке</div>
+    </div>
+
+    <section v-if="recent.length" class="stack" style="padding-top: 4px">
+      <div class="head-row"><span style="font-size: 15px; font-weight: 600">Недавно на полке</span><NuxtLink to="/wines">Все {{ entries.length }}</NuxtLink></div>
+      <div class="grid-3">
+        <NuxtLink v-for="w in recent" :key="w.slug" class="mini-wine" :to="winePath(w.slug)">
+          <div style="height: 48px; display: flex; align-items: flex-end"><WineBottle :slug="w.slug" :card="w.card" :height="48" :label="false" /></div>
+          <div class="name">{{ w.card.name }}</div>
+        </NuxtLink>
+      </div>
+    </section>
   </div>
 </template>
