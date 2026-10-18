@@ -13,11 +13,29 @@ const { ready, find, add, update, remove } = useShelf();
 const { enabled, user } = useAuth();
 const { data: community, refresh: refreshCommunity } = useCommunity(() => props.slug);
 const { remember } = useSeenCards();
+const { data: catalog } = useCatalog(() => props.slug);
+const portal = computed(() => catalog.value?.portal || null);
 const entry = computed(() => find(props.slug));
 
-const tags = computed(() => wineTags(props.card, props.slug));
+const tags = computed(() => {
+  const list = wineTags(props.card, props.slug);
+  if (portal.value?.alcohol) list.push(`${String(portal.value.alcohol).replace(".", ",")}%`);
+  return list;
+});
+// Как на портале: 4,93, а не округлённые 5,0; целое — с запятой, 5,0.
+const ratingText = computed(() => {
+  const r = portal.value?.rating || 0;
+  return (Number.isInteger(r) ? r.toFixed(1) : String(Number(r.toFixed(2)))).replace(".", ",");
+});
+// Народный рейтинг портала звёздами: полная, половина (от ,25 до ,75) или пустая.
+const stars = computed(() => {
+  const r = portal.value?.rating;
+  if (!r) return [];
+  return [1, 2, 3, 4, 5].map((i) => (r >= i - 0.25 ? "ph-fill ph-star" : r >= i - 0.75 ? "ph-fill ph-star-half" : "ph ph-star"));
+});
 const notes = computed(() => aromas(props.card.description));
-const temp = computed(() => servingTemp(props.card, props.slug));
+// Температура портала точнее общего правила по стилю вина.
+const temp = computed(() => (portal.value?.temperature ? `${portal.value.temperature.replace("-", "–")}°` : servingTemp(props.card, props.slug)));
 const descOpen = ref(false);
 const sheet = ref(false);
 const confirmRemove = ref(false);
@@ -78,6 +96,15 @@ watch(() => [props.slug, props.analogues], () => {
     <div class="wine-sub">{{ card.winery }}<template v-if="card.region"> · {{ card.region }}</template></div>
     <div v-if="tags.length" class="tags" style="margin-top: 12px"><span v-for="t in tags" :key="t" class="tag">{{ t }}</span></div>
   </div>
+
+  <a v-if="portal?.rating" class="card rating" :href="portal.url" target="_blank" rel="noopener">
+    <span class="num">{{ ratingText }}</span>
+    <span class="grow">
+      <span class="stars" :aria-label="`${portal.rating} из 5`"><i v-for="(cls, i) in stars" :key="i" :class="cls" /></span>
+      <span class="cap">Народный рейтинг на «Своё Вино»</span>
+    </span>
+    <span class="go"><i class="ph ph-arrow-up-right" /></span>
+  </a>
 
   <slot name="extra" />
 
