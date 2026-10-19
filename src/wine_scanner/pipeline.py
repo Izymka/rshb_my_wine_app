@@ -336,6 +336,9 @@ class WineScanner:
         # eval/decider_feature_ablation.py): близнецов лучше не различает, решающий слой на таких
         # признаках хуже (170.7 против 173 из 196 живых), без ужатия p95 13.6 с. Выключено.
         self.ocr_fullres = os.environ.get("WINE_OCR_FULLRES", "0") == "1"
+        # WINE_OCR_LABEL_ONLY=1 — строки OCR, центр которых лежит за левым или правым краем
+        # найденной этикетки, отбрасываются: это соседние бутылки на полке (`_label_lines`).
+        self.ocr_label_only = os.environ.get("WINE_OCR_LABEL_ONLY", "0") == "1"
         # WINE_LABEL_RULE=1 — отвечать ниже порога по подтверждённой этикетке (границы в meta).
         # Выключено: на train (+7 верных, +3 ложных из 246 незнакомых) правило выглядело
         # безопасным, но незнакомые там в основном импорт; на тесте ложные приёмы незнакомых
@@ -556,6 +559,36 @@ class WineScanner:
         prepared = self.cropper.crop(image)
         return prepared, prepared
 
+    def _crop_for_scan(self, image: Image.Image, key: str | None):
+        """`_crop` и края этикетки в долях ширины вырезки — для WINE_OCR_LABEL_ONLY, иначе None."""
+        if self.ocr_label_only and not self.ocr_fullres and self.cropper is not None:
+            if isinstance(self.cropper, CachedCropper) and key:
+                prepared, span = self.cropper.with_span(Path(key), image)
+                return prepared, prepared, span
+            if hasattr(self.cropper, "crop_with_span"):
+                prepared, span = self.cropper.crop_with_span(image)
+                return prepared, prepared, span
+        return (*self._crop(image, key), None)
+
+    # Запас за краем этикетки, в долях ширины вырезки: рамка детектора бывает чуть уже
+    # этикетки, а строка у самого края — своя.
+    LABEL_SPAN_PAD = 0.03
+
+    @classmethod
+    def _label_lines(cls, lines: list, span: tuple[float, float] | None) -> list:
+        """Строки, центр которых лежит в пределах этикетки по горизонтали (`WINE_OCR_LABEL_ONLY`).
+
+        Без рамки или без координат строки остаются: лучше прочитать лишнее, чем потерять своё.
+        """
+        if span is None:
+            return lines
+        left, right = span[0] - cls.LABEL_SPAN_PAD, span[1] + cls.LABEL_SPAN_PAD
+        kept = []
+        for line in lines:
+            if line.box is None or left <= (line.box[0] + line.box[2]) / 2 <= right:
+                kept.append(line)
+        return kept
+
     def _candidate_descriptor(self, item_id: str) -> dict | None:
         """Локальные признаки карточки каталога.
 
@@ -582,7 +615,9 @@ class WineScanner:
             branch_image(self._crop(load_image(path), key)[0], self.local_preprocess), cache_key=key
         )
 
-    def _text_branch(self, crop: Image.Image, use_cache: bool) -> dict:
+    def _text_branch(
+        self, crop: Image.Image, use_cache: bool, label_span: tuple[float, float] | None = None
+    ) -> dict:
         """Текстовая ветка целиком: распознать этикетку и найти по тексту кандидатов.
 
         Вынесена в отдельный метод, чтобы её можно было запустить в потоке параллельно
@@ -598,6 +633,7 @@ class WineScanner:
             lines, route = self.ocr.read_with_route(image, use_cache=use_cache)
         else:
             lines, route = self.ocr.read(image, use_cache=use_cache), None
+        lines = self._label_lines(lines, label_span)
         text = LabelOCR.joined(lines)
         timings["ocr"] = time.perf_counter() - started
 
@@ -726,7 +762,7 @@ class WineScanner:
             timings[name] = time.perf_counter() - start
 
         with stage("crop"):
-            crop, ocr_crop = self._crop(image, image_key)
+            crop, ocr_crop, label_span = self._crop_for_scan(image, image_key)
         from .embed.branches import branch_image
 
         local_crop = branch_image(crop, self.local_preprocess)
@@ -754,13 +790,13 @@ class WineScanner:
             # p95 3.79/3.32 с.
             head = [h.item_id for h in visual[: max(1, self.prematch)]]
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="text") as pool:
-                future = pool.submit(self._text_branch, ocr_crop, use_cache)
+                future = pool.submit(self._text_branch, ocr_crop, use_cache, label_span)
                 with stage("rerank"):
                     query_features = self.matcher.describe(local_crop)
                     self._match(query_features, head, matches)
                 text_result = future.result()
         else:
-            text_result = self._text_branch(ocr_crop, use_cache)
+            text_result = self._text_branch(ocr_crop, use_cache, label_span)
             with stage("rerank"):
                 query_features = self.matcher.describe(local_crop)
 

@@ -441,6 +441,14 @@ def main() -> None:
     parser.add_argument(
         "--monotone", default="", help="имя:+1 / имя:-1 через запятую или «text»"
     )
+    parser.add_argument(
+        "--no-class-weights",
+        action="store_true",
+        help="убрать auto_class_weights из параметров --params-from. На train OOF без "
+        "выравнивания верных столько же, AUROC на трудных незнакомых 0.870 → 0.920, но тест "
+        "это не подтвердил: 95 → 93 верных, всегда-ответ 98 → 95 из 101, финальная проверка "
+        "100 → 97 (19.10, data/derived/decider_audit_1910) — в сервис не пошло",
+    )
     args = parser.parse_args()
 
     global RIVALS, VETO
@@ -458,6 +466,10 @@ def main() -> None:
     if args.params_from is not None:
         source = json.loads((args.params_from / "meta.json").read_text(encoding="utf-8"))
         names, params = tuple(source["feature_names"]), dict(source["params"])
+        if args.no_class_weights:
+            params.pop("auto_class_weights", None)
+    elif args.no_class_weights:
+        parser.error("--no-class-weights работает только с --params-from")
     extra = [n for n in args.add_features.split(",") if n and n not in names]
     unknown = [n for n in extra if n not in FEATURE_NAMES]
     if unknown:

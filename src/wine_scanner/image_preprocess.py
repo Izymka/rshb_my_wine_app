@@ -99,5 +99,15 @@ class PreparedLabelCropper:
         raw = self.detector.crop(image)
         return raw, prepare_label_image(raw)
 
+    def crop_with_span(self, image: Image.Image):
+        """Подготовленная вырезка и края этикетки в долях её ширины (см. CascadeCropper).
+
+        Квадрат масштабируется равномерно, поэтому доли от подготовки не меняются.
+        """
+        if not hasattr(self.detector, "crop_with_span"):
+            return self.crop(image), None
+        raw, span = self.detector.crop_with_span(image)
+        return prepare_label_image(raw), span
+
     def __call__(self, path, image: Image.Image) -> Image.Image:
         return self.crop(image)

@@ -70,7 +70,16 @@ def load(decider: Path, features: Path) -> dict:
         "cluster": np.array(keys),
         "wine": [r["wine"] for r in rows],
         "group": [group[r["query"]] for r in rows],
+        "query": [r["query"] for r in rows],
     }
+
+
+def is_easy_unknown(query: str) -> bool:
+    """Незнакомое из `data/own` — заграничные вина, снятые во Вьетнаме: ни винодельни, ни
+    похожей этикетки в каталоге нет, отказ им даётся всегда (на OOF abd ни один из 123 кадров не
+    получил ответа). Трудные незнакомые — российские вина из `data/train`, чаще всего соседи
+    знакомых по винодельне или линейке."""
+    return Path(query).parts[1:2] == ("own",)
 
 
 def curves(raw, correct, known) -> dict:
@@ -136,9 +145,25 @@ def main() -> None:
         help="записать порог этого правила (медиану по бутстрепу) и калибровку по всем живым "
         "кадрам в meta.json решающего слоя",
     )
+    parser.add_argument(
+        "--unknowns",
+        choices=["all", "hard"],
+        default="all",
+        help="по каким незнакомым считать ложные приёмы: all — все живые; hard — без "
+        "заграничных вин data/own, которым отказ даётся всегда: с ними доля ложных приёмов "
+        "занижена вдвое и порог выходит ниже нужного. Калибровка в обоих случаях по всем живым",
+    )
     args = parser.parse_args()
 
     data = load(args.decider, args.features)
+    # Платт — по всем живым: перевод сырого выхода в вероятность не должен зависеть от того,
+    # по каким незнакомым выбирается порог.
+    weight, bias = TD.calibrate_on(data["raw"], data["correct"])
+    if args.unknowns == "hard":
+        pairs = zip(data["known"], data["query"], strict=True)
+        keep = np.array([k or not is_easy_unknown(q) for k, q in pairs])
+        print(f"незнакомые из data/own не участвуют в выборе порога: {int((~keep).sum())} кадров")
+        data = {k: np.asarray(v)[keep] for k, v in data.items()}
     raw, correct, known, cluster = data["raw"], data["correct"], data["known"], data["cluster"]
     groups = np.array(data["group"])
     clusters = np.unique(cluster)
@@ -149,7 +174,6 @@ def main() -> None:
         f"незнакомых {sum(c.startswith('unknown:') for c in clusters)})"
     )
 
-    weight, bias = TD.calibrate_on(raw, correct)
     probe = Decider(booster=None, calib_weight=weight, calib_bias=bias, threshold=0.0)
 
     rules = {
@@ -251,6 +275,7 @@ def main() -> None:
                 "probability_threshold": chosen["probability_threshold"],
                 "oob": chosen["oob"], "budget": args.budget, "share": args.share,
                 "c_wrong": args.c_wrong, "c_fa": args.c_fa, "boot": args.boot,
+                "unknowns": args.unknowns,
             },
         )
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

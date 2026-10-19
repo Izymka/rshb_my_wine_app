@@ -1,6 +1,7 @@
 """Shared box selection, rectangular crops and cascade for RT-DETR."""
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -239,6 +240,31 @@ class CachedCropper:
         os.replace(partial, cached)
         return cropped
 
+    def with_span(self, path: Path, image: Image.Image):
+        """Вырезка из кэша и края этикетки в долях её ширины (`CascadeCropper.crop_with_span`).
+
+        Края лежат рядом с картинкой в `<ключ>.span.json`. Кэш, собранный до них, дополняется
+        при первом обращении: детектор прогоняется ещё раз только ради рамки.
+        """
+        cached = self._key(path)
+        sidecar = cached.with_suffix(".span.json")
+        if cached.exists() and sidecar.exists():
+            span = json.loads(sidecar.read_text(encoding="utf-8"))
+            return Image.open(cached).convert("RGB"), tuple(span) if span else None
+        if not hasattr(self.detector, "crop_with_span"):
+            return self(path, image), None
+        cropped, span = self.detector.crop_with_span(image)
+        if not cached.exists():
+            partial = cached.with_name(f"{cached.stem}.{os.getpid()}.tmp")
+            cropped.save(partial, format="PNG", compress_level=1)
+            os.replace(partial, cached)
+        else:
+            cropped = Image.open(cached).convert("RGB")
+        partial = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.tmp")
+        partial.write_text(json.dumps(list(span) if span else None), encoding="utf-8")
+        os.replace(partial, sidecar)
+        return cropped, span
+
 
 class CascadeCropper:
     """Двухступенчатая обрезка: сначала бутылка, потом этикетка внутри неё.
@@ -259,6 +285,32 @@ class CascadeCropper:
 
     def crop(self, image: Image.Image) -> Image.Image:
         return self.crop_with_metadata(image)[0]
+
+    def crop_with_span(
+        self, image: Image.Image
+    ) -> tuple[Image.Image, tuple[float, float] | None]:
+        """Квадрат этикетки и её левый и правый край в долях ширины квадрата.
+
+        Квадрат строится по длинной стороне этикетки, поэтому у высокой этикетки по бокам
+        попадают соседние бутылки, и OCR читает их строки вместе с нужными (полка «Массандры»:
+        «МУСКАТ», «КРАСНОГО» у соседей). По краям этикетки эти строки можно отбросить. None —
+        этикетку детектор не нашёл, края неизвестны.
+        """
+        if not self.label.square_label:
+            return self.crop(image), None
+        bottle_box = self.bottle.locate(image)
+        bottle_rect = self.bottle.crop_rect(bottle_box, image.size) if bottle_box else None
+        source = image.crop(bottle_rect) if bottle_rect else image
+        box = self.label.locate(source)
+        if box is None:
+            crop, _, _ = self.crop_with_metadata(image)
+            return crop, None
+        dx, dy = bottle_rect[:2] if bottle_rect else (0, 0)
+        frame_box = Box(box.x1 + dx, box.y1 + dy, box.x2 + dx, box.y2 + dy, box.score)
+        rect = self.label.crop_rect(frame_box, image.size)
+        side = rect[2] - rect[0]
+        span = ((frame_box.x1 - rect[0]) / side, (frame_box.x2 - rect[0]) / side)
+        return crop_square(image, rect), span
 
     def crop_with_metadata(
         self, image: Image.Image
