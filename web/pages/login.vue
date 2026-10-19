@@ -8,6 +8,7 @@ const route = useRoute();
 const auth = useAuth();
 const shelf = useShelf();
 const reviews = useReviews();
+const { goal } = useMetrika();
 
 type Step = "phone" | "code" | "profile" | "welcome";
 const step = ref<Step>("phone");
@@ -45,15 +46,25 @@ function onPhone(e: Event) {
 function onCode(e: Event) {
   code.value = (e.target as HTMLInputElement).value.replace(/\D/g, "").slice(0, 4);
   (e.target as HTMLInputElement).value = code.value;
-  if (code.value.length === 4) void verify();
+  if (code.value.length === 4) void verify("typed");
+}
+function fillDemo() {
+  code.value = demoCode.value!;
+  void verify("demo");
+}
+function toggleHelp() {
+  help.value = !help.value;
+  if (help.value) goal("auth_code_help");
 }
 
 async function sendCode() {
   if (!phoneOk.value || busy.value) return;
+  const resend = step.value === "code";
   busy.value = true;
   error.value = "";
   try {
     const r = await auth.requestCode(phone.value);
+    goal(resend ? "auth_code_resend" : "auth_code_request", { demo: Boolean(r.demoCode) });
     demoCode.value = r.demoCode;
     resendAt.value = Date.now() + r.retryIn * 1000;
     code.value = "";
@@ -63,18 +74,22 @@ async function sendCode() {
   } catch (e) {
     const retryIn = (e as { data?: { data?: { retryIn?: number } } }).data?.data?.retryIn;
     if (retryIn && demoCode.value) { step.value = "code"; resendAt.value = Date.now() + retryIn * 1000; }
-    else error.value = apiError(e, "Не удалось отправить код. Проверьте сеть.");
+    else {
+      error.value = apiError(e, "Не удалось отправить код. Проверьте сеть.");
+      goal("auth_error", { step: "phone" });
+    }
   } finally {
     busy.value = false;
   }
 }
 
-async function verify() {
+async function verify(via: "typed" | "demo") {
   if (busy.value) return;
   busy.value = true;
   error.value = "";
   try {
-    await auth.verify(phone.value, code.value);
+    const r = await auth.verify(phone.value, code.value);
+    goal("auth_login", { new_user: r.isNew, via });
     if (!auth.complete.value) {
       name.value = auth.user.value?.name || "";
       adult.value = auth.user.value?.adult || false;
@@ -82,6 +97,7 @@ async function verify() {
     } else await finish();
   } catch (e) {
     error.value = apiError(e, "Не удалось проверить код. Проверьте сеть.");
+    goal("auth_error", { step: "code" });
     code.value = "";
     if (codeInput.value) codeInput.value.value = "";
   } finally {
@@ -95,9 +111,11 @@ async function saveProfile() {
   error.value = "";
   try {
     await auth.updateProfile({ name: name.value, adult: true });
+    goal("auth_profile_complete");
     await finish();
   } catch (e) {
     error.value = apiError(e);
+    goal("auth_error", { step: "profile" });
   } finally {
     busy.value = false;
   }
@@ -114,6 +132,7 @@ async function finish() {
     } catch { /* отзыв остался на полке — опубликовать можно из карточки */ }
   }
   step.value = "welcome";
+  goal("auth_welcome", { merged: merged.value, review_published: Boolean(publishedWine.value), redirect: redirect.value });
 }
 
 function back() {
@@ -178,7 +197,7 @@ useHead({ title: "Вход — Своё Вино" });
       <div v-if="demoCode" class="demo-code" role="status">
         <i class="ph ph-chat-centered-dots" style="font-size: 26px; color: var(--sand-ink)" />
         <div class="grow"><div class="small" style="color: var(--sand-ink)">Демо-режим: СМС не отправляется, ваш код</div><b>{{ demoCode }}</b></div>
-        <button class="chip" @click="code = demoCode!; verify()">Ввести</button>
+        <button class="chip" @click="fillDemo">Ввести</button>
       </div>
       <label class="code-boxes">
         <span v-for="i in 4" :key="i" :class="{ active: i - 1 === code.length }">{{ code[i - 1] || "" }}</span>
@@ -192,7 +211,7 @@ useHead({ title: "Вход — Своё Вино" });
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <div style="flex: 1" />
       <div style="text-align: center">
-        <button class="link" style="padding: 10px" @click="help = !help">Не приходит код?</button>
+        <button class="link" style="padding: 10px" @click="toggleHelp">Не приходит код?</button>
         <p v-if="help" class="small muted" style="margin-top: 4px">СМС-провайдер пока не подключён — код показан на экране выше.</p>
       </div>
     </template>

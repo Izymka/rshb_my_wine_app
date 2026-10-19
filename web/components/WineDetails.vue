@@ -16,6 +16,11 @@ const { remember } = useSeenCards();
 const { data: catalog } = useCatalog(() => props.slug);
 const portal = computed(() => catalog.value?.portal || null);
 const entry = computed(() => find(props.slug));
+const metrika = useMetrika();
+const { goal } = metrika;
+// Ответ сканера открывается с back="/", сохранённое вино и аналоги — по ссылке.
+const source = computed(() => (props.back === "/" ? "scan" : "link"));
+const item = () => ({ slug: props.slug, card: props.card });
 
 const tags = computed(() => {
   const list = wineTags(props.card, props.slug);
@@ -47,19 +52,48 @@ const shareLine = computed(() => {
   return { icon: "ph-globe-hemisphere-east", text: mine.value.anonymous ? "Опубликован анонимно" : `Опубликован в отзывах от имени ${user.value?.name || "вас"}` };
 });
 
+function save(via: "button" | "rate") {
+  if (!add(props.slug, props.card, props.analogues || [])) return;
+  goal("shelf_add", { slug: props.slug, via, source: source.value });
+  metrika.ecommerce("add", item());
+}
 function rate() {
-  if (!entry.value) add(props.slug, props.card, props.analogues || []);
+  goal("review_open", { slug: props.slug, rated: Boolean(entry.value?.reaction) });
+  if (!entry.value) save("rate");
   sheet.value = true;
+}
+function setStatus(status: string) {
+  if (entry.value?.status === status) return;
+  update(props.slug, { status: status as "want" | "home" | "tried" });
+  goal("shelf_status", { slug: props.slug, status });
 }
 async function share() {
   const url = `${location.origin}${winePath(props.slug)}`;
   try {
-    if (navigator.share) await navigator.share({ title: String(props.card.name || "Вино"), text: `${props.card.name} — ${props.card.winery}`, url });
-    else { await navigator.clipboard.writeText(url); toast.value = "Ссылка скопирована"; setTimeout(() => (toast.value = ""), 2500); }
+    if (navigator.share) {
+      await navigator.share({ title: String(props.card.name || "Вино"), text: `${props.card.name} — ${props.card.winery}`, url });
+      goal("wine_share", { slug: props.slug, method: "native" });
+    } else {
+      await navigator.clipboard.writeText(url);
+      goal("wine_share", { slug: props.slug, method: "clipboard" });
+      toast.value = "Ссылка скопирована";
+      setTimeout(() => (toast.value = ""), 2500);
+    }
   } catch { /* пользователь закрыл системное меню */ }
 }
+function toggleDescription() {
+  descOpen.value = !descOpen.value;
+  if (descOpen.value) goal("wine_description_open", { slug: props.slug });
+}
+function askRemove() {
+  confirmRemove.value = true;
+  goal("shelf_remove_ask", { slug: props.slug });
+}
 async function deleteWine() {
-  if (remove(props.slug)) await navigateTo("/wines");
+  if (!remove(props.slug)) return;
+  goal("shelf_remove", { slug: props.slug });
+  metrika.ecommerce("remove", item());
+  await navigateTo("/wines");
 }
 function goBack() {
   if (props.back) return navigateTo(props.back);
@@ -69,6 +103,12 @@ function goBack() {
 onMounted(() => {
   if (route.hash === "#review" && entry.value) sheet.value = true;
 });
+// Просмотр карточки — цель и «просмотр товара» электронной коммерции.
+watch(() => props.slug, () => {
+  if (!import.meta.client) return;
+  goal("wine_view", { slug: props.slug, source: source.value, on_shelf: Boolean(entry.value) });
+  metrika.ecommerce("detail", item());
+}, { immediate: true });
 watch(() => props.slug, () => { confirmRemove.value = false; descOpen.value = false; });
 // Аналоги открываются по тапу — страница вина найдёт их карточки здесь.
 watch(() => [props.slug, props.analogues], () => {
@@ -81,7 +121,7 @@ watch(() => [props.slug, props.analogues], () => {
     <button class="icon-btn" aria-label="Назад" @click="goBack"><i class="ph ph-arrow-left" /></button>
     <div class="grow" />
     <button class="icon-btn" aria-label="Поделиться" @click="share"><i class="ph ph-share-network" /></button>
-    <NuxtLink class="icon-btn" to="/" aria-label="Сканировать ещё"><i class="ph ph-scan" /></NuxtLink>
+    <NuxtLink class="icon-btn" to="/" aria-label="Сканировать ещё" @click="goal('wine_scan_more', { slug })"><i class="ph ph-scan" /></NuxtLink>
   </div>
   <p v-if="toast" class="pill online" role="status" style="align-self: center">{{ toast }}</p>
 
@@ -97,7 +137,7 @@ watch(() => [props.slug, props.analogues], () => {
     <div v-if="tags.length" class="tags" style="margin-top: 12px"><span v-for="t in tags" :key="t" class="tag">{{ t }}</span></div>
   </div>
 
-  <a v-if="portal?.rating" class="card rating" :href="portal.url" target="_blank" rel="noopener">
+  <a v-if="portal?.rating" class="card rating" :href="portal.url" target="_blank" rel="noopener" @click="goal('portal_open', { slug })">
     <span class="num">{{ ratingText }}</span>
     <span class="grow">
       <span class="stars" :aria-label="`${portal.rating} из 5`"><i v-for="(cls, i) in stars" :key="i" :class="cls" /></span>
@@ -112,7 +152,7 @@ watch(() => [props.slug, props.analogues], () => {
     <div class="section-title">О вине</div>
     <template v-if="card.description">
       <p class="desc" :class="{ clamp: !descOpen }">{{ card.description }}</p>
-      <button class="link" style="align-self: flex-start" @click="descOpen = !descOpen">{{ descOpen ? "Свернуть" : "Читать полностью" }}</button>
+      <button class="link" style="align-self: flex-start" @click="toggleDescription">{{ descOpen ? "Свернуть" : "Читать полностью" }}</button>
     </template>
     <div v-if="notes.length || temp" class="chips">
       <span v-for="a in notes" :key="a.label" class="aroma"><i :class="['ph', a.icon]" :style="{ color: a.color }" />{{ a.label }}</span>
@@ -126,7 +166,7 @@ watch(() => [props.slug, props.analogues], () => {
     <template v-else-if="entry">
       <div class="head-row"><span class="section-title">На моей полке</span><span class="small muted" style="font-size: 12px">с {{ shelfDate(entry.addedAt) }}</span></div>
       <div class="segment" role="group" aria-label="Статус на полке">
-        <button v-for="(label, value) in STATUS" :key="value" :class="{ on: entry.status === value }" :aria-pressed="entry.status === value" @click="update(slug, { status: value })">{{ label }}</button>
+        <button v-for="(label, value) in STATUS" :key="value" :class="{ on: entry.status === value }" :aria-pressed="entry.status === value" @click="setStatus(value)">{{ label }}</button>
       </div>
       <div v-if="entry.reaction" class="my-review">
         <div class="row" style="gap: 8px">
@@ -140,7 +180,7 @@ watch(() => [props.slug, props.analogues], () => {
     </template>
     <template v-else>
       <div><div class="section-title">Запомните это вино</div><p class="small muted" style="margin-top: 4px">Сохраните на полку, чтобы вернуться к нему без камеры.</p></div>
-      <button class="btn btn-primary" @click="add(slug, card, analogues || [])"><i class="ph-bold ph-books" />Сохранить в мои вина</button>
+      <button class="btn btn-primary" @click="save('button')"><i class="ph-bold ph-books" />Сохранить в мои вина</button>
       <button class="btn btn-accent-outline" @click="rate"><i class="ph ph-pencil-simple" />Оценить вино</button>
     </template>
   </section>
@@ -152,7 +192,7 @@ watch(() => [props.slug, props.analogues], () => {
   <section v-if="analogues && analogues.length" class="stack">
     <div class="section-title">Похожие вина других виноделен</div>
     <div class="grid-3">
-      <NuxtLink v-for="a in analogues.slice(0, 3)" :key="a.slug" class="analogue" :to="winePath(a.slug)">
+      <NuxtLink v-for="a in analogues.slice(0, 3)" :key="a.slug" class="analogue" :to="winePath(a.slug)" @click="goal('analogue_open', { slug: a.slug, from: slug })">
         <div style="height: 84px; display: flex; align-items: flex-end; justify-content: center"><WineBottle :slug="a.slug" :card="a" :height="84" /></div>
         <div class="name">{{ a.name }}</div>
         <div class="w">{{ a.winery }}</div>
@@ -163,7 +203,7 @@ watch(() => [props.slug, props.analogues], () => {
   <slot name="bottom" />
 
   <div v-if="entry" style="display: flex; flex-direction: column; align-items: center; gap: 10px">
-    <button v-if="!confirmRemove" class="quiet-link" @click="confirmRemove = true"><i class="ph ph-trash" />Удалить с полки</button>
+    <button v-if="!confirmRemove" class="quiet-link" @click="askRemove"><i class="ph ph-trash" />Удалить с полки</button>
     <div v-else class="card cream stack" style="width: 100%">
       <p>Удалить вино, оценку и заметку? Напоминание тоже будет отменено.</p>
       <div class="grid-2">

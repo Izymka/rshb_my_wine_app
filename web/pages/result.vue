@@ -5,6 +5,7 @@ import { similarKnown, winePath } from "~/utils/shelf.mjs";
 const { preview, result, reset } = useScan();
 const { remember } = useSeenCards();
 const router = useRouter();
+const { goal } = useMetrika();
 
 if (!result.value) {
   // Прямой заход без сканирования (обновили страницу) — назад к камере.
@@ -30,11 +31,13 @@ const shelfCard = computed(() => ({
 }));
 
 function again() {
+  goal("scan_again", { answered: Boolean(answered.value), wrong: wrong.value });
   reset();
   router.push("/");
 }
 
-function pick(c: { item_id: string; card: Record<string, unknown> }) {
+function pick(c: { item_id: string; card: Record<string, unknown> }, position: number) {
+  goal("scan_candidate_pick", { slug: c.item_id, position: position + 1, wrong: wrong.value });
   // Пользователь выбрал вино из похожих — показываем его карточку как ответ.
   const knownCards = [
     ...(r.value.analogues || []),
@@ -48,6 +51,18 @@ function pick(c: { item_id: string; card: Record<string, unknown> }) {
   pickedYear.value = null;
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
+function notThis() {
+  goal("scan_wrong_wine", { slug: shownSlug.value });
+  wrong.value = true;
+}
+function pickYear(year: string) {
+  pickedYear.value = year;
+  goal("vintage_pick", { year, guess: r.value.vintage?.year ?? undefined });
+}
+function openAnalogue(slug: string) {
+  goal("analogue_open", { slug, from: "not_recognized" });
+  remember(r.value.analogues || []);
+}
 useHead({ title: computed(() => (answered.value ? `${card.value.name} — Своё Вино` : "Не узнали вино — Своё Вино")) });
 </script>
 
@@ -58,7 +73,7 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
         <div v-if="preview" class="row small muted">
           <img class="photo" style="width: 44px; height: 58px" :src="preview" alt="ваш кадр" />
           <span class="grow">Ваш кадр — смотрели именно на эту бутылку</span>
-          <button class="link" @click="wrong = true">Не то вино?</button>
+          <button class="link" @click="notThis">Не то вино?</button>
         </div>
         <!-- Вопрос о годе: один тап -->
         <div v-if="r.vintage && (r.vintage.year || r.vintage.ask)" class="card cream">
@@ -69,8 +84,8 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
           <div v-else class="stack" style="gap: 8px">
             <div style="font-weight: 600">Какой год на бутылке?</div>
             <div class="chips">
-              <button v-for="y in yearChoices" :key="y" class="chip" :class="{ on: pickedYear === String(y) }" @click="pickedYear = String(y)">{{ y }}</button>
-              <button class="chip" :class="{ on: pickedYear === 'нет' }" @click="pickedYear = 'нет'">не знаю</button>
+              <button v-for="y in yearChoices" :key="y" class="chip" :class="{ on: pickedYear === String(y) }" @click="pickYear(String(y))">{{ y }}</button>
+              <button class="chip" :class="{ on: pickedYear === 'нет' }" @click="pickYear('нет')">не знаю</button>
             </div>
           </div>
         </div>
@@ -113,7 +128,7 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
 
       <section v-if="r.candidates.length" class="stack">
         <div class="section-title">Возможно, одно из этих</div>
-        <button v-for="c in (wrong ? similar : r.candidates.slice(0, 5))" :key="c.item_id" class="candidate" @click="pick(c)">
+        <button v-for="(c, i) in (wrong ? similar : r.candidates.slice(0, 5))" :key="c.item_id" class="candidate" @click="pick(c, i)">
           <div class="thumb"><WineBottle :slug="c.item_id" :card="c.card" :height="76" /></div>
           <div class="grow">
             <div style="font-weight: 600">{{ c.card.name }}</div>
@@ -127,7 +142,7 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
         <div class="section-title">Чем заменить</div>
         <p class="small muted" style="margin-top: -4px">Тот же цвет и стиль, близкие сорта и регион</p>
         <div class="grid-3">
-          <NuxtLink v-for="a in r.analogues.slice(0, 3)" :key="a.slug" class="analogue" :to="winePath(a.slug)" @click="remember(r.analogues || [])">
+          <NuxtLink v-for="a in r.analogues.slice(0, 3)" :key="a.slug" class="analogue" :to="winePath(a.slug)" @click="openAnalogue(a.slug)">
             <div style="height: 84px; display: flex; align-items: flex-end"><WineBottle :slug="a.slug" :card="a" :height="84" /></div>
             <div class="name">{{ a.name }}</div>
             <div class="w">{{ a.winery }}</div>

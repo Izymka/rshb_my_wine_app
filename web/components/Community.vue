@@ -4,6 +4,11 @@ import { DISH_ICONS, initial, reviewDate, plural } from "~/utils/wine.mjs";
 const props = defineProps<{ slug: string }>();
 const { data, all, loading, refresh, showAll } = useCommunity(() => props.slug);
 const { enabled } = useAuth();
+const { goal } = useMetrika();
+function more() {
+  goal("community_show_all", { slug: props.slug, reviews: data.value?.reviewCount });
+  void showAll();
+}
 watch([enabled, () => props.slug], () => { if (enabled.value) void refresh(); }, { immediate: true });
 defineExpose({ refresh });
 </script>
@@ -44,7 +49,7 @@ defineExpose({ refresh });
           <p v-if="r.note" class="text">{{ r.note }}</p>
           <div v-if="r.dishes.length" class="dishes"><span v-for="d in r.dishes" :key="d"><i :class="['ph', DISH_ICONS[d]]" />{{ d }}</span></div>
         </article>
-        <button v-if="!all && data.reviewCount > data.reviews.length" class="btn btn-sand" :disabled="loading" @click="showAll">Все {{ data.reviewCount }} {{ plural(data.reviewCount, ["отзыв", "отзыва", "отзывов"]) }}</button>
+        <button v-if="!all && data.reviewCount > data.reviews.length" class="btn btn-sand" :disabled="loading" @click="more">Все {{ data.reviewCount }} {{ plural(data.reviewCount, ["отзыв", "отзыва", "отзывов"]) }}</button>
       </div>
     </template>
     <p v-else class="muted small">Отзывов пока нет — ваш может стать первым.</p>

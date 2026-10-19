@@ -9,6 +9,20 @@ const { user } = useAuth();
 const filter = ref<"all" | keyof typeof STATUS>("all");
 const search = ref("");
 const now = ref(0);
+const { goal } = useMetrika();
+// Поиск — одной целью на запрос, когда пользователь перестал печатать.
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(search, (value) => {
+  clearTimeout(searchTimer);
+  const query = value.trim();
+  if (query) searchTimer = setTimeout(() => goal("shelf_search", { length: query.length, found: shown.value.length }), 1200);
+});
+onBeforeUnmount(() => clearTimeout(searchTimer));
+function setFilter(key: typeof filter.value) {
+  if (filter.value === key) return;
+  filter.value = key;
+  goal("shelf_filter", { status: key });
+}
 onMounted(() => { now.value = Date.now(); });
 const shown = computed(() => entries.value.filter((e) => (filter.value === "all" || e.status === filter.value)
   && `${e.card.name} ${e.card.winery} ${e.note}`.toLowerCase().includes(search.value.trim().toLowerCase())));
@@ -42,7 +56,7 @@ useHead({ title: "Мои вина — Своё Вино" });
         <Mascot :size="52" :mood="entries.length ? 'happy' : 'wow'" />
       </div>
 
-      <NuxtLink v-if="due.length" class="remind-card" :to="`${winePath(due[0].slug)}#review`" style="color: var(--text)">
+      <NuxtLink v-if="due.length" class="remind-card" :to="`${winePath(due[0].slug)}#review`" style="color: var(--text)" @click="goal('shelf_reminder_open', { slug: due[0].slug, due: due.length })">
         <i class="ph-fill ph-bell-ringing" />
         <div class="grow">
           <div style="font-size: 15px; font-weight: 600">Уже попробовали {{ due[0].card.name }}?</div>
@@ -54,7 +68,7 @@ useHead({ title: "Мои вина — Своё Вино" });
       <section v-if="!entries.length" class="card cream stack" style="align-items: flex-start">
         <h2 class="serif-title">Здесь будут ваши вина</h2>
         <p class="muted">Отсканируйте этикетку и сохраните вино. Его название, ваша оценка и заметка останутся под рукой.</p>
-        <NuxtLink class="btn btn-primary" to="/"><i class="ph-bold ph-camera" />Сканировать первое вино</NuxtLink>
+        <NuxtLink class="btn btn-primary" to="/" @click="goal('shelf_empty_scan')"><i class="ph-bold ph-camera" />Сканировать первое вино</NuxtLink>
       </section>
 
       <template v-else>
@@ -64,14 +78,14 @@ useHead({ title: "Мои вина — Своё Вино" });
             <input v-model="search" type="search" placeholder="Название, винодельня или заметка" aria-label="Найти на полке" />
           </label>
           <div class="chips scroll" role="group" aria-label="Фильтр">
-            <button v-for="f in filters" :key="f.key" class="chip" :class="{ on: filter === f.key }" :aria-pressed="filter === f.key" @click="filter = f.key">
+            <button v-for="f in filters" :key="f.key" class="chip" :class="{ on: filter === f.key }" :aria-pressed="filter === f.key" @click="setFilter(f.key)">
               {{ f.label }}<span class="count">{{ f.count }}</span>
             </button>
           </div>
         </div>
 
         <div class="stack">
-          <NuxtLink v-for="e in shown" :key="e.slug" :to="winePath(e.slug)" class="wine-row">
+          <NuxtLink v-for="e in shown" :key="e.slug" :to="winePath(e.slug)" class="wine-row" @click="goal('shelf_wine_open', { slug: e.slug, status: e.status })">
             <div class="thumb"><WineBottle :slug="e.slug" :card="e.card" :height="76" /></div>
             <div class="grow stack" style="gap: 3px">
               <div class="row" style="gap: 6px"><span class="st" :class="e.status">{{ STATUS[e.status] }}</span><span style="font-size: 11px; color: var(--text-3)">{{ shelfDate(e.addedAt) }}</span></div>

@@ -28,6 +28,8 @@ export default defineNuxtConfig({
     databaseUrl: "",
     // Пока СМС-провайдера нет, код входа показывается на экране. "0" — не отдавать код в ответе.
     authDemoCodes: "1",
+    // Номер счётчика Яндекс Метрики (NUXT_YANDEX_METRIKA_ID). Пусто — Метрика не подключается.
+    yandexMetrikaId: "",
   },
   app: {
     head: {

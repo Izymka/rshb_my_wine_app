@@ -8,6 +8,7 @@ const { preview, error, busy, scan, retry, canRetry, cancel, reset } = useScan()
 const router = useRouter();
 const { online } = useConnectivity();
 const { entries } = useShelf();
+const { goal } = useMetrika();
 const cameraInput = ref<HTMLInputElement>();
 const galleryInput = ref<HTMLInputElement>();
 const step = ref(0);
@@ -38,10 +39,15 @@ async function onFile(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  goal("scan_start", { source: input === cameraInput.value ? "camera" : "gallery" });
   await run(() => scan(file));
 }
+function again() {
+  goal("scan_retry", { reason: error.value });
+  return run(retry);
+}
 
-function stop() { clearTimers(); cancel(); }
+function stop() { goal("scan_cancel", { step: step.value }); clearTimers(); cancel(); }
 onMounted(() => { found.value = false; reset(); });
 onBeforeUnmount(clearTimers);
 </script>
@@ -100,7 +106,7 @@ onBeforeUnmount(clearTimers);
       <template v-else-if="error === 'starting'">Сервис ещё запускается — подождите полминуты.</template>
       <template v-else>Сервис временно недоступен. Попробуйте чуть позже.</template>
       <div class="row" style="margin-top: 10px">
-        <button v-if="retryable" class="btn btn-primary error-retry" style="min-height: 44px; margin: 0" :disabled="!online" @click="run(retry)">Повторить запрос</button>
+        <button v-if="retryable" class="btn btn-primary error-retry" style="min-height: 44px; margin: 0" :disabled="!online" @click="again">Повторить запрос</button>
         <button class="btn btn-text" style="min-height: 44px; width: auto" @click="reset">Скрыть</button>
       </div>
     </div>
@@ -119,9 +125,9 @@ onBeforeUnmount(clearTimers);
     </div>
 
     <section v-if="recent.length" class="stack" style="padding-top: 4px">
-      <div class="head-row"><span style="font-size: 15px; font-weight: 600">Недавно на полке</span><NuxtLink to="/wines">Все {{ entries.length }}</NuxtLink></div>
+      <div class="head-row"><span style="font-size: 15px; font-weight: 600">Недавно на полке</span><NuxtLink to="/wines" @click="goal('home_shelf_all')">Все {{ entries.length }}</NuxtLink></div>
       <div class="grid-3">
-        <NuxtLink v-for="w in recent" :key="w.slug" class="mini-wine" :to="winePath(w.slug)">
+        <NuxtLink v-for="w in recent" :key="w.slug" class="mini-wine" :to="winePath(w.slug)" @click="goal('home_recent_open', { slug: w.slug })">
           <div style="height: 48px; display: flex; align-items: flex-end"><WineBottle :slug="w.slug" :card="w.card" :height="48" :label="false" /></div>
           <div class="name">{{ w.card.name }}</div>
         </NuxtLink>

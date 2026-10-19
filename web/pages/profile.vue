@@ -7,6 +7,7 @@ const auth = useAuth();
 const { user } = auth;
 const shelf = useShelf();
 const { online } = useConnectivity();
+const { goal } = useMetrika();
 
 interface MyReview { slug: string; liked: boolean; name: string; winery: string; updatedAt: string; anonymous: boolean }
 const myReviews = ref<MyReview[] | null>(null);
@@ -33,6 +34,7 @@ async function loadReviews() {
 watch(user, (u) => { if (u) void loadReviews(); else myReviews.value = null; }, { immediate: true });
 
 function startEdit() {
+  goal("profile_edit_open");
   form.name = user.value?.name || "";
   form.email = user.value?.email || "";
   error.value = "";
@@ -43,6 +45,7 @@ async function saveEdit() {
   error.value = "";
   try {
     await auth.updateProfile({ name: form.name, email: form.email });
+    goal("profile_save", { email: Boolean(form.email.trim()) });
     editing.value = false;
   } catch (e) { error.value = apiError(e); }
   finally { busy.value = false; }
@@ -54,30 +57,42 @@ async function onAvatar(e: Event) {
   if (!file) return;
   busy.value = true;
   error.value = "";
-  try { await auth.uploadAvatar(await avatarBlob(file)); }
-  catch (err) { error.value = apiError(err, "Не удалось загрузить фото. Попробуйте другое."); }
+  try { await auth.uploadAvatar(await avatarBlob(file)); goal("profile_avatar_upload"); }
+  catch (err) { error.value = apiError(err, "Не удалось загрузить фото. Попробуйте другое."); goal("profile_error", { action: "avatar_upload" }); }
   finally { busy.value = false; }
 }
 async function dropAvatar() {
   busy.value = true;
-  try { await auth.removeAvatar(); } catch (e) { error.value = apiError(e); } finally { busy.value = false; }
+  try { await auth.removeAvatar(); goal("profile_avatar_remove"); } catch (e) { error.value = apiError(e); } finally { busy.value = false; }
 }
 async function toggleDefaultShare() {
   if (!user.value) return;
-  try { await auth.updateProfile({ defaultShare: !user.value.defaultShare }); } catch (e) { error.value = apiError(e); }
+  try {
+    const next = await auth.updateProfile({ defaultShare: !user.value.defaultShare });
+    goal("profile_default_share", { on: next.defaultShare });
+  } catch (e) { error.value = apiError(e); }
 }
 async function syncNow() {
   syncBusy.value = true;
-  await shelf.syncNow();
+  goal("shelf_sync_manual", { ok: await shelf.syncNow() });
   syncBusy.value = false;
 }
+function toggle(section: "reviews" | "reminders") {
+  open.value = open.value === section ? "" : section;
+  if (open.value) goal("profile_section_open", { section });
+}
+function startDelete() {
+  confirmDelete.value = true;
+  goal("account_delete_ask");
+}
 async function logout() {
+  goal("auth_logout");
   await auth.logout();
   open.value = "";
 }
 async function deleteAccount() {
   busy.value = true;
-  try { await auth.deleteAccount(); confirmDelete.value = false; }
+  try { await auth.deleteAccount(); goal("account_delete"); confirmDelete.value = false; }
   catch (e) { error.value = apiError(e); }
   finally { busy.value = false; }
 }
@@ -95,7 +110,7 @@ useHead({ title: "Профиль — Своё Вино" });
         <Mascot :size="84" mood="happy" />
         <h2 class="serif-title">Войдите, чтобы делиться отзывами</h2>
         <p class="muted small" style="max-width: 300px">Сканер и полка работают без входа. Аккаунт нужен, чтобы публиковать отзывы и не потерять полку.</p>
-        <NuxtLink v-if="auth.enabled.value" class="btn btn-primary" :to="{ path: '/login', query: { redirect: '/profile' } }"><i class="ph-bold ph-device-mobile" />Войти по номеру телефона</NuxtLink>
+        <NuxtLink v-if="auth.enabled.value" class="btn btn-primary" :to="{ path: '/login', query: { redirect: '/profile' } }" @click="goal('profile_login_click')"><i class="ph-bold ph-device-mobile" />Войти по номеру телефона</NuxtLink>
         <template v-if="auth.enabled.value">
           <div class="grid-2" style="width: 100%">
             <button class="btn btn-outline" disabled>Яндекс ID</button>
@@ -107,7 +122,7 @@ useHead({ title: "Профиль — Своё Вино" });
       </section>
       <div class="menu">
         <NuxtLink to="/wines"><i class="ph ph-books" /><span class="grow">Мои вина</span><span class="muted small">{{ shelf.entries.value.length }}</span><i class="ph ph-caret-right caret" /></NuxtLink>
-        <button :aria-expanded="open === 'reminders'" @click="open = open === 'reminders' ? '' : 'reminders'"><i class="ph ph-bell" /><span class="grow">Напоминания оценить вино</span><i :class="['ph', open === 'reminders' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
+        <button :aria-expanded="open === 'reminders'" @click="toggle('reminders')"><i class="ph ph-bell" /><span class="grow">Напоминания оценить вино</span><i :class="['ph', open === 'reminders' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
         <div v-if="open === 'reminders'" class="panel"><ShelfPushSettings /></div>
       </div>
     </template>
@@ -148,7 +163,7 @@ useHead({ title: "Профиль — Своё Вино" });
       </div>
 
       <div class="menu">
-        <button :aria-expanded="open === 'reviews'" @click="open = open === 'reviews' ? '' : 'reviews'"><i class="ph ph-chats-circle" /><span class="grow">Мои отзывы</span><i :class="['ph', open === 'reviews' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
+        <button :aria-expanded="open === 'reviews'" @click="toggle('reviews')"><i class="ph ph-chats-circle" /><span class="grow">Мои отзывы</span><i :class="['ph', open === 'reviews' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
         <div v-if="open === 'reviews'" class="panel stack" style="gap: 8px">
           <p v-if="!myReviews?.length" class="small muted">Опубликованных отзывов пока нет. Оцените вино на полке и включите «Поделиться отзывом».</p>
           <NuxtLink v-for="r in myReviews" :key="r.slug" :to="winePath(r.slug)" class="row" style="gap: 10px; color: var(--text)">
@@ -160,7 +175,7 @@ useHead({ title: "Профиль — Своё Вино" });
         <button role="switch" :aria-checked="user.defaultShare" @click="toggleDefaultShare">
           <i class="ph ph-users-three" /><span class="grow">Публиковать отзывы<span class="sub" style="display: block">по умолчанию при сохранении</span></span><span class="switch" :class="{ on: user.defaultShare }" />
         </button>
-        <button :aria-expanded="open === 'reminders'" @click="open = open === 'reminders' ? '' : 'reminders'"><i class="ph ph-bell" /><span class="grow">Напоминания оценить вино</span><i :class="['ph', open === 'reminders' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
+        <button :aria-expanded="open === 'reminders'" @click="toggle('reminders')"><i class="ph ph-bell" /><span class="grow">Напоминания оценить вино</span><i :class="['ph', open === 'reminders' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
         <div v-if="open === 'reminders'" class="panel"><ShelfPushSettings /></div>
         <button :disabled="syncBusy" @click="syncNow">
           <i class="ph ph-cloud-check" style="color: var(--ok)" /><span class="grow">Синхронизация<span class="sub" style="display: block">{{ syncBusy ? "синхронизируем…" : syncedLabel }}</span></span><i class="ph ph-arrows-clockwise caret" />
@@ -169,7 +184,7 @@ useHead({ title: "Профиль — Своё Вино" });
 
       <div class="stack" style="align-items: center; gap: 2px">
         <button class="btn btn-text" style="width: auto" @click="logout">Выйти</button>
-        <button v-if="!confirmDelete" class="quiet-link" style="color: var(--text-3); font-size: 13px; padding: 6px" @click="confirmDelete = true">Удалить аккаунт</button>
+        <button v-if="!confirmDelete" class="quiet-link" style="color: var(--text-3); font-size: 13px; padding: 6px" @click="startDelete">Удалить аккаунт</button>
         <div v-else class="card cream stack" style="width: 100%">
           <p>Удалить аккаунт, облачную полку и опубликованные отзывы? Полка на этом устройстве останется.</p>
           <div class="grid-2">

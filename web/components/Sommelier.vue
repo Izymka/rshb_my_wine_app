@@ -3,6 +3,7 @@
 // умеет отвечать (/sommelier не 404); при ошибке провайдера — честная строка, карточка не страдает.
 const props = defineProps<{ slug: string; card: Record<string, unknown> }>();
 const { online } = useConnectivity();
+const { goal } = useMetrika();
 
 const available = ref<boolean | null>(null);
 const history = ref<{ role: "user" | "assistant"; content: string }[]>([]);
@@ -19,6 +20,7 @@ async function ask(text: string) {
   const q = (prompts[text] || text).trim();
   if (!q || busy.value || !online.value) return;
   question.value = "";
+  goal("sommelier_ask", { slug: props.slug, type: suggestions.includes(text) ? "suggestion" : "custom", turn: history.value.length / 2 + 1 });
   history.value.push({ role: "user", content: q });
   busy.value = true;
   failed.value = false;
@@ -36,8 +38,10 @@ async function ask(text: string) {
     const data = await response.json();
     history.value.push({ role: "assistant", content: data.answer });
     available.value = true;
+    goal("sommelier_answer", { slug: props.slug });
   } catch {
     failed.value = true;
+    goal("sommelier_error", { slug: props.slug });
   } finally {
     busy.value = false;
   }

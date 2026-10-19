@@ -135,6 +135,31 @@ curl -s localhost:8080/health | jq .devices   # визуальные модел�
   входит в образ web, в production: `docker exec wine-scanner-web node .output/server/seed-reviews.mjs`
   (`--clear` — удалить набор).
 
+### Яндекс Метрика
+
+Счётчик включается переменной `NUXT_YANDEX_METRIKA_ID` (в продакшене — `113671726`, в деплое —
+переменная репозитория `vars.NUXT_YANDEX_METRIKA_ID`); пусто — скрипт Метрики не грузится.
+Номер браузер получает с `/api/metrika/config` при запуске (главная пререндерится, поэтому
+публичный runtimeConfig не подходит), переходы внутри приложения уходят как `hit`, номер
+аккаунта после входа — как UserID. Код: `web/composables/useMetrika.ts`,
+`web/plugins/metrika.client.ts`. Карточки вин передаются в электронную коммерцию (`dataLayer`):
+просмотр — `detail`, сохранение на полку — `add`, удаление — `remove`.
+
+Цели (`reachGoal`, в кабинете — тип «JavaScript-событие» с тем же идентификатором):
+
+| Раздел | Цели |
+|---|---|
+| Сканер | `scan_start` (`source`: camera/gallery), `scan_recognized`, `scan_not_recognized`, `scan_error` (`reason`), `scan_retry`, `scan_cancel`, `home_recent_open`, `home_shelf_all` |
+| Ответ сканера | `scan_wrong_wine`, `scan_candidate_pick`, `vintage_pick`, `scan_again` |
+| Карточка вина | `wine_view` (`source`: scan/link), `shelf_add`, `shelf_status`, `shelf_remove_ask`, `shelf_remove`, `wine_share`, `wine_description_open`, `portal_open`, `analogue_open`, `wine_scan_more` |
+| Отзыв | `review_open`, `review_reaction`, `review_dish`, `review_note`, `reminder_set`, `review_share_toggle`, `review_anonymous`, `review_submit`, `review_published`, `review_unpublished`, `review_saved`, `review_error`, `review_login_gate`, `review_login_redirect` |
+| Сообщество и сомелье | `community_show_all`, `sommelier_ask` (`type`: suggestion/custom), `sommelier_answer`, `sommelier_error` |
+| Мои вина | `shelf_search`, `shelf_filter`, `shelf_wine_open`, `shelf_reminder_open`, `shelf_empty_scan` |
+| Вход | `auth_code_request`, `auth_code_resend`, `auth_code_help`, `auth_login` (`new_user`), `auth_profile_complete`, `auth_welcome`, `auth_error` (`step`) |
+| Профиль | `profile_login_click`, `profile_edit_open`, `profile_save`, `profile_avatar_upload`, `profile_avatar_remove`, `profile_error`, `profile_default_share`, `profile_section_open`, `shelf_sync_manual`, `auth_logout`, `account_delete_ask`, `account_delete` |
+| Пуши и PWA | `push_enabled`, `push_disabled`, `push_denied`, `push_error`, `pwa_install_offer`, `pwa_install_click`, `pwa_install_choice` (`outcome`), `pwa_install_error`, `pwa_install_dismiss`, `pwa_installed`, `pwa_standalone_launch` |
+| Навигация | `tab_click` (`tab`) |
+
 ### Отдельный деплой фронтенда
 
 GitHub Actions → GHCR → Node.js-контейнер Nuxt/Nitro (`.github/workflows/deploy-web.yml`);
@@ -190,6 +215,7 @@ make db && make web-dev
 | `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес scanner для серверного прокси Nuxt; задаётся при запуске контейнера |
 | `NUXT_DATABASE_URL` | пусто (в Docker — сервис `postgres`) | PostgreSQL для аккаунтов, облачной полки и отзывов; пусто — без входа |
 | `NUXT_AUTH_DEMO_CODES` | `1` | Код входа показывается на экране, пока СМС-провайдер не подключён; `0` — не отдавать код |
+| `NUXT_YANDEX_METRIKA_ID` | пусто | Номер счётчика Яндекс Метрики; пусто — без Метрики. В docker-compose — из `YANDEX_METRIKA_ID` |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `wine` | Учётные данные сервиса `postgres` в docker-compose |
 | `POSTGRES_PORT` | `5432` | Порт базы на хосте (только 127.0.0.1) для web, запущенного вне compose |
 

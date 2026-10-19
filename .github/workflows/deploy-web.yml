@@ -85,6 +85,7 @@ jobs:
       NUXT_DATABASE_URL: ${{ secrets.NUXT_DATABASE_URL }}
       TG_NOTIFY_TOKEN: ${{ secrets.TG_NOTIFY_TOKEN }}
       TG_NOTIFY_TARGET: ${{ vars.TG_NOTIFY_TARGET }}
+      NUXT_YANDEX_METRIKA_ID: ${{ vars.NUXT_YANDEX_METRIKA_ID }}
     steps:
       - name: Validate scanner URL
         run: |
@@ -102,7 +103,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ vars.SSH_PORT || '22' }}
           fingerprint: ${{ secrets.SSH_HOST_FINGERPRINT }}
-          envs: IMAGE,REGISTRY_USER,REGISTRY_PASSWORD,WEB_PORT,NUXT_SCANNER_URL,NUXT_DATABASE_URL,TG_NOTIFY_TOKEN,TG_NOTIFY_TARGET
+          envs: IMAGE,REGISTRY_USER,REGISTRY_PASSWORD,WEB_PORT,NUXT_SCANNER_URL,NUXT_DATABASE_URL,TG_NOTIFY_TOKEN,TG_NOTIFY_TARGET,NUXT_YANDEX_METRIKA_ID
           command_timeout: 10m
           script: |
             set -eu
@@ -128,6 +129,7 @@ jobs:
               -e NUXT_SCANNER_URL="$NUXT_SCANNER_URL" \
               -e NUXT_DATABASE_URL \
               -e TG_NOTIFY_TOKEN -e TG_NOTIFY_TARGET \
+              -e NUXT_YANDEX_METRIKA_ID \
               -p "127.0.0.1:$WEB_PORT:3000" "$IMAGE"; then
               attempt=0
               while [ "$attempt" -lt 30 ]; do
