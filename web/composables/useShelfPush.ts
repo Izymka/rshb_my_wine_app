@@ -9,6 +9,7 @@ export function useShelfPush() {
   const busy = useState('shelf.push.busy', () => false);
   const message = useState('shelf.push.message', () => 'Напоминание появится на полке. Для пуша включите уведомления.');
   const publicKey = useState<string | null>('shelf.push.key', () => null);
+  const { goal } = useMetrika();
   function token() {
     let value = localStorage.getItem(TOKEN_KEY);
     if (!value) { value = [...crypto.getRandomValues(new Uint8Array(32))].map(x => x.toString(16).padStart(2, '0')).join(''); localStorage.setItem(TOKEN_KEY, value); }
@@ -65,15 +66,16 @@ export function useShelfPush() {
     try {
       // Ask directly from the button gesture (required by Safari).
       const permission = await Notification.requestPermission();
-      if (permission !== 'granted') { message.value = 'Пуши не разрешены. Напоминание останется на полке; разрешение можно изменить в настройках браузера.'; return; }
+      if (permission !== 'granted') { goal('push_denied', { permission }); message.value = 'Пуши не разрешены. Напоминание останется на полке; разрешение можно изменить в настройках браузера.'; return; }
       const registration = await navigator.serviceWorker.getRegistration();
       if (!registration?.active) throw Error('Worker not ready');
       const key = Uint8Array.from(atob(publicKey.value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
       await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
       localStorage.setItem(ENABLED_KEY, 'on');
       enabled.value = true;
+      goal('push_enabled');
       await sync();
-    } catch { message.value = 'Не удалось включить пуши. Попробуйте ещё раз. На iPhone откройте приложение с экрана «Домой».'; }
+    } catch { goal('push_error', { action: 'enable' }); message.value = 'Не удалось включить пуши. Попробуйте ещё раз. На iPhone откройте приложение с экрана «Домой».'; }
     finally { busy.value = false; }
   }
   async function disable() {
@@ -81,6 +83,7 @@ export function useShelfPush() {
     try {
       localStorage.setItem(ENABLED_KEY, 'off');
       enabled.value = false;
+      goal('push_disabled');
       const registration = await navigator.serviceWorker.getRegistration();
       await (await registration?.pushManager.getSubscription())?.unsubscribe();
       await sync();

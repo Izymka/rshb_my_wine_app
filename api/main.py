@@ -27,15 +27,16 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 
 from api.eval_log import EvalLog
+from api.portal import Portal
 from wine_scanner.embed import load_image
-from wine_scanner.pipeline import REPORTED_CANDIDATES, ScanResult, WineScanner
+from wine_scanner.pipeline import REPORTED_CANDIDATES, SERVICE_FIELDS, ScanResult, WineScanner
 from wine_scanner.sommelier import Sommelier
 
 # Телефон отдаёт HEIC, и без этой строки сервис будет падать ровно на тех снимках,
@@ -143,6 +144,7 @@ async def lifespan(app: FastAPI):
     state["warmup_seconds"] = warm_up(engine)
     state["scanner"] = engine
     state["sommelier"] = Sommelier.from_env()
+    state["portal"] = Portal.from_env()
     state["load_seconds"] = time.perf_counter() - started
     log.info(
         "модели загружены за %.1f с, из них прогрев %.1f с",
@@ -471,6 +473,29 @@ def catalog_image(slug: str) -> FileResponse:
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="нет такой карточки или её картинки")
     return FileResponse(path)
+
+
+@app.get("/catalog/{slug}")
+async def catalog_card(slug: str, response: Response) -> dict:
+    """Карточка вина по slug — для ссылки на вино, открытой без сканирования.
+
+    Каталожные поля и аналоги — те же, что в ответе /scan. `portal` — живые сведения с
+    vino-svoe.ru (народный рейтинг, крепость, подача); None, если портал выключен, не
+    знает вино или не ответил: карточка показывается и без них.
+    """
+    engine = scanner()
+    payload = engine.payload_by_id.get(slug)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="нет такой карточки")
+    portal = state.get("portal")
+    facts = await asyncio.to_thread(portal.facts, slug) if portal is not None else None
+    response.headers["Cache-Control"] = "public, max-age=600"
+    return {
+        "item_id": slug,
+        "card": {k: v for k, v in payload.items() if k not in SERVICE_FIELDS},
+        "analogues": engine.analogues.for_item(slug, k=REPORTED_CANDIDATES),
+        "portal": facts,
+    }
 
 
 class SommelierQuestion(BaseModel):

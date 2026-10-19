@@ -87,6 +87,8 @@ services:
       WINE_VLM_BASE_URL: ${WINE_VLM_BASE_URL:-}
       WINE_VLM_MODEL: ${WINE_VLM_MODEL:-}
       WINE_VLM_API_KEY: ${WINE_VLM_API_KEY:-}
+      # Народный рейтинг с vino-svoe.ru для карточки /catalog/{slug}.
+      WINE_PORTAL: ${WINE_PORTAL:-1}
       # Сомелье: те же провайдеры, свой флаг.
       WINE_SOMMELIER: ${WINE_SOMMELIER:-0}
       WINE_LLM_PROVIDER: ${WINE_LLM_PROVIDER:-yandex}
@@ -124,11 +126,39 @@ services:
       NUXT_SCANNER_URL: http://scanner:8000
       TG_NOTIFY_TOKEN: ${TG_NOTIFY_TOKEN:-}
       TG_NOTIFY_TARGET: ${TG_NOTIFY_TARGET:-}
+      # Аккаунты, облачная полка и отзывы. Схема создаётся при первом запросе к базе.
+      NUXT_DATABASE_URL: postgres://${POSTGRES_USER:-wine}:${POSTGRES_PASSWORD:-wine}@postgres:5432/${POSTGRES_DB:-wine}
+      # СМС-провайдер не подключён: код входа показывается на экране. 0 — не отдавать код.
+      NUXT_AUTH_DEMO_CODES: ${AUTH_DEMO_CODES:-1}
+      # Номер счётчика Яндекс Метрики; пусто — без Метрики.
+      NUXT_YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
     depends_on:
       scanner:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Локально базу можно поднять одну, без GPU-сервиса: make db (docker compose up -d postgres).
+  # Порт открыт только на 127.0.0.1 — для web, запущенного на хосте (make web-dev).
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wine}
+      POSTGRES_DB: ${POSTGRES_DB:-wine}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   torch-cache:
   paddle-cache:

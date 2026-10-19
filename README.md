@@ -106,11 +106,59 @@ cd rshb_my_wine_app
 
 ```bash
 cp .env.example .env          # ключи облачного OCR и LLM, если используются; без них тоже работает
-docker compose up --build     # сервис на :8080, интерфейс на :3000
+docker compose up --build     # сервис на :8080, интерфейс на :3000, PostgreSQL для аккаунтов
 curl -s localhost:8080/health | jq .devices   # визуальные модели — cuda, PaddleOCR — gpu:0
 ```
 
 В `./models` должны лежать артефакты (см. «Сборка артефактов»), в `./data/catalog` — каталог.
+
+### Аккаунты и отзывы
+
+Сканер и полка работают без входа: полка хранится в браузере и доступна без сети. Аккаунт
+нужен, чтобы публиковать отзывы и держать полку в облаке. Сервер Nuxt хранит в PostgreSQL
+пользователей, сессии, облачную полку и отзывы (`web/server/utils/db.ts`); схема создаётся сама
+при первом запросе к базе. Без `NUXT_DATABASE_URL` вход и отзывы просто не показываются.
+
+- Вход — по номеру телефона и четырёхзначному коду. СМС-провайдер в этой версии не подключён:
+  сервер возвращает код в ответе, и интерфейс показывает его на экране
+  (`NUXT_AUTH_DEMO_CODES=0` — не отдавать код). Кнопки Яндекс ID и VK ID пока неактивны.
+- Профиль: телефон, аватар, имя, email; при первом входе — имя и подтверждение 18+.
+- После входа полка устройства сливается с аккаунтом: по каждому вину побеждает более поздняя
+  правка, удаления тоже синхронизируются.
+- Отзыв (оценка, блюда, заметка) публикуется из шторки отзыва от имени или анонимно; карточка
+  вина показывает, сколько человек держат его на полке, долю «понравилось», с чем его пьют и
+  последние отзывы.
+- Демо-отзывы: `make db-seed` заводит 240 синтетических авторов, их полки и около 6,8 тыс.
+  отзывов на ~85% вин каталога портала (`web/scripts/seed-reviews.mjs`). Доля «понравилось»
+  следует народному рейтингу вина, в среднем около 87%. Повторный запуск пересоздаёт набор,
+  `make db-unseed` удаляет его; настоящие пользователи и их отзывы не затрагиваются. Скрипт
+  входит в образ web, в production: `docker exec wine-scanner-web node .output/server/seed-reviews.mjs`
+  (`--clear` — удалить набор).
+
+### Яндекс Метрика
+
+Счётчик включается переменной `NUXT_YANDEX_METRIKA_ID` (в продакшене — `113671726`, в деплое —
+переменная репозитория `vars.NUXT_YANDEX_METRIKA_ID`); пусто — скрипт Метрики не грузится.
+Номер браузер получает с `/api/metrika/config` при запуске (главная пререндерится, поэтому
+публичный runtimeConfig не подходит), переходы внутри приложения уходят как `hit`, номер
+аккаунта после входа — как UserID. Код: `web/composables/useMetrika.ts`,
+`web/plugins/metrika.client.ts`. Карточки вин передаются в электронную коммерцию (`dataLayer`):
+просмотр — `detail`, сохранение на полку — `add`, удаление — `remove`.
+
+Цели (`reachGoal`, в кабинете — тип «JavaScript-событие» с тем же идентификатором):
+
+| Раздел | Цели |
+|---|---|
+| Сканер | `scan_start` (`source`: camera/gallery), `scan_recognized`, `scan_not_recognized`, `scan_error` (`reason`), `scan_retry`, `scan_cancel`, `home_recent_open`, `home_shelf_all` |
+| Ответ сканера | `scan_wrong_wine`, `scan_candidate_pick`, `vintage_pick`, `scan_again` |
+| Карточка вина | `wine_view` (`source`: scan/link), `shelf_add`, `shelf_status`, `shelf_remove_ask`, `shelf_remove`, `wine_share`, `wine_description_open`, `portal_open`, `analogue_open`, `wine_scan_more` |
+| Отзыв | `review_open`, `review_reaction`, `review_dish`, `review_note`, `reminder_set`, `review_share_toggle`, `review_anonymous`, `review_submit`, `review_published`, `review_unpublished`, `review_saved`, `review_error`, `review_login_gate`, `review_login_redirect` |
+| Сообщество и сомелье | `community_show_all`, `sommelier_ask` (`type`: suggestion/custom), `sommelier_answer`, `sommelier_error` |
+| Мои вина | `shelf_search`, `shelf_filter`, `shelf_wine_open`, `shelf_reminder_open`, `shelf_empty_scan` |
+| Вход | `auth_code_request`, `auth_code_resend`, `auth_code_help`, `auth_login` (`new_user`), `auth_profile_complete`, `auth_welcome`, `auth_error` (`step`) |
+| Профиль | `profile_login_click`, `profile_edit_open`, `profile_save`, `profile_avatar_upload`, `profile_avatar_remove`, `profile_error`, `profile_default_share`, `profile_section_open`, `shelf_sync_manual`, `auth_logout`, `account_delete_ask`, `account_delete` |
+| Пуши и PWA | `push_enabled`, `push_disabled`, `push_denied`, `push_error`, `pwa_install_offer`, `pwa_install_click`, `pwa_install_choice` (`outcome`), `pwa_install_error`, `pwa_install_dismiss`, `pwa_installed`, `pwa_standalone_launch` |
+| Навигация | `tab_click` (`tab`) |
 
 ### Отдельный деплой фронтенда
 
@@ -124,6 +172,9 @@ uv sync --extra api --extra rerank --extra ocr --extra decide
 WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_site1810_abd \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
+# аккаунты и отзывы: PostgreSQL в Docker на 127.0.0.1:5432 (make db, остановить — make db-stop);
+# адрес базы берётся из web/.env (NUXT_DATABASE_URL, см. web/.env.example)
+make db && make web-dev
 ```
 
 Первый запрос после старта сервис делает сам (прогрев), поэтому поднимается он около минуты;
@@ -152,6 +203,7 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 | `WINE_GRAPE` | `0` | `1` — сорт этикетки против поля `grapes` в правиле выбора внутри семьи без судьи |
 | `WINE_VLM_PROVIDER`, `WINE_VLM_FALLBACK` | `yandex`, — | Провайдер судьи и откат: `yandex` (Yandex AI Studio, без VPN) / `openai` (любой OpenAI-совместимый чат: `WINE_VLM_BASE_URL`, `WINE_VLM_MODEL`, `WINE_VLM_API_KEY`) |
 | `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID` | — (ключ OCR), — | Ключ AI Studio: роль `ai.languageModels.user`, область ключа `yc.ai.languageModels.execute`; модели `YANDEX_VLM_MODEL` (`qwen3.6-35b-a3b`) и `YANDEX_LLM_MODEL` (`yandexgpt-5-lite`) |
+| `WINE_PORTAL` | `1` | `GET /catalog/{slug}` добавляет к карточке народный рейтинг, крепость, температуру подачи и гастрономию с портала vino-svoe.ru (кэш 6 ч); `0` — без портала |
 | `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`yandex` / `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |
 | `WINE_THRESHOLD` | порог из `meta.json` решающего слоя (0.533); в `docker-compose.yml` — `0.4` | Порог отказа `/scan`. 0.40 вместо 0.533: больше ответов на ужатых кадрах ценой ложных приёмов (OOF train 5.8 → 7.1 %, тест 9.8 → 12.7 %) |
 | `WINE_SIBLING` | `0` | `1` — правило выбора внутри семьи по тексту поверх решающего слоя; выключено 29.09: на стенде train 176 → 162 верных из 185 |
@@ -161,6 +213,11 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
 | `WINE_EVAL_REFUSE` | `1` | Политика eval-ручки на незнакомом вине |
 | `NUXT_SCANNER_URL` | `http://127.0.0.1:8080` | Адрес scanner для серверного прокси Nuxt; задаётся при запуске контейнера |
+| `NUXT_DATABASE_URL` | пусто (в Docker — сервис `postgres`) | PostgreSQL для аккаунтов, облачной полки и отзывов; пусто — без входа |
+| `NUXT_AUTH_DEMO_CODES` | `1` | Код входа показывается на экране, пока СМС-провайдер не подключён; `0` — не отдавать код |
+| `NUXT_YANDEX_METRIKA_ID` | пусто | Номер счётчика Яндекс Метрики; пусто — без Метрики. В docker-compose — из `YANDEX_METRIKA_ID` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `wine` | Учётные данные сервиса `postgres` в docker-compose |
+| `POSTGRES_PORT` | `5432` | Порт базы на хосте (только 127.0.0.1) для web, запущенного вне compose |
 
 Без единого внешнего ключа сервис полностью работоспособен: PaddleOCR локально, судья и
 сомелье выключены.
@@ -289,8 +346,8 @@ uv run python -m pytest tests/                # 130+ тестов без еди�
 ## Структура
 
 ```
-api/            FastAPI: /scan, /v1/eval/predict, /health, /catalog/image/{slug}, /sommelier
-web/            Nuxt 3, mobile-first интерфейс в стилистике портала
+api/            FastAPI: /scan, /v1/eval/predict, /health, /catalog/{slug}, /catalog/image/{slug}, /sommelier
+web/            Nuxt 3, mobile-first интерфейс в стилистике портала; server/ — вход, полка, отзывы (PostgreSQL)
 src/wine_scanner/
   detect/       детекция бутылки и этикетки (каскад RT-DETR)
   embed/        SigLIP 2 / DINOv2 (фабрика по config.json) + whitening

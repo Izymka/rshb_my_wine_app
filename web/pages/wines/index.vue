@@ -1,37 +1,113 @@
 <script setup lang="ts">
-import { STATUS, REACTIONS, shelfDate, winePath } from '~/utils/shelf.mjs';
+// Мои вина (1e): полка-иллюстрация, напоминание оценить, поиск, фильтры со счётчиками,
+// превью с оценкой, блюдами и заметкой. Полка живёт в браузере и работает без сети;
+// после входа она ещё и синхронизируется с аккаунтом.
+import { STATUS, REACTIONS, shelfDate, winePath, dueWines } from "~/utils/shelf.mjs";
+import { DISH_ICONS, plural } from "~/utils/wine.mjs";
 const { entries, ready, error } = useShelf();
-const filter = ref('all');
-const search = ref('');
-const now = ref(Date.now());
+const { user } = useAuth();
+const filter = ref<"all" | keyof typeof STATUS>("all");
+const search = ref("");
+const now = ref(0);
+const { goal } = useMetrika();
+// Поиск — одной целью на запрос, когда пользователь перестал печатать.
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(search, (value) => {
+  clearTimeout(searchTimer);
+  const query = value.trim();
+  if (query) searchTimer = setTimeout(() => goal("shelf_search", { length: query.length, found: shown.value.length }), 1200);
+});
+onBeforeUnmount(() => clearTimeout(searchTimer));
+function setFilter(key: typeof filter.value) {
+  if (filter.value === key) return;
+  filter.value = key;
+  goal("shelf_filter", { status: key });
+}
 onMounted(() => { now.value = Date.now(); });
-const shown = computed(() => entries.value.filter(e => (filter.value === 'all' || e.status === filter.value)
-  && `${e.card.name} ${e.card.winery} ${e.note}`.toLowerCase().includes(search.value.toLowerCase())));
-const due = computed(() => entries.value.filter(e => !e.reaction && e.remindAt !== null && e.remindAt <= now.value));
-useHead({ title: 'Мои вина — Своё Вино' });
+const shown = computed(() => entries.value.filter((e) => (filter.value === "all" || e.status === filter.value)
+  && `${e.card.name} ${e.card.winery} ${e.note}`.toLowerCase().includes(search.value.trim().toLowerCase())));
+const due = computed(() => (now.value ? dueWines(entries.value, now.value) : []));
+const liked = computed(() => entries.value.filter((e) => e.reaction === "liked").length);
+const filters = computed(() => [
+  { key: "all" as const, label: "Все", count: entries.value.length },
+  ...Object.entries(STATUS).map(([key, label]) => ({ key: key as keyof typeof STATUS, label, count: entries.value.filter((e) => e.status === key).length })),
+]);
+useHead({ title: "Мои вина — Своё Вино" });
 </script>
+
 <template>
-  <main class="page">
-    <header class="topbar"><img src="/icon.png" alt="" /><div class="grow"><h1 class="brand">Мои вина</h1><div class="sub">Ваша личная винная полка</div></div><NuxtLink to="/">Сканировать</NuxtLink></header>
-    <p class="small muted">Полка хранится в этом браузере на этом устройстве. Карточки и заметки доступны без сети.</p>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <p v-if="!ready" role="status">Загружаем полку…</p>
-    <template v-else>
-      <section v-if="due.length" class="card cream">
-        <h2>Уже попробовали?</h2><p>Сохраните впечатление, чтобы вспомнить его при следующем выборе.</p>
-        <NuxtLink v-for="e in due" :key="e.slug" class="item" :to="`${winePath(e.slug)}#review`">{{ e.card.name }} · Оценить →</NuxtLink>
-      </section>
-      <div v-if="entries.length" class="shelf-tools">
-        <label for="wine-search" class="small">Найти на полке</label><input id="wine-search" v-model="search" type="search" placeholder="Название, винодельня или заметка" />
-        <div class="vintage"><button class="chip" :class="{ on: filter === 'all' }" :aria-pressed="filter === 'all'" @click="filter = 'all'">Все · {{ entries.length }}</button><button v-for="(label, value) in STATUS" :key="value" class="chip" :class="{ on: filter === value }" :aria-pressed="filter === value" @click="filter = value">{{ label }}</button></div>
+  <main class="page with-tabs">
+    <header class="topbar">
+      <div class="grow">
+        <h1 class="page-title">Мои вина</h1>
+        <div v-if="entries.length" class="small muted" style="margin-top: 2px">
+          {{ entries.length }} {{ plural(entries.length, ["вино", "вина", "вин"]) }}<template v-if="liked"> · {{ liked }} {{ plural(liked, ["понравилось", "понравились", "понравились"]) }}</template>
+        </div>
       </div>
-      <section v-if="!entries.length" class="card cream"><h1 class="title">Здесь будут ваши вина</h1><p>Отсканируйте этикетку и сохраните вино. Его название, ваша оценка и заметка останутся под рукой.</p><NuxtLink class="btn btn-primary" to="/">Сканировать первое вино</NuxtLink></section>
-      <p v-else-if="!shown.length" class="muted">Таких вин на полке пока нет. Попробуйте другой фильтр.</p>
-      <NuxtLink v-for="e in shown" :key="e.slug" :to="winePath(e.slug)" class="item shelf-item">
-        <img class="bottle sm" :src="imageUrl(e.slug)" alt="" @error="($event.target as HTMLImageElement).style.visibility = 'hidden'" />
-        <div class="grow"><span class="tag">{{ STATUS[e.status] }}</span><div class="name">{{ e.card.name }}</div><div class="small muted">{{ e.card.winery }}</div><div class="small">{{ e.reaction ? REACTIONS[e.reaction] : 'Без оценки' }} · {{ shelfDate(e.addedAt) }}</div><p v-if="e.note" class="shelf-excerpt small">{{ e.note }}</p></div><span aria-hidden="true">›</span>
+      <NuxtLink class="icon-btn accent" to="/" aria-label="Сканировать"><i class="ph-bold ph-scan" /></NuxtLink>
+    </header>
+
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="!ready" role="status" class="muted">Загружаем полку…</p>
+    <template v-else>
+      <div class="shelf-art" aria-hidden="true">
+        <WineBottle v-for="e in entries.slice(0, 5)" :key="e.slug" :slug="e.slug" :card="e.card" :height="100" />
+        <div class="grow" />
+        <Mascot :size="52" :mood="entries.length ? 'happy' : 'wow'" />
+      </div>
+
+      <NuxtLink v-if="due.length" class="remind-card" :to="`${winePath(due[0].slug)}#review`" style="color: var(--text)" @click="goal('shelf_reminder_open', { slug: due[0].slug, due: due.length })">
+        <i class="ph-fill ph-bell-ringing" />
+        <div class="grow">
+          <div style="font-size: 15px; font-weight: 600">Уже попробовали {{ due[0].card.name }}?</div>
+          <div class="small muted" style="margin-top: 2px">Сохраните впечатление, пока свежо<template v-if="due.length > 1"> · ещё {{ due.length - 1 }}</template></div>
+        </div>
+        <span class="go">Оценить</span>
       </NuxtLink>
-      <ShelfPushSettings v-if="entries.length" />
+
+      <section v-if="!entries.length" class="card cream stack" style="align-items: flex-start">
+        <h2 class="serif-title">Здесь будут ваши вина</h2>
+        <p class="muted">Отсканируйте этикетку и сохраните вино. Его название, ваша оценка и заметка останутся под рукой.</p>
+        <NuxtLink class="btn btn-primary" to="/" @click="goal('shelf_empty_scan')"><i class="ph-bold ph-camera" />Сканировать первое вино</NuxtLink>
+      </section>
+
+      <template v-else>
+        <div class="stack">
+          <label class="search">
+            <i class="ph ph-magnifying-glass" />
+            <input v-model="search" type="search" placeholder="Название, винодельня или заметка" aria-label="Найти на полке" />
+          </label>
+          <div class="chips scroll" role="group" aria-label="Фильтр">
+            <button v-for="f in filters" :key="f.key" class="chip" :class="{ on: filter === f.key }" :aria-pressed="filter === f.key" @click="setFilter(f.key)">
+              {{ f.label }}<span class="count">{{ f.count }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="stack">
+          <NuxtLink v-for="e in shown" :key="e.slug" :to="winePath(e.slug)" class="wine-row" @click="goal('shelf_wine_open', { slug: e.slug, status: e.status })">
+            <div class="thumb"><WineBottle :slug="e.slug" :card="e.card" :height="76" /></div>
+            <div class="grow stack" style="gap: 3px">
+              <div class="row" style="gap: 6px"><span class="st" :class="e.status">{{ STATUS[e.status] }}</span><span style="font-size: 11px; color: var(--text-3)">{{ shelfDate(e.addedAt) }}</span></div>
+              <div class="name">{{ e.card.name }}</div>
+              <div class="sub">{{ e.card.winery }}<template v-if="e.card.category"> · {{ e.card.category }}</template></div>
+              <div v-if="e.reaction || e.dishes.length" class="row" style="gap: 8px; margin-top: 2px">
+                <span v-if="e.reaction" class="row" style="gap: 4px; font-size: 12px; font-weight: 600" :style="{ color: e.reaction === 'liked' ? 'var(--ok)' : 'var(--accent)' }">
+                  <i :class="['ph-fill', e.reaction === 'liked' ? 'ph-thumbs-up' : 'ph-thumbs-down']" style="font-size: 14px" />{{ REACTIONS[e.reaction] }}
+                </span>
+                <i v-for="d in e.dishes" :key="d" :class="['ph', DISH_ICONS[d]]" :title="d" style="font-size: 16px; color: var(--accent)" />
+              </div>
+              <div v-if="e.note" class="note">«{{ e.note }}»</div>
+            </div>
+            <i class="ph ph-caret-right caret" />
+          </NuxtLink>
+          <p v-if="!shown.length" class="muted small" style="text-align: center; padding: 24px 12px">Таких вин на полке пока нет</p>
+          <div class="device-note">
+            <i :class="['ph', user ? 'ph-cloud-check' : 'ph-device-mobile']" style="font-size: 15px" />
+            {{ user ? "Полка сохранена в аккаунте и работает без сети" : "Полка хранится на этом устройстве и работает без сети" }}
+          </div>
+        </div>
+      </template>
     </template>
   </main>
 </template>

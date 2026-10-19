@@ -4,6 +4,7 @@ interface InstallEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 const { online } = useConnectivity();
+const { goal } = useMetrika();
 const restored = ref(false);
 const visible = ref(false);
 const ios = ref(false);
@@ -32,28 +33,41 @@ function offerInstall(event: Event) {
   event.preventDefault();
   deferred = event as InstallEvent;
   visible.value = true;
+  goal("pwa_install_offer", { platform: "android" });
 }
 function installed() {
   visible.value = false;
   deferred = null;
 }
+function onAppInstalled() {
+  goal("pwa_installed");
+  installed();
+}
 function modeChanged() { if (standalone()) installed(); }
 function dismiss() {
+  goal("pwa_install_dismiss", { platform: ios.value ? "ios" : "android" });
   visible.value = false;
   help.value = false;
   try { localStorage.setItem(dismissKey, String(Date.now())); } catch {}
 }
 async function install() {
-  if (ios.value) { help.value = !help.value; return; }
+  if (ios.value) {
+    help.value = !help.value;
+    if (help.value) goal("pwa_install_click", { platform: "ios" });
+    return;
+  }
   if (!deferred || installing.value) return;
   installing.value = true;
   installError.value = false;
+  goal("pwa_install_click", { platform: "android" });
   try {
     await deferred.prompt();
-    await deferred.userChoice;
+    const { outcome } = await deferred.userChoice;
+    goal("pwa_install_choice", { outcome });
     visible.value = false;
   } catch {
     installError.value = true;
+    goal("pwa_install_error");
   } finally {
     deferred = null;
     installing.value = false;
@@ -65,10 +79,12 @@ onMounted(() => {
   ios.value = /iphone|ipad|ipod/i.test(navigator.userAgent)
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   visible.value = ios.value && !standalone() && !dismissed();
+  if (visible.value) goal("pwa_install_offer", { platform: "ios" });
+  if (standalone()) goal("pwa_standalone_launch");
   window.addEventListener("online", updateConnection);
   window.addEventListener("offline", updateConnection);
   window.addEventListener("beforeinstallprompt", offerInstall);
-  window.addEventListener("appinstalled", installed);
+  window.addEventListener("appinstalled", onAppInstalled);
   displayMode.addEventListener("change", modeChanged);
 });
 onBeforeUnmount(() => {
@@ -76,7 +92,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("online", updateConnection);
   window.removeEventListener("offline", updateConnection);
   window.removeEventListener("beforeinstallprompt", offerInstall);
-  window.removeEventListener("appinstalled", installed);
+  window.removeEventListener("appinstalled", onAppInstalled);
   displayMode?.removeEventListener("change", modeChanged);
 });
 </script>

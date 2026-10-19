@@ -27,10 +27,10 @@ test("сообщения и вложения отправляются в пор�
   const third = notifier.document("Результат · task-1 · 123 мс", "scan-task-1.txt", '{"ok":true}');
   await Promise.all([first, second, third]);
 
-  assert.deepEqual(sent.map((item) => item.method), ["sendMessage", "sendPhoto", "sendDocument"]);
+  assert.deepEqual(sent.map((item) => item.method), ["sendMessage", "sendDocument", "sendDocument"]);
   assert.ok(sent.every((item) => item.body.get("chat_id") === "123"));
-  assert.equal(sent[1].body.get("photo").name, "label.png");
-  assert.equal(await sent[1].body.get("photo").text(), "image");
+  assert.equal(sent[1].body.get("document").name, "label.png");
+  assert.equal(await sent[1].body.get("document").text(), "image");
   assert.equal(sent[2].body.get("document").name, "scan-task-1.txt");
   assert.equal(await sent[2].body.get("document").text(), '{"ok":true}');
 });

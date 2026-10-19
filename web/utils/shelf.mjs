@@ -21,9 +21,10 @@ export function parseShelf(raw) {
       || !Array.isArray(e.dishes) || e.dishes.some(d => !DISHES.includes(d))
       || typeof e.note !== 'string' || e.note.length > 500
       || !(e.remindAt === null || Number.isFinite(e.remindAt))
+      || !(e.updatedAt === undefined || Number.isFinite(e.updatedAt))
       || !Array.isArray(e.analogues)) throw Error('Invalid shelf entry');
     ids.add(e.slug);
-    return { ...e, card: cleanCard(e.card), analogues: e.analogues.slice(0, 5)
+    return { ...e, updatedAt: e.updatedAt ?? e.addedAt, card: cleanCard(e.card), analogues: e.analogues.slice(0, 5)
       .filter(a => a && typeof a.slug === 'string' && a.slug && typeof a.name === 'string')
       .map(a => ({ ...cleanCard(a), slug: a.slug })) };
   });
@@ -34,16 +35,34 @@ export function addWine(entries, slug, card, analogues = [], now = Date.now()) {
   if (!slug || !card?.name) throw Error('Не удалось сохранить карточку вина.');
   return [{ slug, card: cleanCard(card), analogues: analogues.filter(a => a.slug !== slug).slice(0, 5)
     .map(a => ({ ...cleanCard(a), slug: a.slug })), addedAt: now, status: 'want',
-    reaction: null, dishes: [], note: '', remindAt: now + 3 * DAY }, ...entries];
+    reaction: null, dishes: [], note: '', remindAt: now + 3 * DAY, updatedAt: now }, ...entries];
 }
-export function updateWine(entries, slug, patch) {
+export function updateWine(entries, slug, patch, now = Date.now()) {
   return entries.map(e => {
     if (e.slug !== slug) return e;
-    const next = { ...e, ...patch, slug: e.slug, addedAt: e.addedAt, card: e.card, analogues: e.analogues };
+    const next = { ...e, ...patch, slug: e.slug, addedAt: e.addedAt, card: e.card, analogues: e.analogues, updatedAt: now };
     if (patch.reaction) next.status = 'tried';
     if (next.reaction) next.remindAt = null;
     return next;
   });
+}
+// Слияние полки устройства с облачной: по каждому вину побеждает более поздняя правка,
+// удаление — тоже правка (deleted: [{ slug, at }]). Порядок — свежедобавленные сверху.
+export function mergeShelves(local, remote, deleted = []) {
+  const bySlug = new Map(remote.map(e => [e.slug, e]));
+  for (const e of local) {
+    const other = bySlug.get(e.slug);
+    if (!other || e.updatedAt > other.updatedAt) bySlug.set(e.slug, e);
+  }
+  for (const d of deleted) {
+    const e = bySlug.get(d.slug);
+    if (e && d.at >= e.updatedAt) bySlug.delete(d.slug);
+  }
+  return [...bySlug.values()].sort((a, b) => b.addedAt - a.addedAt).slice(0, 500);
+}
+// Вина, которые пора оценить: напоминание наступило, а оценки нет.
+export function dueWines(entries, now = Date.now()) {
+  return entries.filter(e => !e.reaction && e.remindAt !== null && e.remindAt <= now);
 }
 export function remindersFor(entries) {
   return entries.filter(e => !e.reaction && e.remindAt !== null)

@@ -12,13 +12,24 @@ export default defineNuxtConfig({
   hooks: {
     "nitro:build:public-assets": (nitro) => buildPwa(nitro.options.output.publicDir),
   },
-  css: ["~/assets/css/main.css"],
+  css: [
+    "@phosphor-icons/web/regular",
+    "@phosphor-icons/web/fill",
+    "@phosphor-icons/web/bold",
+    "~/assets/css/main.css",
+  ],
   runtimeConfig: {
     scannerUrl: "http://127.0.0.1:8080",
     shelfPushPublicKey: "",
     shelfPushPrivateKey: "",
     shelfPushSubject: "",
     shelfPushDirectory: ".data/wine-reminders",
+    // PostgreSQL аккаунтов, облачной полки и отзывов (NUXT_DATABASE_URL). Пусто — без аккаунтов.
+    databaseUrl: "",
+    // Пока СМС-провайдера нет, код входа показывается на экране. "0" — не отдавать код в ответе.
+    authDemoCodes: "1",
+    // Номер счётчика Яндекс Метрики (NUXT_YANDEX_METRIKA_ID). Пусто — Метрика не подключается.
+    yandexMetrikaId: "",
   },
   app: {
     head: {
@@ -38,7 +49,7 @@ export default defineNuxtConfig({
         { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" },
         {
           rel: "stylesheet",
-          href: "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&display=swap",
+          href: "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&display=swap",
         },
       ],
       htmlAttrs: { lang: "ru" },

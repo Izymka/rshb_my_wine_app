@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help web-env web web-install web-build web-start web-dev tunnel tunnel-stop scanner-init release-prepare release-publish
+.PHONY: help web-env web web-install web-build web-start web-dev db db-stop db-seed db-unseed tunnel tunnel-stop scanner-init release-prepare release-publish
 
 PYTHON ?= python3
 
@@ -35,6 +35,18 @@ web-start: web-env ## Запустить готовую сборку с наст
 
 web-dev: web-env ## Запустить Nuxt с горячей перезагрузкой
 	cd web && npm run dev
+
+db: ## Поднять PostgreSQL в Docker на 127.0.0.1:5432 (данные в томе postgres-data)
+	docker compose up -d --wait postgres
+
+db-stop: ## Остановить контейнер PostgreSQL, данные остаются в томе
+	docker compose stop postgres
+
+db-seed: web-env ## Заполнить базу синтетическими отзывами по каталогу портала (повторяемо)
+	cd web && node --env-file=.env scripts/seed-reviews.mjs
+
+db-unseed: web-env ## Удалить синтетических авторов вместе с их полками и отзывами
+	cd web && node --env-file=.env scripts/seed-reviews.mjs --clear
 
 tunnel: web-env ## Поднять HTTPS-туннель ngrok к работающему web (Ctrl+C — остановить)
 	cd web && node --env-file=.env --input-type=module -e 'import { spawnSync } from "node:child_process"; const r = spawnSync("bash", ["../scripts/tunnel.sh", "start"], { stdio: "inherit" }); process.exit(r.status ?? 1);'

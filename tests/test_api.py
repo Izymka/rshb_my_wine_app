@@ -48,9 +48,15 @@ def answer(frames: int = 1, answered: bool = True) -> ScanResult:
     )
 
 
+class FakeAnalogues:
+    def for_item(self, item_id: str, k: int = 5) -> list[dict]:
+        return [{"slug": "wine_b", "name": "Chateau Beta", "score": 0.5}] if item_id == "wine_a" else []
+
+
 class FakeScanner:
     version = VERSION
     path_by_id = {"wine_a": "/нет/такого/a.png"}
+    analogues = FakeAnalogues()
 
     def __init__(self):
         self.payload_by_id: dict[str, dict] = {"wine_a": {"name": "Chateau Alpha"}}
@@ -78,6 +84,7 @@ def client(monkeypatch):
     """
     engine = FakeScanner()
     monkeypatch.setitem(main.state, "scanner", engine)
+    monkeypatch.setitem(main.state, "portal", None)
     test_client = TestClient(main.app)
     test_client.engine = engine
     return test_client
@@ -229,6 +236,32 @@ def test_catalog_image_prefers_source_image_from_database(client, tmp_path):
 
     assert response.status_code == 200
     assert response.content == source.read_bytes()
+
+
+def test_catalog_card_404_for_unknown_slug(client):
+    assert client.get("/catalog/nope").status_code == 404
+
+
+def test_catalog_card_without_portal(client):
+    client.engine.payload_by_id["wine_a"]["image_path"] = "/служебное/a.png"
+    body = client.get("/catalog/wine_a").json()
+    assert body == {
+        "item_id": "wine_a",
+        "card": {"name": "Chateau Alpha"},
+        "analogues": [{"slug": "wine_b", "name": "Chateau Beta", "score": 0.5}],
+        "portal": None,
+    }
+
+
+def test_catalog_card_carries_portal_facts(client, monkeypatch):
+    class FakePortal:
+        def facts(self, slug):
+            return {"rating": 4.93, "alcohol": 14.0, "temperature": "14-16", "dishes": [], "url": "u"}
+
+    monkeypatch.setitem(main.state, "portal", FakePortal())
+    response = client.get("/catalog/wine_a")
+    assert response.json()["portal"]["rating"] == 4.93
+    assert "max-age" in response.headers["cache-control"]
 
 
 def test_sommelier_is_404_when_not_configured(client, monkeypatch):

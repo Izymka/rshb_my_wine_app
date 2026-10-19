@@ -53,6 +53,7 @@ export type ScanError = "unreadable" | "network" | "unavailable" | "starting" | 
 let lastFile: File | null = null;
 
 export function useScan() {
+  const { goal } = useMetrika();
   const preview = useState<string | null>("scan.preview", () => null);
   const result = useState<ScanResponse | null>("scan.result", () => null);
   const error = useState<ScanError>("scan.error", () => null);
@@ -65,6 +66,7 @@ export function useScan() {
     lastFile = file;
     if (!navigator.onLine) {
       error.value = "network";
+      goal("scan_error", { reason: "offline" });
       return false;
     }
     preview.value = URL.createObjectURL(file);
@@ -78,22 +80,29 @@ export function useScan() {
       elapsedMs.value = Math.round(performance.now() - started);
       if (response.status === 400) {
         error.value = "unreadable";
+        goal("scan_error", { reason: "unreadable" });
         return false;
       }
       if (response.status === 503) {
         error.value = "starting";
+        goal("scan_error", { reason: "starting" });
         return false;
       }
       if (!response.ok) {
         error.value = "unavailable";
+        goal("scan_error", { reason: "unavailable", status: response.status });
         return false;
       }
       result.value = (await response.json()) as ScanResponse;
       lastFile = null;
+      goal(result.value.answered ? "scan_recognized" : "scan_not_recognized", {
+        ms: elapsedMs.value, probability: result.value.probability, guard: result.value.guard || undefined,
+      });
       return true;
     } catch (e) {
       if ((e as Error).name === "AbortError") return false;
       error.value = "network";
+      goal("scan_error", { reason: "network" });
       return false;
     } finally {
       busy.value = false;
