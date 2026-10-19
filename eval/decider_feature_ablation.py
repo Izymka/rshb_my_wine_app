@@ -11,6 +11,12 @@
 Верным считается и выбор второй карточки того же вина из
 `data/splits/catalog_slug_equivalences.csv` (как `final_top1` бенчмарка); строгое совпадение —
 колонка `*_strict`. Метки обучения не меняются.
+
+Незнакомые вина (живые кадры, которых нет в каталоге) оцениваются по той же OOF: `auroc_unknown`
+— насколько максимальная оценка отделяет живые знакомые кадры от незнакомых, `fa_at_cov` —
+доля незнакомых, получивших ответ, при пороге, на котором ответ получают `--coverage` живых
+знакомых, `right_at_cov` — доля живых знакомых, получивших верный ответ при том же пороге.
+`--extra` задаёт, какие признаки добавить ко второму набору (по умолчанию «прочитанное» v5).
 """
 
 import argparse
@@ -40,12 +46,12 @@ READING = (
 RESULTS = Path("eval/results/decider_feature_ablation.jsonl")
 
 
-def load(path: Path) -> dict[str, list[PairFeatures]]:
+def load(path: Path, versions=RAW_FEATURE_VERSIONS) -> dict[str, list[PairFeatures]]:
     grouped: dict[str, list[PairFeatures]] = defaultdict(list)
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             payload = json.loads(line)
-            if payload.get("feature_version") not in RAW_FEATURE_VERSIONS:
+            if payload.get("feature_version") not in versions:
                 raise SystemExit(f"{path}: сырые пары старой версии, пересоберите признаки")
             row = PairFeatures.from_dict(payload)
             if not is_holdout(row.query):
@@ -63,14 +69,25 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--live-weight", type=float, default=3.0)
     parser.add_argument("--tag", default="")
+    parser.add_argument("--extra", default=",".join(READING), help="признаки второго набора")
+    parser.add_argument("--coverage", type=float, default=0.85)
+    parser.add_argument(
+        "--raw-version", type=int, default=None,
+        help="принять сырые пары этой версии (сравнение со старым файлом признаков)",
+    )
     args = parser.parse_args()
 
     meta = json.loads((args.params_from / "meta.json").read_text(encoding="utf-8"))
     base = list(meta["feature_names"])
-    sets = {meta.get("feature_set", "deployed"): base, "+reading": base + list(READING)}
+    extra = [n for n in args.extra.split(",") if n and n not in base]
+    if any(n not in FEATURE_NAMES for n in extra):
+        parser.error(f"неизвестные признаки: {[n for n in extra if n not in FEATURE_NAMES]}")
+    sets = {meta.get("feature_set", "deployed"): base}
+    if extra:
+        sets["+" + ",".join(extra)] = base + extra
     params = dict(meta["params"])
 
-    by_query = load(args.features)
+    by_query = load(args.features, {args.raw_version} if args.raw_version else RAW_FEATURE_VERSIONS)
     queries = sorted(by_query)
     wine = {q: by_query[q][0].true_id for q in queries}
     live = {q: by_query[q][0].group.startswith("live-") for q in queries}
@@ -122,7 +139,7 @@ def main() -> None:
                 model = fit([queries[i] for i in train_idx], names, seed)
                 for i in test_idx:
                     q = queries[i]
-                    if known[q]:
+                    if known[q] or live[q]:
                         scores = model.predict_proba(columns(full[q], names))[:, 1]
                         chosen[q] = (by_query[q][int(np.argmax(scores))].item_id, scores, labels[q])
             per_seed.append(chosen)
@@ -144,6 +161,29 @@ def main() -> None:
 
         live_q = [q for q in known_q if live[q]]
         syn_q = [q for q in known_q if not live[q]]
+        unknown_q = [q for q in queries if live[q] and not known[q]]
+
+        def unknown_metrics(chosen: dict, live_q=live_q, unknown_q=unknown_q) -> dict:
+            from sklearn.metrics import roc_auc_score
+
+            top_known = np.asarray([chosen[q][1].max() for q in live_q])
+            top_unknown = np.asarray([chosen[q][1].max() for q in unknown_q])
+            auroc = roc_auc_score(
+                np.r_[np.ones(len(top_known)), np.zeros(len(top_unknown))],
+                np.r_[top_known, top_unknown],
+            )
+            cut = np.quantile(top_known, 1 - args.coverage)
+            right = [
+                chosen[q][1].max() >= cut
+                and chosen[q][0] in same_wine.get(wine[q], frozenset({wine[q]}))
+                for q in live_q
+            ]
+            return {
+                "auroc_unknown": float(auroc),
+                "fa_at_cov": float(np.mean(top_unknown >= cut)),
+                "right_at_cov": float(np.mean(right)),
+            }
+
         rows = [
             {
                 "live": metric(c, live_q, False),
@@ -151,6 +191,7 @@ def main() -> None:
                 "synthetic": metric(c, syn_q, True),
                 "mrr_live": mrr(c, live_q),
                 "mrr": mrr(c, known_q),
+                **unknown_metrics(c),
             }
             for c in per_seed
         ]
@@ -161,7 +202,7 @@ def main() -> None:
         for k, values in summary[name].items():
             print(f"  {k:12s} {np.mean(values):.3f} ± {np.std(values):.3f}")
 
-    first, second = list(sets)
+    first, second = (list(sets) * 2)[:2]
     print(f"\nживые кадры, где наборы расходятся (сид 2026): {first} -> {second}")
     for q in sorted(q for q in known_q if live[q]):
         a, b = picks[first][q][0], picks[second][q][0]

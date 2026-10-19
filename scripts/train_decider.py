@@ -396,12 +396,24 @@ def main() -> None:
         help="взять набор признаков и параметры CatBoost из meta.json готового решающего слоя "
         "(их подбирает ноутбук 06); ranker не обучается, порядок — по classifier, как у него",
     )
+    parser.add_argument(
+        "--add-features",
+        default="",
+        help="дописать к набору из --params-from признаки через запятую "
+        "(например vis_std,vis_mean)",
+    )
     args = parser.parse_args()
 
     names, params = FEATURE_NAMES, None
     if args.params_from is not None:
         source = json.loads((args.params_from / "meta.json").read_text(encoding="utf-8"))
         names, params = tuple(source["feature_names"]), dict(source["params"])
+    extra = [n for n in args.add_features.split(",") if n and n not in names]
+    unknown = [n for n in extra if n not in FEATURE_NAMES]
+    if unknown:
+        parser.error(f"неизвестные признаки: {', '.join(unknown)}")
+    # Порядок колонок модели — порядок FEATURE_NAMES: так Decider проверяет подмножество.
+    names = tuple(n for n in FEATURE_NAMES if n in set(names) | set(extra))
     columns = [FEATURE_NAMES.index(name) for name in names]
 
     if args.family_map is not None:
