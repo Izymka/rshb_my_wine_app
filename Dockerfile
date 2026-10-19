@@ -60,7 +60,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
         "paddlepaddle-gpu==3.3.1" \
     && uv pip install --python /opt/ocr/bin/python "paddleocr==3.7.0" "onnxruntime-gpu==1.22.0"
-ENV WINE_OCR_PYTHON=/opt/ocr/bin/python \
+# Paddle сам подгружает CUDA-библиотеки из пакетов nvidia-*-cu12 окружения, onnxruntime — нет:
+# без пути к ним CUDAExecutionProvider не создаётся (libcufft.so.11: cannot open shared object
+# file), и распознаватель молча уходит на CPU. Путь задаёт обёртка только для OCR-воркера:
+# общий LD_LIBRARY_PATH подсунул бы torch основного окружения (CUDA 12.8) библиотеки 12.6.
+RUN printf '%s\n' '#!/bin/sh' \
+        "export LD_LIBRARY_PATH=$(ls -d /opt/ocr/lib/python3.12/site-packages/nvidia/*/lib | paste -sd:)\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" \
+        'exec /opt/ocr/bin/python "$@"' > /opt/ocr/bin/python-gpu \
+    && chmod +x /opt/ocr/bin/python-gpu
+ENV WINE_OCR_PYTHON=/opt/ocr/bin/python-gpu \
     WINE_OCR_DEVICE=gpu:0
 
 # Зависимости отдельным слоем: пересобирается только при правке pyproject.toml или uv.lock.
