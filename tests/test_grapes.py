@@ -52,6 +52,18 @@ def test_find(text, found):
     assert VOCAB.find(text) == found
 
 
+def test_grapes_outside_catalog_and_head_word_contradict():
+    # Разбор ошибок теста 18.10: «КАРИНЬЯН» и «CABERNET» без второго слова не находились,
+    # и этикетка незнакомого вина не противоречила карточке с другим сортом.
+    assert VOCAB.find("КАРИНЬЯН сухое красное") == {"karinian"}
+    assert compare(VOCAB.find("КАРИНЬЯН"), parse("Эким-Кара")) == -1
+    assert VOCAB.find("INKERMAN CABERNET 2025") == {"kaberne"}
+    assert compare(VOCAB.find("CABERNET"), parse("Саперави")) == -1
+    assert compare(VOCAB.find("CABERNET"), parse("Каберне Совиньон")) == 1
+    # Полное имя сорта по-прежнему выигрывает у первого слова.
+    assert VOCAB.find("Cabernet Sauvignon") == {"kaberne sovinon"}
+
+
 def test_compare():
     assert compare(VOCAB.find("RIESLING"), parse("Рислинг Рейнский")) == 1
     assert compare(VOCAB.find("ZINFANDEL"), parse("Пино Нуар")) == -1

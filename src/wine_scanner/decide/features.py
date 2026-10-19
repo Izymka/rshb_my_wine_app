@@ -201,12 +201,36 @@ def attr_agree(row: PairFeatures) -> int:
     return row.color_match + row.style_match + row.grape_match
 
 
-def derive(rows: list[PairFeatures]) -> list[dict]:
+def text_refutes(rival: PairFeatures, row: PairFeatures) -> bool:
+    """Этикетка опровергает соперника `row` по картинке: читаемый текст противоречит ему по
+    цвету, сладости или сорту, или не подтверждает ни одного его различающего слова, когда
+    слова самого `row` подтверждены.
+
+    Зачем. Линейка одной винодельни часто печатается на одной этикетке: у «Портвейна красного
+    Алушта» больше всего совпавших точек не с ним, а с белым «Гурзуфом», и решающий слой
+    отказывал (0.35) при полностью совпавшем тексте (разбор ошибок v8). Разрыв по картинке
+    против того, кого текст уже исключил, ничего не говорит о самом кандидате.
+    """
+    if rival.ocr_lines < MIN_OCR_LINES_RIVALS:
+        return False
+    if min(rival.color_match, rival.style_match, rival.grape_match) == -1:
+        return True
+    return rival.disc_n > 0 and rival.disc_hit == 0 and row.disc_hit > 0
+
+
+MIN_OCR_LINES_RIVALS = 3
+
+
+def derive(rows: list[PairFeatures], rivals: str = "all") -> list[dict]:
     """Добавить признаки, которые имеют смысл только в сравнении с остальными кандидатами.
 
     Одинокий косинус 0.83 не говорит ни о чём: у одних вин так выглядит верный ответ, у других
     случайный сосед. А вот отрыв от лучшего кандидата информативен всегда — он показывает,
     насколько модель колеблется. Это ровно та величина, которой не хватало для порога отказа.
+
+    `rivals="text"` — визуальные разрыв и отрыв (`vis_gap`, `inliers_gap`, `vis_margin`,
+    `inliers_margin`) считаются только против соперников, которых текст не опроверг
+    (`text_refutes`); `"all"` — против всех, как было.
     """
     import numpy as np
 
@@ -260,8 +284,13 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
                 text_top[rank].txt_score if rank < len(text_top) else -1.0
             )
         data["txt_in_top5"] = int(data["txt_rank"] < 5)
-        data["vis_gap"] = best_vis - row.vis_score
-        data["inliers_gap"] = best_inliers - row.inliers
+        if rivals == "text":
+            seen = [r for r in rows if r is row or not text_refutes(r, row)]
+            data["vis_gap"] = max(r.vis_score for r in seen) - row.vis_score
+            data["inliers_gap"] = max(r.inliers for r in seen) - row.inliers
+        else:
+            data["vis_gap"] = best_vis - row.vis_score
+            data["inliers_gap"] = best_inliers - row.inliers
         # Улика за сиблинга: лучшее подтверждение различающих слов у другой карточки той же
         # винодельни. Если этикетка подтверждает соседа, а не этого кандидата, — перед нами
         # близнец, и визуальная похожесть здесь ничего не стоит.
@@ -278,8 +307,15 @@ def derive(rows: list[PairFeatures]) -> list[dict]:
         # нулю. Убери из списка правильный ответ — и занявший его место кандидат получит
         # ровно те же нули, то есть станет для модели неотличим от верного.
         others = [r for r in rows if r is not row]
-        data["vis_margin"] = row.vis_score - max((r.vis_score for r in others), default=0.0)
-        data["inliers_margin"] = row.inliers - max((r.inliers for r in others), default=0)
+        visual_rivals = (
+            [r for r in others if not text_refutes(r, row)] if rivals == "text" else others
+        )
+        data["vis_margin"] = row.vis_score - max(
+            (r.vis_score for r in visual_rivals), default=0.0
+        )
+        data["inliers_margin"] = row.inliers - max(
+            (r.inliers for r in visual_rivals), default=0
+        )
         # Доля инлаеров кандидата среди всех: если один кандидат забрал их почти все,
         # это гораздо убедительнее, чем просто большое абсолютное число.
         data["inliers_share"] = row.inliers / total_inliers

@@ -32,7 +32,33 @@ _SYNONYMS = {
     "Шираз": "Сира",
     "Пино Гриджио": "Пино Гри",
     "Бьянка": "Бианка",
+    # Латинское написание сворачивается не так, как русское: «Blanc» в «beloe», «Petit»
+    # не в «пти».
+    "Chenin Blanc": "Шенен Блан",
+    "Petit Verdot": "Пти Вердо",
 }
+# Сорта, которых нет ни в одной карточке. Совпасть с карточкой им не с чем, но на этикетке
+# они говорят «это другое вино»: «КАРИНЬЯН» у незнакомого вина Солнечной Долины не должен
+# молча подтверждать «Чёрного Доктора» из Эким-Кара (разбор ошибок теста 18.10).
+_EXTRA = (
+    "Кариньян",
+    "Альбариньо",
+    "Гаме",
+    "Барбера",
+    "Дольчетто",
+    "Пинотаж",
+    "Фурминт",
+    "Треббьяно",
+    "Гарганега",
+    "Фиано",
+    "Ассиртико",
+    "Аглианико",
+    "Таннат",
+)
+# Первое слово сорта, которое на этикетке часто пишут одно: «CABERNET» без «Sauvignon» или
+# «Franc». Такое слово совпадает с любым сортом каталога, который с него начинается
+# (compare: фраза этикетки вложена в фразу карточки), и противоречит остальным.
+_HEADS = ("Каберне",)
 # Однословные «сорта», которые слишком легко встретить на этикетке в другом смысле.
 _AMBIGUOUS = {
     "Достойный",
@@ -93,8 +119,10 @@ class GrapeVocabulary:
             token for p in payloads for token in fold_tokens(str(p.get("winery") or ""))
         }
         phrases: dict[str, tuple[str, ...]] = {}
-        for payload in payloads:
-            for phrase in parse(payload.get("grapes", "")):
+        sources = [parse(payload.get("grapes", "")) for payload in payloads]
+        sources.append(frozenset(_canonical(name) for name in _EXTRA))
+        for found in sources:
+            for phrase in found:
                 words = tuple(phrase.split())
                 single = len(words) == 1
                 if single and (phrase in _AMBIGUOUS_FOLDED or phrase in winery_words):
@@ -102,11 +130,28 @@ class GrapeVocabulary:
                 if single and len(phrase) < 4:
                     continue
                 phrases[phrase] = words
+        for head in (_canonical(name) for name in _HEADS):
+            if head not in winery_words and any(
+                len(words) > 1 and words[0] == head for words in phrases.values()
+            ):
+                phrases.setdefault(head, (head,))
         # Синонимы ищутся на этикетке своим написанием («SHIRAZ»), а находятся каноном.
         for synonym, canonical in _CANON.items():
             if canonical in phrases:
                 phrases[synonym] = tuple(synonym.split())
         return cls(phrases)
+
+    def in_name(self, name_tokens: list[str]) -> frozenset[str]:
+        """Сорт по словам названия — для карточек, у которых поле `grapes` общее («Белые сорта
+        винограда»): «Мускатель белый» — мускат. Иначе этикетка «МУСКАТ» давала +1 соседу
+        «Мускат Белый Южнобережный» и ничего верной карточке (разбор ошибок v8). Слово
+        названия совпадает с однословным сортом целиком или начинается с него."""
+        found = set()
+        for token in name_tokens:
+            for phrase, parts in self.phrases.items():
+                if len(parts) == 1 and len(phrase) >= 5 and token.startswith(phrase):
+                    found.add(_CANON.get(phrase, phrase))
+        return frozenset(found)
 
     def find(self, text: str) -> frozenset[str]:
         """Сорта, названные в тексте: жадно, самая длинная фраза с каждой позиции."""

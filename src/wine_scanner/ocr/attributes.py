@@ -140,16 +140,80 @@ def from_tokens(tokens: list[str]) -> Attributes:
 _CATEGORY_COLOR = {"Белое": "white", "Красное": "red", "Розовое": "rose", "Оранжевое": "orange"}
 
 
-def from_card(payload: dict, name_tokens: list[str]) -> Attributes:
-    """Атрибуты карточки: цвет — из `category`, остальное — из слов названия."""
+_SLUG_SWEETNESS = {
+    "suhoe": "dry",
+    "polusuhoe": "semidry",
+    "polusladkoe": "semisweet",
+    "sladkoe": "sweet",
+    "desertnoe": "sweet",
+    "bryut": "brut",
+}
+_SLUG_COLORS = {"beloe", "krasnoe", "rozovoe", "oranzhevoe"}
+# Игристое по адресу и описанию карточки. «Брют» бывает только у игристых.
+_SLUG_SPARKLING = {"igristoe", "shampanskoe", "bryut", "prosekko", "kava", "asti", "kremant"}
+_DESCRIPTION_SPARKLING = ("игрист", "шампанск", "перлаж", "пузырьк")
+
+
+def sweetness_from_slug(slug: str) -> str | None:
+    """Сладость из адреса карточки на сайте: «…-risling-reynskiy-beloe-polusladkoe-125».
+
+    Сайт пишет в конце адреса цвет и сладость. Слово сладости берётся, только если оно стоит
+    сразу после слова цвета или последним (без чисел объёма): иначе «Сухое» из названия
+    вина стало бы сладостью. Разные значения в одном адресе — неизвестно.
+    """
+    words = [w for w in str(slug or "").split("-") if w and not w.isdigit()]
+    found = set()
+    for i, word in enumerate(words):
+        if word in _SLUG_SWEETNESS and (
+            i == len(words) - 1 or (i > 0 and words[i - 1] in _SLUG_COLORS)
+        ):
+            value = _SLUG_SWEETNESS[word]
+            if value == "brut" and i > 0 and words[i - 1] == "ekstra":
+                value = "extra_brut"
+            found.add(value)
+    return found.pop() if len(found) == 1 else None
+
+
+def sparkling_from_card(payload: dict) -> bool:
+    """Игристое ли вино по адресу и описанию: у «Цимлянского белого полусладкого» слова
+    «игристое» нет в названии, но описание начинается с «Вкус игристого вина»."""
+    words = set(str(payload.get("slug") or "").split("-"))
+    if words & _SLUG_SPARKLING:
+        return True
+    description = str(payload.get("description") or "").lower()
+    return any(stem in description for stem in _DESCRIPTION_SPARKLING)
+
+
+def from_card(payload: dict, name_tokens: list[str], grapes_from_name=None) -> Attributes:
+    """Атрибуты карточки: цвет — из `category`, остальное — из слов названия, а чего нет в
+    названии — из адреса и описания.
+
+    Неполная карточка проигрывает соседу просто тем, что о ней меньше известно: у красного
+    «Цимлянского» игристость названа и даёт +1, у белого — нет (разбор ошибок v8). Поэтому:
+    - сладость, которой нет в названии, берётся из адреса («…-beloe-polusladkoe-125»);
+      название важнее адреса: в адресах сайта бывают ошибки;
+    - игристость — из названия, адреса или описания; если нигде не сказано — неизвестно, а
+      не «тихое»: карточка игристого без описания иначе спорила бы с этикеткой «ИГРИСТОЕ»;
+    - сорт, если поле `grapes` общее («Белые сорта винограда»), — из слов названия
+      (`grapes_from_name`: «Мускатель» — мускат).
+    """
     guessed = from_tokens(name_tokens)
     color = _CATEGORY_COLOR.get(str(payload.get("category", "")).strip()) or guessed.color
+    sweetness = guessed.sweetness or sweetness_from_slug(payload.get("slug", ""))
+    if guessed.fortified:
+        sparkling = False
+    else:
+        stated = guessed.sparkling or sweetness in ("brut", "extra_brut")
+        sparkling = True if stated or sparkling_from_card(payload) else None
+    grapes = parse(payload.get("grapes", ""))
+    if not grapes and grapes_from_name is not None:
+        grapes = grapes_from_name(name_tokens)
     return Attributes(
         color=color,
-        sweetness=guessed.sweetness,
-        sparkling=guessed.sparkling,
+        sweetness=sweetness,
+        sparkling=sparkling,
         fortified=guessed.fortified,
-        grapes=parse(payload.get("grapes", "")),
+        grapes=grapes,
     )
 
 

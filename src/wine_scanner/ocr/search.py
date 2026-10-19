@@ -230,7 +230,7 @@ class TextIndex:
                 name=name,
                 winery=winery,
                 disc=disc,
-                attrs=attributes.from_card(payload, sorted(name)),
+                attrs=attributes.from_card(payload, sorted(name), self.grapes.in_name),
                 family=family,
                 disc_weights={t: math.log(size / counts[t]) + 0.1 for t in disc},
             )

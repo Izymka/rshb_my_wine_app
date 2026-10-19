@@ -121,7 +121,7 @@ scanner может оставаться на локальном сервере �
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_platform_sq_v3_v8 \
+WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_site1810_abd \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 ```
@@ -136,7 +136,7 @@ cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # 
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3_site_1810`: 2272 карточки, каталог сайта на 18.10.2026) |
-| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_platform_sq_v3_v8`, обучен под OCR из `WINE_OCR_DET` и `WINE_OCR_REC`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_site1810_abd`, обучен под OCR из `WINE_OCR_DET` и `WINE_OCR_REC`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_OCR_DET` | `PP-OCRv5_mobile_det` (в Docker и `.env.example` — `PP-OCRv6_medium_det`) | Детектор строк PaddleOCR. PP-OCRv6 medium на тесте 18.10: текст R@5 0.82 → 0.89, верных при пороге 0.4 87 → 89 из 100, общее время не растёт. Имя детектора входит в ключ кэша OCR |
 | `WINE_OCR_REC` | `eslav_PP-OCRv5_mobile_rec` (в Docker и `.env.example` — `models/ocr_rec/PP-OCRv6_medium_rec_ru`) | Распознаватель строк: имя модели PaddleOCR или папка модели; папка с `inference.onnx` читается через onnxruntime (`onnxruntime-gpu` в окружении OCR). Русский PP-OCRv6 medium с решающим слоем v8 на тесте 18.10: верных при пороге 0.4 89 → 94 из 100, ложных приёмов те же 14 из 102, общее время p50 0.98 → 1.03 с. Решающий слой обучен под распознаватель: v8 — под русский, v7 — под eslav. Входит в ключ кэша OCR |
@@ -188,7 +188,7 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
   --out models/decider_platform_sq_v3_v7                    # параметры v6, признаки v7
 uv run python eval/threshold_selection.py --decider models/decider_platform_sq_v3_v7 \
   --apply utility                                           # порог по пользе, бутстреп по винодельням
-# v8 (сервис с 18.10.2026): те же параметры, индекс сайта 18.10 и OCR из .env (WINE_OCR_DET,
+# v8 (сервис 18.10.2026): те же параметры, индекс сайта 18.10 и OCR из .env (WINE_OCR_DET,
 # WINE_OCR_REC — признаки зависят от того, как читается текст)
 uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3_site_1810 \
   --sources synthetic,train --out eval/results/features_platform_site_v6det_ru.jsonl
@@ -197,6 +197,16 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
   --out models/decider_platform_sq_v3_v8
 uv run python eval/threshold_selection.py --decider models/decider_platform_sq_v3_v8 \
   --features eval/results/features_platform_site_v6det_ru.jsonl --apply utility
+# А+Б+Г (сервис с 19.10.2026): признаки пересобраны кодом с дозаполненными атрибутами карточек,
+# монотонные признаки текста, визуальный отрыв только от соседей, не опровергнутых текстом
+export WINE_OCR_PYTHON=.venv-ocr/Scripts/python.exe   # иначе распознаватель поднимется без GPU
+uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3_site_1810 \
+  --sources synthetic,train --out eval/results/features_platform_site_v6det_ru_A.jsonl
+uv run python scripts/train_decider.py --features eval/results/features_platform_site_v6det_ru_A.jsonl \
+  --params-from models/decider_platform_sq_v3_v8 --calibration live-split --scenario real \
+  --monotone text --gap-rivals text --out models/decider_site1810_abd
+uv run python eval/threshold_selection.py --decider models/decider_site1810_abd \
+  --features eval/results/features_platform_site_v6det_ru_A.jsonl --apply utility
 ```
 
 Решающий слой обучен на признаках, которые зависят от того, как OCR прочитал этикетку. Поэтому

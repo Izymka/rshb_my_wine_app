@@ -122,7 +122,7 @@ class Decider:
         """Оценить кандидатов и вернуть порядок ranker'а с confidence для каждого."""
         if not rows:
             return []
-        derived = derive(rows)
+        derived = derive(rows, rivals=self.meta.get("gap_rivals", "all"))
         values = np.asarray([[float(row[name]) for name in self.feature_names] for row in derived])
         if hasattr(self.booster, "predict_proba"):
             confidence_raw = np.asarray(self.booster.predict_proba(values)[:, 1], dtype=float)
@@ -136,6 +136,17 @@ class Decider:
             if self.ranker is not None
             else confidence_raw
         )
+        # Запрет по тексту (meta «veto»): карточке, которой противоречит читаемая этикетка по
+        # одной из осей, оценка умножается на коэффициент — и в порядке, и в уверенности.
+        veto = self.meta.get("veto")
+        if veto:
+            hit = np.asarray([
+                row["ocr_lines"] >= 3 and any(row[f"{axis}_match"] == -1 for axis in veto["axes"])
+                for row in derived
+            ])
+            factor = float(veto["factor"])
+            confidence_raw = np.where(hit, confidence_raw * factor, confidence_raw)
+            ranking_raw = np.where(hit, ranking_raw * factor, ranking_raw)
         probability = self.calibrate(confidence_raw)
         scored = [
             Scored(row.item_id, float(p), float(r), features)

@@ -22,7 +22,7 @@ FOLDER_URL = f"https://drive.google.com/drive/folders/{FOLDER_ID}"
 ARCHIVES = {
     "wine_scanner_artifacts.tar": (
         "models/index_platform_sq_v3_site_1810",
-        "models/decider_platform_sq_v3_v8",
+        "models/decider_site1810_abd",
         "models/ocr_rec/PP-OCRv6_medium_rec_ru",
         "models/rtdetr_label_recrop_bf16",
         "data/catalog/catalog.csv",
@@ -36,8 +36,8 @@ OCR_MODELS = ("PP-OCRv6_medium_det", "PP-OCRv6_medium_rec_ru")
 ESSENTIAL = (
     "models/index_platform_sq_v3_site_1810/vectors.faiss",
     "models/index_platform_sq_v3_site_1810/meta.json",
-    "models/decider_platform_sq_v3_v8/model.cbm",
-    "models/decider_platform_sq_v3_v8/meta.json",
+    "models/decider_site1810_abd/model.cbm",
+    "models/decider_site1810_abd/meta.json",
     "models/ocr_rec/PP-OCRv6_medium_rec_ru/inference.onnx",
     "models/rtdetr_label_recrop_bf16",
     "models/siglip2/model.safetensors",
@@ -171,7 +171,7 @@ def digest(paths: list[Path]) -> str:
 
 def check_health() -> None:
     index = ROOT / "models/index_platform_sq_v3_site_1810"
-    decider = ROOT / "models/decider_platform_sq_v3_v8"
+    decider = ROOT / "models/decider_site1810_abd"
     expected_version = {
         "index": digest([index / name for name in
                          ("vectors.faiss", "meta.json", "config.json", "whitening.npz")]

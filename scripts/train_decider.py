@@ -30,8 +30,37 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
 from wine_scanner.catalog import is_holdout
-from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures, derive, logit, matrix
+from wine_scanner.decide import FEATURE_NAMES, Decider, PairFeatures, logit, matrix
+from wine_scanner.decide import derive as derive_rows
 from wine_scanner.decide.features import RAW_FEATURE_VERSIONS
+
+# Против кого считаются визуальные разрывы (--gap-rivals, см. features.derive). Задаётся один
+# раз в main и уходит в meta: сервис обязан считать признаки так же, как обучение.
+RIVALS = "all"
+# Запрет по тексту (--veto): оси и коэффициент, как в Decider.score.
+VETO: dict | None = None
+# Монотонные ограничения бустера (--monotone): имя признака -> +1 / −1.
+MONOTONE: dict[str, int] = {}
+# Признаки текста, с ростом которых уверенность не должна падать (--monotone text).
+TEXT_MONOTONE = (
+    "color_match", "style_match", "grape_match", "attr_agree", "name_cover", "disc_hit",
+    "winery_hit", "family_color_margin", "family_style_margin", "family_grape_margin",
+    "family_attr_margin", "family_disc_margin",
+)
+
+
+def derive(rows: list[PairFeatures]) -> list[dict]:
+    return derive_rows(rows, rivals=RIVALS)
+
+
+def vetoed(derived: list[dict], scores: np.ndarray) -> np.ndarray:
+    if not VETO:
+        return scores
+    hit = np.asarray([
+        row["ocr_lines"] >= 3 and any(row[f"{a}_match"] == -1 for a in VETO["axes"])
+        for row in derived
+    ])
+    return np.where(hit, scores * VETO["factor"], scores)
 
 FEATURES_PATH = Path("eval/results/features.jsonl")
 OUT_DIR = Path("models/decider")
@@ -104,7 +133,11 @@ def training_rows(
     return rows, labels, weights
 
 
-def make_confidence_model(params: dict | None = None) -> CatBoostClassifier:
+def make_confidence_model(
+    params: dict | None = None, names: tuple[str, ...] = FEATURE_NAMES
+) -> CatBoostClassifier:
+    if MONOTONE:
+        params = {**(params or {}), "monotone_constraints": [MONOTONE.get(n, 0) for n in names]}
     if params:
         # Параметры готового решающего слоя (--params-from): их подбирал ноутбук 06.
         return CatBoostClassifier(
@@ -402,7 +435,24 @@ def main() -> None:
         help="дописать к набору из --params-from признаки через запятую "
         "(например vis_std,vis_mean)",
     )
+    parser.add_argument("--gap-rivals", choices=("all", "text"), default="all")
+    parser.add_argument("--veto", default="", help="оси запрета по тексту: color,style,grape")
+    parser.add_argument("--veto-factor", type=float, default=0.0)
+    parser.add_argument(
+        "--monotone", default="", help="имя:+1 / имя:-1 через запятую или «text»"
+    )
     args = parser.parse_args()
+
+    global RIVALS, VETO
+    RIVALS = args.gap_rivals
+    if args.veto:
+        VETO = {"axes": args.veto.split(","), "factor": args.veto_factor}
+    for item in filter(None, args.monotone.split(",")):
+        if item == "text":
+            MONOTONE.update({n: 1 for n in TEXT_MONOTONE})
+        else:
+            name, _, sign = item.partition(":")
+            MONOTONE[name] = int(sign)
 
     names, params = FEATURE_NAMES, None
     if args.params_from is not None:
@@ -452,7 +502,7 @@ def main() -> None:
         confidence_rows, labels, weights = training_rows(
             train_groups, args.augment_unknown, args.live_weight
         )
-        confidence = make_confidence_model(params).fit(
+        confidence = make_confidence_model(params, names).fit(
             np.asarray(confidence_rows)[:, columns],
             np.asarray(labels),
             sample_weight=np.asarray(weights),
@@ -463,8 +513,11 @@ def main() -> None:
             ranker = make_ranker().fit(rank_pool)
 
         def select(candidates: list[PairFeatures], ranker=ranker, confidence=confidence) -> tuple:
-            values = np.asarray(matrix(derive(candidates)))[:, columns]
-            confidence_raw = np.asarray(confidence.predict_proba(values)[:, 1], dtype=float)
+            derived = derive(candidates)
+            values = np.asarray(matrix(derived))[:, columns]
+            confidence_raw = vetoed(
+                derived, np.asarray(confidence.predict_proba(values)[:, 1], dtype=float)
+            )
             ranking = (
                 np.asarray(ranker.predict(values), dtype=float).ravel()
                 if ranker is not None
@@ -604,7 +657,7 @@ def main() -> None:
                 f"{precision_at_prior(current, share):.3f}"
             )
 
-    final_confidence = make_confidence_model(params)
+    final_confidence = make_confidence_model(params, names)
     rows, labels, weights = training_rows(
         [by_query[q] for q in queries], args.augment_unknown, args.live_weight
     )
@@ -642,6 +695,9 @@ def main() -> None:
         ranker=final_ranker,
         meta={
             "trained_on": str(args.features),
+            "gap_rivals": RIVALS,
+            "veto": VETO,
+            "monotone": MONOTONE or None,
             "holdout_isolated": True,
             "queries": len(queries),
             "unknown_queries": int((~known).sum()),

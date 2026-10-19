@@ -40,8 +40,11 @@ services:
       # (data/catalog/label_overrides.csv, scripts/patch_index_crops.py) и 169 винами сайта,
       # заведёнными scripts/add_site_wines.py, — всего 2272 карточки.
       WINE_INDEX: /app/models/index_platform_sq_v3_site_1810
-      # Решающий слой v8: параметры v7, обучен на признаках индекса сайта 18.10 и OCR ниже.
-      WINE_DECIDER: /app/models/decider_platform_sq_v3_v8
+      # Решающий слой А+Б+Г (19.10): параметры v8 на признаках индекса сайта 18.10 и OCR ниже,
+      # с дозаполненными атрибутами карточек, монотонными признаками текста и визуальным отрывом
+      # только от соседей, которых текст не опроверг. Тест при пороге 0.4: верных 94 (как v8),
+      # ложных приёмов 9 из 102 вместо 14. Нужен код того же коммита: признаки считаются иначе.
+      WINE_DECIDER: /app/models/decider_site1810_abd
       # Порог отказа /scan вместо 0.533 из meta.json решающего слоя (см. api/main.py).
       WINE_THRESHOLD: ${WINE_THRESHOLD:-0.4}
       # Локальный PaddleOCR; yandex/hybrid используют его и для облачного отката.

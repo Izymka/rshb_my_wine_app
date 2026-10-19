@@ -43,6 +43,12 @@ READING = (
     "family_grape_margin",
     "family_attr_margin",
 )
+# Признаки текста, с ростом которых уверенность не должна падать (--monotone text).
+TEXT_MONOTONE = (
+    "color_match", "style_match", "grape_match", "attr_agree", "name_cover", "disc_hit",
+    "winery_hit", "family_color_margin", "family_style_margin", "family_grape_margin",
+    "family_attr_margin", "family_disc_margin",
+)
 RESULTS = Path("eval/results/decider_feature_ablation.jsonl")
 
 
@@ -75,6 +81,27 @@ def main() -> None:
         "--raw-version", type=int, default=None,
         help="принять сырые пары этой версии (сравнение со старым файлом признаков)",
     )
+    parser.add_argument(
+        "--monotone", default="",
+        help="монотонные ограничения: имя:+1 или имя:-1 через запятую; "
+        "«text» — набор признаков текста по умолчанию",
+    )
+    parser.add_argument(
+        "--veto", default="",
+        help="оси запрета после модели (color,style,grape): оценка карточки, которой "
+        "противоречит читаемый текст, умножается на --veto-factor",
+    )
+    parser.add_argument("--veto-factor", type=float, default=0.0)
+    parser.add_argument(
+        "--veto-mode", choices=("exclude", "refuse"), default="exclude",
+        help="exclude — понизить карточку (наверх выйдет следующая); refuse — выбор прежний, "
+        "понижается только уверенность выбранной",
+    )
+    parser.add_argument(
+        "--gap-rivals", choices=("all", "text"), default="all",
+        help="визуальные разрывы против всех соперников или только не опровергнутых текстом",
+    )
+    parser.add_argument("--dump", type=Path, default=None, help="выборы сида 2026 в jsonl")
     args = parser.parse_args()
 
     meta = json.loads((args.params_from / "meta.json").read_text(encoding="utf-8"))
@@ -96,12 +123,34 @@ def main() -> None:
 
     full, labels, no_true = {}, {}, {}
     for q in queries:
-        rows = derive(by_query[q])
+        rows = derive(by_query[q], rivals=args.gap_rivals)
         full[q] = {n: np.asarray([float(r[n]) for r in rows]) for n in FEATURE_NAMES}
         labels[q] = np.asarray([r["label"] for r in rows])
         rest = [c for c in by_query[q] if not c.label]
         if len(rest) < len(by_query[q]):
-            no_true[q] = {n: np.asarray([float(r[n]) for r in derive(rest)]) for n in FEATURE_NAMES}
+            no_true[q] = {
+                n: np.asarray([float(r[n]) for r in derive(rest, rivals=args.gap_rivals)])
+                for n in FEATURE_NAMES
+            }
+
+    monotone = {}
+    for item in filter(None, args.monotone.split(",")):
+        if item == "text":
+            monotone.update({n: 1 for n in TEXT_MONOTONE})
+            continue
+        name, _, sign = item.partition(":")
+        monotone[name] = int(sign)
+    if any(n not in FEATURE_NAMES for n in monotone):
+        parser.error(f"неизвестные признаки: {[n for n in monotone if n not in FEATURE_NAMES]}")
+    veto_axes = [f"{a}_match" for a in filter(None, args.veto.split(","))]
+
+    def vetoed(q: str, scores: np.ndarray) -> np.ndarray:
+        """Запрет по тексту: карточке, которой противоречит читаемая этикетка, — оценка ниже."""
+        if not veto_axes:
+            return scores
+        block = full[q]
+        hit = (block["ocr_lines"] >= 3) & np.any([block[a] == -1 for a in veto_axes], axis=0)
+        return np.where(hit, scores * args.veto_factor, scores)
 
     def columns(block: dict, names: list[str]) -> np.ndarray:
         return np.column_stack([block[n] for n in names])
@@ -117,8 +166,11 @@ def main() -> None:
                 x.append(columns(no_true[q], names))
                 y.append(np.zeros(len(no_true[q][names[0]]), int))
                 w.append(np.full(len(no_true[q][names[0]]), weight))
+        extra = {}
+        if monotone:
+            extra["monotone_constraints"] = [monotone.get(n, 0) for n in names]
         model = CatBoostClassifier(
-            **params, loss_function="Logloss", random_seed=seed, thread_count=-1,
+            **params, **extra, loss_function="Logloss", random_seed=seed, thread_count=-1,
             allow_writing_files=False, verbose=False,
         )
         return model.fit(np.vstack(x), np.concatenate(y), sample_weight=np.concatenate(w))
@@ -140,8 +192,14 @@ def main() -> None:
                 for i in test_idx:
                     q = queries[i]
                     if known[q] or live[q]:
-                        scores = model.predict_proba(columns(full[q], names))[:, 1]
-                        chosen[q] = (by_query[q][int(np.argmax(scores))].item_id, scores, labels[q])
+                        raw = model.predict_proba(columns(full[q], names))[:, 1]
+                        scores = vetoed(q, raw)
+                        best = int(np.argmax(scores))
+                        if args.veto_mode == "refuse":
+                            best = int(np.argmax(raw))
+                            # Уверенность ответа — у выбранной; остальные не выше неё.
+                            scores = np.minimum(raw, vetoed(q, raw)[best])
+                        chosen[q] = (by_query[q][best].item_id, scores, labels[q])
             per_seed.append(chosen)
 
         def metric(chosen: dict, subset: list[str], strict: bool) -> float:
@@ -211,11 +269,22 @@ def main() -> None:
             mark_a, mark_b = ("ok" if x in group else "x" for x in (a, b))
             print(f"  {mark_a}->{mark_b} {wine[q]}: {a} -> {b}")
 
+    if args.dump:
+        with args.dump.open("w", encoding="utf-8") as fh:
+            for name in sets:
+                for q, (best, scores, _) in picks[name].items():
+                    fh.write(json.dumps({
+                        "set": name, "query": q, "wine": wine[q], "known": known[q],
+                        "live": live[q], "best": best, "p": float(scores.max()),
+                    }, ensure_ascii=False) + "\n")
+
     RESULTS.parent.mkdir(parents=True, exist_ok=True)
     with RESULTS.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({
             "tag": args.tag, "features": str(args.features), "params_from": str(args.params_from),
             "folds": args.folds, "seeds": args.seeds, "live_weight": args.live_weight,
+            "monotone": args.monotone, "veto": args.veto, "veto_factor": args.veto_factor,
+            "gap_rivals": args.gap_rivals,
             "summary": summary,
         }, ensure_ascii=False) + "\n")
 
