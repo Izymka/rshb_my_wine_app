@@ -21,8 +21,13 @@ export function useSeenCards() {
     // Полная карточка (с описанием) важнее урезанной карточки аналога: не затираем её.
     const bySlug = new Map(cards.value.map((c) => [c.slug, c]));
     for (const c of fresh) bySlug.set(c.slug, { ...c, ...bySlug.get(c.slug), ...(c.description ? c : {}) });
-    cards.value = [...bySlug.values()].slice(-LIMIT);
-    try { sessionStorage.setItem(KEY, JSON.stringify(cards.value)); } catch { /* приватный режим */ }
+    const next = [...bySlug.values()].slice(-LIMIT);
+    const serialized = JSON.stringify(next);
+    // Аналоги вычисляются из этого кеша и снова попадают в remember через WineDetails.
+    // Не меняем реактивное состояние без изменения данных, иначе возникает цикл обновлений.
+    if (serialized === JSON.stringify(cards.value)) return;
+    cards.value = next;
+    try { sessionStorage.setItem(KEY, serialized); } catch { /* приватный режим */ }
   }
   const seen = (slug: string) => cards.value.find((c) => c.slug === slug);
   return { cards, remember, seen };

@@ -1,8 +1,20 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help web-env web web-install web-build web-start web-dev db db-stop db-seed db-unseed tunnel tunnel-stop scanner-init release-prepare release-publish
+.PHONY: help up up-scanner scanner down web-env web web-install web-build web-start web-dev db db-stop db-seed db-unseed tunnel tunnel-stop scanner-init release-prepare release-publish
 
 PYTHON ?= python3
+
+up: ## Собрать и запустить локальный стек scanner + web в фоне
+	docker compose up -d --build
+
+up-scanner: ## Собрать и запустить только scanner в фоне
+	docker compose up -d scanner
+
+scanner: ## Собрать и запустить только scanner в фоне
+	docker compose up -d scanner
+
+down: ## Остановить локальный стек и удалить контейнеры, сохранив тома
+	docker compose down
 
 scanner-init: ## Скачать релиз, проверить SHA256, распаковать и запустить scanner (повторяемо)
 	$(PYTHON) scripts/release_scanner.py deploy
@@ -10,7 +22,7 @@ scanner-init: ## Скачать релиз, проверить SHA256, расп�
 release-prepare: ## Пересобрать два релизных архива, SHA256SUMS и инструкцию
 	$(PYTHON) scripts/release_scanner.py prepare
 
-release-publish: release-prepare ## С подтверждением загрузить релиз в Google Drive (DRIVE_REMOTE=gdrive:)
+release-publish: ## С подтверждением загрузить релиз в Google Drive (DRIVE_REMOTE=gdrive:)
 	$(PYTHON) scripts/release_scanner.py publish
 
 help: ## Показать команды
