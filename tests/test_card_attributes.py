@@ -73,6 +73,9 @@ def test_genitive_colour_is_not_wine_colour():
     assert from_tokens(fold_tokens("МУСКАТ БЕЛЫЙ КРАСНОГО КАМНЯ")).color == "white"
     assert from_tokens(fold_tokens("МАССАНДРА КРАСНОГ")).color is None
     assert from_tokens(fold_tokens("КРАСНО")).color == "red"  # обрезанное «красное»
+    assert from_tokens(fold_tokens("ШАРДОНЕ КРАСНАЯ ГОРКА 2020")).color is None
+    assert from_tokens(fold_tokens("БЕЛАЯ ПОЛЯНА КРАСНОЕ СУХОЕ")).color == "red"
+    assert from_tokens(fold_tokens("КРАСНАЯ")).color == "red"
 
 
 def test_truncated_sweetness_is_not_contradiction():

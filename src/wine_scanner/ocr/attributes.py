@@ -69,6 +69,14 @@ _FORTIFIED = {
 # «белых сортов винограда» — не цвет вина. Слово цвета перед «sort…» не считается.
 _GRAPE_MARKER = _fold("сорт")
 _EXTRA = _fold("экстра")
+# «Красная Горка», «Белая Поляна» — место, а не цвет: вино среднего рода, и прилагательное
+# женского рода перед таким словом говорит о названии урочища (фото организаторов 013,
+# «Шардоне» Галицкого белое, а «КРАСНАЯ ГОРКА» спорило с ним). Сравнение по началу слова.
+_PLACE_NOUNS = tuple(
+    _fold(w)
+    for w in ("горк", "гор", "полян", "балк", "долин", "скал", "звезд", "слобод", "рек", "крепост")
+)
+_FEMININE_COLORS = {_fold(w) for w in ("красная", "белая", "розовая")}
 
 # Формы перечислены явно, а не по основе: иначе «belmas» и «krasnostop» превратятся в цвет.
 # Записаны по-русски и сворачиваются при импорте той же функцией, что и текст этикетки.
@@ -152,7 +160,8 @@ def from_tokens(tokens: list[str]) -> Attributes:
         color = _color(token)
         if color:
             following = tokens[i + 1] if i + 1 < len(tokens) else ""
-            if not following.startswith(_GRAPE_MARKER):
+            place = token in _FEMININE_COLORS and following.startswith(_PLACE_NOUNS)
+            if not following.startswith(_GRAPE_MARKER) and not place:
                 colors.add(color)
         value = _sweetness(token)
         if value:
