@@ -81,5 +81,51 @@ create table if not exists reviews (
   primary key (user_id, slug)
 );
 create index if not exists reviews_slug on reviews (slug, updated_at desc);
+-- Игра «Моя винодельня»: состояние игрока целиком в jsonb (правила — utils/game.mjs), журнал
+-- действий для идемпотентности и аудита, журнал наград за действия в сервисе и Винордл.
+create table if not exists game_profiles (
+  user_id bigint primary key references users(id) on delete cascade,
+  state jsonb not null,
+  version integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists game_ledger (
+  id bigserial primary key,
+  user_id bigint not null references users(id) on delete cascade,
+  request_id text,
+  action text not null,
+  delta jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+create unique index if not exists game_ledger_request on game_ledger (user_id, request_id) where request_id is not null;
+create table if not exists game_service_rewards (
+  user_id bigint not null references users(id) on delete cascade,
+  kind text not null,
+  ref text not null,
+  day date not null,
+  reward jsonb not null,
+  seen boolean not null default false,
+  created_at timestamptz not null default now(),
+  primary key (user_id, kind, ref)
+);
+create index if not exists game_service_rewards_day on game_service_rewards (user_id, kind, day);
+create table if not exists wordle_attempts (
+  user_id bigint not null references users(id) on delete cascade,
+  day date not null,
+  guesses integer[] not null default '{}',
+  solved boolean not null default false,
+  finished boolean not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, day)
+);
+create index if not exists wordle_attempts_day on wordle_attempts (day);
+-- Игровые пуши: подписки устройств игрока и журнал отправленного (utils/game-push.mjs).
+create table if not exists game_push (
+  user_id bigint primary key references users(id) on delete cascade,
+  devices jsonb not null default '[]',
+  log jsonb not null default '{}',
+  updated_at timestamptz not null default now()
+);
 `;
 

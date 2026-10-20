@@ -130,6 +130,8 @@ services:
       NUXT_DATABASE_URL: postgres://${POSTGRES_USER:-wine}:${POSTGRES_PASSWORD:-wine}@postgres:5432/${POSTGRES_DB:-wine}
       # СМС-провайдер не подключён: код входа показывается на экране. 0 — не отдавать код.
       NUXT_AUTH_DEMO_CODES: ${AUTH_DEMO_CODES:-1}
+      # Ускорение таймеров игры «Моя винодельня»; 60 — час роста лозы за минуту.
+      NUXT_GAME_SPEED: ${GAME_SPEED:-1}
       # Номер счётчика Яндекс Метрики; пусто — без Метрики.
       NUXT_YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
     depends_on:

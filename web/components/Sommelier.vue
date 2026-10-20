@@ -39,6 +39,7 @@ async function ask(text: string) {
     history.value.push({ role: "assistant", content: data.answer });
     available.value = true;
     goal("sommelier_answer", { slug: props.slug });
+    void claimGameReward();
   } catch {
     failed.value = true;
     goal("sommelier_error", { slug: props.slug });
@@ -55,6 +56,17 @@ onMounted(async () => {
     available.value = false;
   }
 });
+
+// Первый вопрос сомелье за день приносит Грозди в «Моей винодельне» — для вошедших взрослых.
+const { user } = useAuth();
+const gameReward = ref(0);
+async function claimGameReward() {
+  if (!user.value?.adult || gameReward.value) return;
+  try {
+    const r = await $fetch<{ status: string; reward: { gained: { grozdi?: number } } | null }>("/api/game/reward", { method: "POST", body: { kind: "sommelier" } });
+    if (r.status === "granted") gameReward.value = r.reward?.gained.grozdi || 0;
+  } catch {}
+}
 </script>
 
 <template>
@@ -68,6 +80,7 @@ onMounted(async () => {
       <div v-if="busy" class="bubble a pulse">думаю…</div>
       <div v-if="failed" class="error small">Подсказки сейчас недоступны — попробуйте позже.</div>
     </div>
+    <NuxtLink v-if="gameReward" to="/winery" class="meta-line" style="color: var(--accent)"><i class="ph-fill ph-plant" />+{{ gameReward }} Гроздей в «Моей винодельне» за вопрос дня</NuxtLink>
     <div v-if="!history.length" class="chips">
       <button v-for="s in suggestions" :key="s" class="chip" :disabled="!online || busy" @click="ask(s)">{{ s }}</button>
     </div>

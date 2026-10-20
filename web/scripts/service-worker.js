@@ -27,20 +27,22 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
+// Пуш открывает только свои разделы: полку и игру «Моя винодельня».
+const pushPath = (path) => (typeof path === "string" && /^\/(wines\/|winery(\/|\?|$))/.test(path) ? path : "/wines");
 self.addEventListener("push", (event) => {
   let data = {};
   try { data = event.data?.json() || {}; } catch {}
   event.waitUntil(self.registration.showNotification(data.title || "Мои вина", {
     body: data.body || "Сохраните впечатление о вине на вашей полке.",
     icon: "/icon.png", badge: "/icon.png", tag: data.tag || "wine-review",
-    data: { url: typeof data.url === "string" && data.url.startsWith("/wines/") ? data.url : "/wines" },
+    data: { url: pushPath(data.url) },
   }));
 });
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   event.waitUntil((async () => {
     const path = event.notification.data?.url;
-    const url = new URL(typeof path === "string" && path.startsWith("/wines/") ? path : "/wines", self.location.origin);
+    const url = new URL(pushPath(path), self.location.origin);
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     const existing = windows.find(client => new URL(client.url).origin === self.location.origin);
     if (existing) {

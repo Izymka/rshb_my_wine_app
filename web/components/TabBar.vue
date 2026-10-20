@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Нижняя навигация: «Сканер / Мои вина / Профиль». Бейдж — вина, которые пора оценить.
+// Нижняя навигация: «Сканер / Мои вина / Винодельня / Профиль». Бейдж — вина, которые пора оценить.
 import { dueWines } from "~/utils/shelf.mjs";
 const route = useRoute();
 const { entries } = useShelf();
@@ -9,12 +9,16 @@ const now = ref(0);
 const { goal } = useMetrika();
 onMounted(() => { now.value = Date.now(); });
 const due = computed(() => (now.value ? dueWines(entries.value, now.value).length : 0));
-const visible = computed(() => ["/", "/wines", "/profile"].includes(route.path) && !busy.value && !found.value);
-const tabs = [
+const visible = computed(() => ["/", "/wines", "/winery", "/profile"].includes(route.path) && !busy.value && !found.value);
+// Вкладка игры скрыта, если игрок выключил «Мою винодельню» в настройках.
+const { enabledLocal, readEnabled } = useGame();
+onMounted(readEnabled);
+const tabs = computed(() => [
   { to: "/", label: "Сканер", icon: "ph-scan" },
   { to: "/wines", label: "Мои вина", icon: "ph-books" },
+  ...(enabledLocal.value ? [{ to: "/winery", label: "Винодельня", icon: "ph-plant" }] : []),
   { to: "/profile", label: "Профиль", icon: "ph-user-circle" },
-];
+]);
 </script>
 
 <template>

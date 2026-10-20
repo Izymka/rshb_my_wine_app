@@ -84,8 +84,11 @@ export function useShelfPush() {
       localStorage.setItem(ENABLED_KEY, 'off');
       enabled.value = false;
       goal('push_disabled');
-      const registration = await navigator.serviceWorker.getRegistration();
-      await (await registration?.pushManager.getSubscription())?.unsubscribe();
+      // Подписка общая с игровыми уведомлениями: пока они включены, браузер не отписываем.
+      if (localStorage.getItem(GAME_PUSH_KEY) !== "on") {
+        const registration = await navigator.serviceWorker.getRegistration();
+        await (await registration?.pushManager.getSubscription())?.unsubscribe();
+      }
       await sync();
     } catch { message.value = 'Не удалось отключить уведомления. Повторите при подключении к сети.'; }
     finally { busy.value = false; }

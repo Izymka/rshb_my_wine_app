@@ -7,7 +7,8 @@
     "build": "nuxt build",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "test:shelf": "node --test scripts/shelf.test.mjs scripts/shelf-reminders.test.mjs scripts/pwa.test.mjs"
+    "test:shelf": "node --test scripts/shelf.test.mjs scripts/shelf-reminders.test.mjs scripts/pwa.test.mjs",
+    "test:game": "node --test scripts/game.test.mjs scripts/game-push.test.mjs"
   },
   "dependencies": {
     "@phosphor-icons/web": "^2.1.1",

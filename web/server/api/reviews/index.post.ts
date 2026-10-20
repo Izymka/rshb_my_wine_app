@@ -3,6 +3,7 @@
 import { DISHES } from "~/utils/shelf.mjs";
 import { assertSameOrigin, rateLimit, requireUser } from "../../utils/auth";
 import { useDb } from "../../utils/db";
+import { grantServiceReward } from "../../utils/game";
 
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event);
@@ -17,12 +18,16 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: "Нужна оценка вина" });
   }
   const sql = await useDb();
-  const [onShelf] = await sql`select 1 from shelf_entries where user_id = ${user.id} and slug = ${slug} and not deleted`;
+  const [onShelf] = await sql<{ grapes: string | null; name: string | null }[]>`select card->>'grapes' as grapes, card->>'name' as name from shelf_entries where user_id = ${user.id} and slug = ${slug} and not deleted`;
   if (!onShelf) throw createError({ statusCode: 409, statusMessage: "Сначала сохраните вино на полку" });
   await sql`
     insert into reviews (user_id, slug, liked, dishes, note, anonymous)
     values (${user.id}, ${slug}, ${body.liked}, ${dishes}, ${note}, ${body.anonymous === true})
     on conflict (user_id, slug) do update set liked = excluded.liked, dishes = excluded.dishes,
       note = excluded.note, anonymous = excluded.anonymous, updated_at = now()`;
-  return { ok: true };
+  // Награда в винодельне: репутация, Грозди и сорт вина, если он ещё закрыт. Отзыв от этого
+  // не зависит — сбой игры только пишется в лог.
+  const game = await grantServiceReward(user.id, "review", slug, { grapes: onShelf.grapes || "", name: onShelf.name || "", note })
+    .catch((error) => { console.error("game reward failed:", (error as Error).message); return null; });
+  return { ok: true, game };
 });

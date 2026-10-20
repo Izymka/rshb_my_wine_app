@@ -152,5 +152,6 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
 
       <button class="btn btn-primary" @click="again"><i class="ph-bold ph-camera" />Снять ещё раз</button>
     </template>
+    <GameScanReward v-if="answered && !wrong" :slug="shownSlug" />
   </div>
 </template>
