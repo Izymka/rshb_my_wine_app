@@ -134,7 +134,7 @@ export async function grantServiceReward(userId: string, kind: keyof typeof SERV
   return { status, reward: result, used, limit };
 }
 
-// Доля угадавших сегодня — для экрана результата Винордла.
+// Доля угадавших сегодня — для экрана результата игры «Вино дня».
 export async function wordleStats(day: string) {
   const sql = await useDb();
   const [s] = await sql<{ players: number; solved: number }[]>`

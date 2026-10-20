@@ -79,7 +79,7 @@ function phrase(e) {
   }
 }
 const lower = s => s.charAt(0).toLowerCase() + s.slice(1);
-const tail = e => (e.kind === 'order' ? `заказ «${e.who}» скоро закроется` : e.kind === 'wordle' ? 'новый Винордл' : lower(phrase(e)));
+const tail = e => (e.kind === 'order' ? `заказ «${e.who}» скоро закроется` : e.kind === 'wordle' ? 'новое «Вино дня»' : lower(phrase(e)));
 
 // Один пуш из нескольких событий: заголовок — самое важное, остальное — в тексте.
 export function pushText(events, now) {
@@ -89,7 +89,7 @@ export function pushText(events, now) {
   const [main, ...rest] = list;
   let body;
   if (main.kind === 'order') body = `${itemName(main.item)} × ${main.count}, осталось ${left(main.expiresAt - now)}`;
-  else if (main.kind === 'wordle') body = `Винордл № ${main.number}: сможете угадать с трёх попыток?`;
+  else if (main.kind === 'wordle') body = `Вино дня № ${main.number}: сможете угадать с трёх попыток?`;
   if (rest.length) {
     const more = rest.length > 1 ? ` и ещё ${rest.length - 1}` : '';
     const also = `И ${tail(rest[0])}${more}`;

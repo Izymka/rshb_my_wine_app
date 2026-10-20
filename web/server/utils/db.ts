@@ -82,7 +82,7 @@ create table if not exists reviews (
 );
 create index if not exists reviews_slug on reviews (slug, updated_at desc);
 -- Игра «Моя винодельня»: состояние игрока целиком в jsonb (правила — utils/game.mjs), журнал
--- действий для идемпотентности и аудита, журнал наград за действия в сервисе и Винордл.
+-- действий для идемпотентности и аудита, журнал наград за действия в сервисе и «Вино дня».
 create table if not exists game_profiles (
   user_id bigint primary key references users(id) on delete cascade,
   state jsonb not null,

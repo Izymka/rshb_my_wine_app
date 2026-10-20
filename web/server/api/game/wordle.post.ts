@@ -1,4 +1,4 @@
-// Попытка в Винордле. Для вошедших попытки копятся в wordle_attempts (одна строка на день), а
+// Попытка в «Вине дня». Для вошедших попытки копятся в wordle_attempts (одна строка на день), а
 // конец игры начисляет Грозди и продлевает серию — в одной транзакции с состоянием винодельни.
 import { WORDLE_TRIES, findWine, wordleNumber, wordleView } from "~/utils/wordle.mjs";
 import { applyWordle, dayKey, wordleReward } from "~/utils/game.mjs";

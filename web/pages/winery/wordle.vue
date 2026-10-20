@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Винордл (1g) и результат (1h): угадать вино дня за 6 попыток по цвету, региону, сорту и
+// «Вино дня» (1g) и результат (1h): угадать вино дня за 6 попыток по цвету, региону, сорту и
 // винодельне. Без входа попытки хранятся в браузере, награды и серия — только у вошедших.
 import { WORDLE_TRIES } from "~/utils/wordle.mjs";
 import { agedArt, mascotArt } from "~/utils/game-art.mjs";
@@ -12,7 +12,7 @@ interface Resp { guest: boolean; options?: { id: number; name: string; winery: s
 const game = useGame();
 const now = useGameClock();
 const { goal } = useMetrika();
-useHead({ title: "Винордл — Своё Вино" });
+useHead({ title: "Вино дня — Своё Вино" });
 const GUEST_KEY = "wine-wordle:guest";
 
 const data = ref<Resp | null>(null);
@@ -39,7 +39,7 @@ onMounted(async () => {
       } catch {}
     }
     if (data.value?.view.solved || data.value?.view.lost) showResult.value = true;
-  } catch { error.value = "Не удалось загрузить Винордл. Проверьте сеть."; }
+  } catch { error.value = "Не удалось загрузить «Вино дня». Проверьте сеть."; }
 });
 
 // Гость: сервер не хранит попытки, поэтому прошлый прогресс восстанавливаем, отправив последнюю
@@ -89,7 +89,7 @@ const shareText = computed(() => {
   const v = view.value;
   if (!v) return "";
   const em: Record<string, string> = { ok: "🟩", near: "🟨", no: "⬜" };
-  return `Винордл № ${v.number} — ${v.solved ? `${v.attempt}/${WORDLE_TRIES}` : `X/${WORDLE_TRIES}`}\n${v.rows.map((r) => r.cells.map((c) => em[c.s]).join("")).join("\n")}\n${location.origin}/winery/wordle`;
+  return `Вино дня № ${v.number} — ${v.solved ? `${v.attempt}/${WORDLE_TRIES}` : `X/${WORDLE_TRIES}`}\n${v.rows.map((r) => r.cells.map((c) => em[c.s]).join("")).join("\n")}\n${location.origin}/winery/wordle`;
 });
 async function share() {
   goal("game_wordle_share");
@@ -105,7 +105,7 @@ const nextIn = computed(() => fmtLeft(nextDayAt(now.value || Date.now()) - (now.
   <main class="g-page" style="gap: 10px">
     <div class="top">
       <NuxtLink to="/winery" class="icon-btn" aria-label="К винодельне"><i class="ph ph-arrow-left" /></NuxtLink>
-      <div class="grow"><div class="serif" style="font-size: 24px; line-height: 1.1">Винордл</div><div class="small muted" style="font-size: 12px">№ {{ view?.number || "…" }} · одно вино на всех</div></div>
+      <div class="grow"><div class="serif" style="font-size: 24px; line-height: 1.1">Вино дня</div><div class="small muted" style="font-size: 12px">№ {{ view?.number || "…" }} · одно вино на всех</div></div>
       <button v-if="view && !playing" class="icon-btn" aria-label="Результат" @click="showResult = true"><i class="ph ph-trophy" /></button>
     </div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
@@ -156,7 +156,7 @@ const nextIn = computed(() => fmtLeft(nextDayAt(now.value || Date.now()) - (now.
     <p v-else-if="!error" class="muted">Загружаем вино дня…</p>
 
     <!-- 1h Результат -->
-    <BottomSheet :open="showResult && !!view?.answer" label="Результат Винордла" @close="showResult = false">
+    <BottomSheet :open="showResult && !!view?.answer" label="Результат игры «Вино дня»" @close="showResult = false">
       <div v-if="view?.answer" class="stack" style="align-items: center; text-align: center; gap: 14px">
         <div style="position: relative; width: 120px; height: 130px">
           <Confetti v-if="view.solved" />
@@ -174,7 +174,7 @@ const nextIn = computed(() => fmtLeft(nextDayAt(now.value || Date.now()) - (now.
           <span v-if="gained.grozdi" class="g-cur" style="background: #fff; font-size: 15px"><span class="art-inline" style="width: 22px; height: 22px" v-html="ICON.grozdi" />+{{ gained.grozdi }}</span>
           <span v-if="gained.xp" class="g-cur" style="background: #fff; font-size: 15px"><span class="art-inline" style="width: 22px; height: 22px" v-html="ICON.xp" />+{{ gained.xp }}</span>
         </div>
-        <NuxtLink v-else-if="data?.guest" :to="{ path: '/login', query: { redirect: '/winery' } }" class="small" style="font-weight: 600">Войдите — за Винордл дают Грозди для винодельни</NuxtLink>
+        <NuxtLink v-else-if="data?.guest" :to="{ path: '/login', query: { redirect: '/winery' } }" class="small" style="font-weight: 600">Войдите — за «Вино дня» дают Грозди для винодельни</NuxtLink>
         <div v-if="!data?.guest" class="small muted">Серия: {{ data?.streak || 0 }} {{ (data?.streak || 0) === 1 ? "день" : "дн." }}<template v-if="data?.stats?.solvedPct != null"> · {{ data.stats.solvedPct }}% игроков угадали сегодня</template></div>
       </div>
       <template #foot>

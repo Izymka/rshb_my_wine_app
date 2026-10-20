@@ -265,7 +265,7 @@ async function toggleEnabled() {
           <p class="small muted">{{ status === "unavailable" ? "На этом сервере аккаунты не настроены — игра недоступна." : "Не удалось загрузить винодельню." }}</p>
           <button v-if="status === 'error'" class="btn btn-outline" @click="game.load()">Повторить</button>
         </template>
-        <NuxtLink to="/winery/wordle" style="height: 44px; display: flex; align-items: center; font-size: 15px; font-weight: 600">Сыграть в Винордл без входа</NuxtLink>
+        <NuxtLink to="/winery/wordle" style="height: 44px; display: flex; align-items: center; font-size: 15px; font-weight: 600">Сыграть в «Вино дня» без входа</NuxtLink>
         <div class="small muted" style="font-size: 12px">Только для пользователей старше 18 лет</div>
       </div>
     </template>
@@ -396,7 +396,7 @@ async function toggleEnabled() {
         <button role="switch" :aria-checked="state?.enabled !== false" @click="toggleEnabled">
           <i class="ph ph-plant" /><span class="grow">Игра «Моя винодельня»<span class="sub" style="display: block">выключенная игра нигде не показывается</span></span><span class="switch" :class="{ on: state?.enabled !== false }" />
         </button>
-        <NuxtLink to="/winery/wordle"><i class="ph ph-puzzle-piece" /><span class="grow">Винордл</span><i class="ph ph-caret-right caret" /></NuxtLink>
+        <NuxtLink to="/winery/wordle"><i class="ph ph-puzzle-piece" /><span class="grow">Вино дня</span><i class="ph ph-caret-right caret" /></NuxtLink>
       </div>
       <p class="small muted">Игра — про виноделие, а не про употребление: награды даются за сканы, полку и отзывы, а не за количество вина. Только 18+.</p>
     </BottomSheet>

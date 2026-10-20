@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Магазин (1i): здания, саженцы, участки, декор. Грозди здесь только тратятся — купить их за
-// деньги нельзя, они приходят за действия в сервисе и Винордл.
+// деньги нельзя, они приходят за действия в сервисе и «Вино дня».
 import { DECOR, VARIETIES, shopCatalog } from "~/utils/game.mjs";
 import { barrelArt, benchArt, bottlingArt, flowerBarrelArt, lanternArt, plotArt, pressArt, saplingArt, scarecrowArt, tankArt } from "~/utils/game-art.mjs";
 const game = useGame();

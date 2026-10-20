@@ -10,7 +10,7 @@ const SPEED = 60;
 // Винодельня, открытая игроком в 10:00: всё, что созреет позже, — повод для пуша.
 function winery(seenAt = MSK(10)) {
   const s = newGame('push', seenAt, SPEED);
-  s.wordle.last = '2026-10-19'; // Винордл сегодня уже сыгран — не мешает остальным проверкам
+  s.wordle.last = '2026-10-19'; // «Вино дня» сегодня уже сыгран — не мешает остальным проверкам
   for (const slot of s.orders.slots) slot.order.expiresAt = seenAt + 100 * H;
   return s;
 }
@@ -58,7 +58,7 @@ test('quiet hours 22:00–9:00 Moscow hold pushes; they go out merged at 9:00', 
   const r = plan(s, log, MSK(9, 0, 20), MSK(21, 50));
   assert.equal(r.reason, 'sent');
   assert.equal(r.payload.title, 'Урожай Шардоне созрел');
-  // Утром 20-го к ночным событиям добавился новый Винордл — всё в одном пуше.
+  // Утром 20-го к ночным событиям добавился новое «Вино дня» — всё в одном пуше.
   assert.equal(r.payload.body, 'И бочка Каберне Совиньон готова и ещё 1 — загляните на винодельню');
   assert.equal(r.events.length, 3);
 });
@@ -117,14 +117,14 @@ test('an expiring order is warned 4 game hours ahead and leads a merged push', (
   assert.equal(r.payload.url, '/winery?push=game_order');
 });
 
-test('a new Винордл is announced once per day if the player has not played and not opened the game today', () => {
+test('a new «Вино дня» is announced once per day if the player has not played and not opened the game today', () => {
   const s = winery(MSK(20, 0, 18));
   s.wordle.last = '2026-10-18';
   for (const slot of s.orders.slots) slot.order.expiresAt = MSK(20, 0, 25);
   s.plots[1].variety = null;
   const r = plan(s, {}, MSK(9, 0), MSK(20, 0, 18));
   assert.equal(r.payload.title, 'Новое вино дня');
-  assert.match(r.payload.body, /^Винордл № \d+: сможете угадать с трёх попыток\?$/);
+  assert.match(r.payload.body, /^Вино дня № \d+: сможете угадать с трёх попыток\?$/);
   assert.equal(plan(s, r.log, MSK(12), MSK(20, 0, 18)).reason, 'nothing');
   assert.equal(plan(s, {}, MSK(12), MSK(8, 30)).reason, 'nothing'); // уже заходил сегодня
   s.wordle.last = '2026-10-19';
@@ -143,7 +143,7 @@ test('push texts follow mockup 2i and never call to drink', () => {
   assert.equal(texts[1].title, 'Молодое Пино нуар готово');
   assert.equal(texts[1].body, 'И сусло Мерло готово и ещё 1 — загляните на винодельню');
   assert.equal(texts[2].body, 'Загляните на винодельню');
-  assert.deepEqual(texts[3], { title: 'Новое вино дня', body: 'Винордл № 215: сможете угадать с трёх попыток?', kind: 'wordle' });
+  assert.deepEqual(texts[3], { title: 'Новое вино дня', body: 'Вино дня № 215: сможете угадать с трёх попыток?', kind: 'wordle' });
   for (const t of texts) assert.doesNotMatch(`${t.title} ${t.body}`, /пить|выпе|выпи|бокал|налей|налив|дегуст|купи/i);
 });
 

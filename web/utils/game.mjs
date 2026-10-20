@@ -4,7 +4,7 @@
 //
 // Время в балансе — игровые секунды. Реальная длительность = секунды / speed: на демо-стенде
 // NUXT_GAME_SPEED=60 превращает час роста в минуту, сутки выдержки — в 24 минуты. Границы
-// игрового дня (задания, календарь, Винордл) от speed не зависят: это реальные сутки по Москве.
+// игрового дня (задания, календарь, «Вино дня») от speed не зависят: это реальные сутки по Москве.
 
 import { plural } from './wine.mjs';
 
@@ -84,7 +84,7 @@ export const QUESTS = {
   scan: { title: () => 'Отсканируйте этикетку', icon: 'ph-scan', service: true, go: 'Сканер', href: '/', xp: 30, coins: 50 },
   shelf: { title: () => 'Сохраните вино на полку', icon: 'ph-books', service: true, go: 'Полка', href: '/wines', xp: 25, coins: 40 },
   review: { title: () => 'Оцените вино с полки', icon: 'ph-chats-circle', service: true, go: 'Полка', href: '/wines', xp: 35, coins: 60 },
-  wordle: { title: () => 'Сыграйте в Винордл', icon: 'ph-puzzle-piece', service: true, go: 'Играть', href: '/winery/wordle', xp: 25, coins: 40 },
+  wordle: { title: () => 'Сыграйте в «Вино дня»', icon: 'ph-puzzle-piece', service: true, go: 'Играть', href: '/winery/wordle', xp: 25, coins: 40 },
 };
 
 const WHO = [
