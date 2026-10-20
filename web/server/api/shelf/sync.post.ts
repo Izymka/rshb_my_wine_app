@@ -3,6 +3,7 @@
 import { parseShelf } from "~/utils/shelf.mjs";
 import { assertSameOrigin, rateLimit, requireUser } from "../../utils/auth";
 import { useDb } from "../../utils/db";
+import { grantServiceReward } from "../../utils/game";
 
 interface Row {
   slug: string; card: object; analogues: object[]; status: string; reaction: string | null;
@@ -46,6 +47,18 @@ export default defineEventHandler(async (event) => {
         where user_id = ${user.id} and slug = ${d.slug} and updated_at <= ${d.at}`;
     }
   });
+  // Награда в винодельне за вина, сохранённые за последние сутки: старая полка при первой
+  // синхронизации не превращается в мешок монет. Повторы и суточный лимит проверяет игра.
+  const recent = user.adult ? entries.filter((e) => e.addedAt > Date.now() - 86400000).slice(0, 20) : [];
+  if (recent.length) {
+    const done = new Set((await sql<{ ref: string }[]>`select ref from game_service_rewards
+      where user_id = ${user.id} and kind = 'shelf' and ref = any(${recent.map((e) => e.slug)})`).map((r) => r.ref));
+    for (const e of recent.filter((e) => !done.has(e.slug))) {
+      const r = await grantServiceReward(user.id, "shelf", e.slug, { name: e.card.name })
+        .catch((error) => { console.error("game reward failed:", (error as Error).message); return null; });
+      if (r?.status === "limit") break;
+    }
+  }
   const rows = await sql<(Row & { deleted: boolean })[]>`
     select slug, card, analogues, status, reaction, dishes, note, remind_at, added_at, updated_at, deleted
     from shelf_entries where user_id = ${user.id} order by added_at desc`;

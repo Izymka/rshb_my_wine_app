@@ -3,6 +3,20 @@
 import { randomUUID } from "node:crypto";
 import { getRequestHeader, proxyRequest, readMultipartFormData, readRawBody } from "h3";
 import { escapeTelegramHtml, formatScanCaption, telegramNotifier } from "../utils/telegram-notify";
+import { rememberScan } from "../utils/scan-memory";
+
+// Распознанное вино и кандидаты — в память сессии, для награды за скан в «Моей винодельне».
+async function rememberScanResponse(event: Parameters<typeof rememberScan>[0], response: Response) {
+  if (!response.ok) return;
+  try {
+    const data = await response.clone().json();
+    const cards = [
+      ...(data.answered && data.item_id && data.card ? [{ slug: data.item_id, ...data.card }] : []),
+      ...(Array.isArray(data.candidates) ? data.candidates.map((c: { item_id: string; card: object }) => ({ slug: c.item_id, ...c.card })) : []),
+    ];
+    rememberScan(event, cards);
+  } catch {}
+}
 
 export default defineEventHandler(async (event) => {
   // event.path сохраняет query string и кодирование пути.
@@ -13,6 +27,7 @@ export default defineEventHandler(async (event) => {
   const isScan = event.method === "POST" && route === "scan";
   const isSommelier = event.method === "POST" && route === "sommelier";
   if (!telegramNotifier.enabled || (!isScan && !isSommelier)) {
+    if (isScan) return proxyRequest(event, target, { onResponse: (e, response) => rememberScanResponse(e, response) });
     return proxyRequest(event, target);
   }
 
@@ -38,6 +53,7 @@ export default defineEventHandler(async (event) => {
     return await proxyRequest(event, target, {
       headers: { "x-request-id": requestId },
       onResponse: (_event, response) => {
+        if (isScan) void rememberScanResponse(event, response);
         const elapsedMs = Math.round(performance.now() - started);
         const content = response.clone().text();
         if (isScan) {

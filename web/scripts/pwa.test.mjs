@@ -85,4 +85,10 @@ test("push displays an actionable notification and a click opens the saved card"
   handlers.push({ data: { json: () => ({ url: 'https://evil.test' }) }, waitUntil: p => { done = p; } });
   await done;
   assert.equal(notifications[1].options.data.url, '/wines');
+  handlers.push({ data: { json: () => ({ title: 'Урожай Шардоне созрел', url: '/winery?push=game_harvest', tag: 'game' }) }, waitUntil: p => { done = p; } });
+  await done;
+  assert.equal(notifications[2].options.data.url, '/winery?push=game_harvest');
+  handlers.push({ data: { json: () => ({ url: '/winery-evil' }) }, waitUntil: p => { done = p; } });
+  await done;
+  assert.equal(notifications[3].options.data.url, '/wines');
 });

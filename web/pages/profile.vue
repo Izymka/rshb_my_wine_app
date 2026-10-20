@@ -96,6 +96,17 @@ async function deleteAccount() {
   catch (e) { error.value = apiError(e); }
   finally { busy.value = false; }
 }
+// «Моя винодельня»: выключенная игра пропадает из таб-бара и не начисляет награды.
+const game = useGame();
+const gamePush = useGamePush();
+onMounted(() => { game.readEnabled(); void gamePush.refresh(); });
+function toggleGamePush() {
+  void (gamePush.enabled.value ? gamePush.disable() : gamePush.enable());
+}
+async function toggleGame() {
+  const on = !game.enabledLocal.value;
+  if (await game.act({ type: "settings", enabled: on })) goal("game_toggle", { on, from: "profile" });
+}
 useHead({ title: "Профиль — Своё Вино" });
 </script>
 
@@ -177,6 +188,13 @@ useHead({ title: "Профиль — Своё Вино" });
         </button>
         <button :aria-expanded="open === 'reminders'" @click="toggle('reminders')"><i class="ph ph-bell" /><span class="grow">Напоминания оценить вино</span><i :class="['ph', open === 'reminders' ? 'ph-caret-down' : 'ph-caret-right', 'caret']" /></button>
         <div v-if="open === 'reminders'" class="panel"><ShelfPushSettings /></div>
+        <button v-if="user.adult" role="switch" :aria-checked="game.enabledLocal.value" :disabled="game.busy.value" @click="toggleGame">
+          <i class="ph ph-plant" /><span class="grow">Игра «Моя винодельня»<span class="sub" style="display: block">выключенная игра нигде не показывается</span></span><span class="switch" :class="{ on: game.enabledLocal.value }" />
+        </button>
+        <button v-if="user.adult && game.enabledLocal.value" role="switch" :aria-checked="gamePush.enabled.value"
+          :disabled="gamePush.busy.value || (!gamePush.enabled.value && !gamePush.available.value)" @click="toggleGamePush">
+          <i class="ph ph-bell" /><span class="grow">Игровые уведомления<span class="sub" style="display: block" role="status">{{ gamePush.message.value || "не больше 2 в день · тихо с 22 до 9" }}</span></span><span class="switch" :class="{ on: gamePush.enabled.value }" />
+        </button>
         <button :disabled="syncBusy" @click="syncNow">
           <i class="ph ph-cloud-check" style="color: var(--ok)" /><span class="grow">Синхронизация<span class="sub" style="display: block">{{ syncBusy ? "синхронизируем…" : syncedLabel }}</span></span><i class="ph ph-arrows-clockwise caret" />
         </button>

@@ -17,6 +17,7 @@ export default defineNuxtConfig({
     "@phosphor-icons/web/fill",
     "@phosphor-icons/web/bold",
     "~/assets/css/main.css",
+    "~/assets/css/game.css",
   ],
   runtimeConfig: {
     scannerUrl: "http://127.0.0.1:8080",
@@ -30,6 +31,8 @@ export default defineNuxtConfig({
     authDemoCodes: "1",
     // Номер счётчика Яндекс Метрики (NUXT_YANDEX_METRIKA_ID). Пусто — Метрика не подключается.
     yandexMetrikaId: "",
+    // Множитель игровых таймеров «Моей винодельни» (NUXT_GAME_SPEED): 60 — час роста за минуту.
+    gameSpeed: "1",
   },
   app: {
     head: {
