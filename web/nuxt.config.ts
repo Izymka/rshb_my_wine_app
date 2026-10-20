@@ -2,6 +2,7 @@
 // Всё общение с ML-сервисом идёт через серверные маршруты Nuxt (/api/*), поэтому CORS сервису
 // не нужен, а адрес сервиса задаётся одной переменной окружения NUXT_SCANNER_URL.
 import { buildPwa } from "./scripts/build-pwa.mjs";
+import { SPLASH_SCREENS } from "./scripts/splash-screens.mjs";
 
 export default defineNuxtConfig({
   compatibilityDate: "2025-01-01",
@@ -41,13 +42,21 @@ export default defineNuxtConfig({
         { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
         { name: "theme-color", content: "#8F3D42" },
         { name: "apple-mobile-web-app-capable", content: "yes" },
+        { name: "mobile-web-app-capable", content: "yes" },
+        { name: "apple-mobile-web-app-status-bar-style", content: "default" },
         { name: "apple-mobile-web-app-title", content: "Своё Вино" },
         { name: "description", content: "Сфотографируйте этикетку — найдём карточку вина на платформе «Своё Вино»" },
       ],
       link: [
         { rel: "manifest", href: "/manifest.webmanifest" },
-        { rel: "apple-touch-icon", href: "/icon.png" },
+        { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+        { rel: "icon", type: "image/svg+xml", href: "/icon.svg" },
         { rel: "icon", type: "image/png", href: "/icon.png" },
+        ...SPLASH_SCREENS.map(([width, height, ratio]) => ({
+          rel: "apple-touch-startup-image",
+          href: `/splash/${width * ratio}x${height * ratio}.png`,
+          media: `(device-width: ${width}px) and (device-height: ${height}px) and (-webkit-device-pixel-ratio: ${ratio}) and (orientation: portrait)`,
+        })),
         { rel: "preconnect", href: "https://fonts.googleapis.com" },
         { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" },
         {

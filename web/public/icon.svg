@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Знак «Своё Вино»: бутылка с бокалом в рамке видоискателя. Исходник для всех PNG-иконок
+       и заставок (scripts/build-icons.mjs). -->
+  <defs>
+    <path id="bottle" d="M231 56V148C231 190 176 200 176 242V428Q176 448 196 448H316Q336 448 336 428V242C336 200 281 190 281 148V56Z"/>
+    <path id="glass" d="M246 248H378C378 300 352 334 312 338C272 334 246 300 246 248ZM305 330H319V448H305Z"/>
+    <clipPath id="left"><rect width="256" height="512"/></clipPath>
+    <clipPath id="bowl"><path d="M246 248H378C378 300 352 334 312 338C272 334 246 300 246 248Z"/></clipPath>
+  </defs>
+  <rect x="72" y="128" width="368" height="288" fill="#ededeb"/>
+  <path d="M60 188V116H132M380 116H452V188M452 356V428H380M132 428H60V356" fill="none" stroke="#4a3437" stroke-width="8"/>
+  <path d="M108 240V200H148M364 200H404V240M404 336V376H364M148 376H108V336" fill="none" stroke="#4a3437" stroke-width="12"/>
+  <rect x="225" y="30" width="62" height="30" rx="7" fill="#6d1431"/>
+  <rect x="225" y="30" width="62" height="30" rx="7" fill="#9b1d42" clip-path="url(#left)"/>
+  <use href="#bottle" fill="#6d1431"/>
+  <use href="#bottle" fill="#9b1d42" clip-path="url(#left)"/>
+  <path d="M207 226C198 236 196 246 196 258V424" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="7" stroke-linecap="round"/>
+  <use href="#glass" fill="#fff" stroke="#fff" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M238 292C268 276 296 302 326 290S368 278 386 286V346H238Z" fill="#9b1d42" clip-path="url(#bowl)"/>
+  <rect x="305" y="336" width="14" height="112" fill="#6d1431"/>
+</svg>
