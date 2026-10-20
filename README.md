@@ -242,6 +242,7 @@ make db && make web-dev
 | `NUXT_DATABASE_URL` | пусто (в Docker — сервис `postgres`) | PostgreSQL для аккаунтов, облачной полки и отзывов; пусто — без входа |
 | `NUXT_AUTH_DEMO_CODES` | `1` | Код входа показывается на экране, пока СМС-провайдер не подключён; `0` — не отдавать код |
 | `NUXT_GAME_SPEED` | `1` | Ускорение таймеров игры «Моя винодельня»: `60` — час роста лозы за минуту (для демо). В docker-compose — из `GAME_SPEED` |
+| `NUXT_SHELF_PUSH_PUBLIC_KEY`, `NUXT_SHELF_PUSH_PRIVATE_KEY`, `NUXT_SHELF_PUSH_SUBJECT` | пусто | VAPID-ключи Web Push (`npx web-push generate-vapid-keys`) и `mailto:` владельца — для напоминаний полки и игровых уведомлений; пусто — пуши недоступны. В docker-compose — из `SHELF_PUSH_*`, в деплое — переменные и секрет репозитория |
 | `NUXT_YANDEX_METRIKA_ID` | пусто | Номер счётчика Яндекс Метрики; пусто — без Метрики. В docker-compose — из `YANDEX_METRIKA_ID` |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `wine` | Учётные данные сервиса `postgres` в docker-compose |
 | `POSTGRES_PORT` | `5432` | Порт базы на хосте (только 127.0.0.1) для web, запущенного вне compose |

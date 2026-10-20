@@ -134,6 +134,13 @@ services:
       NUXT_GAME_SPEED: ${GAME_SPEED:-1}
       # Номер счётчика Яндекс Метрики; пусто — без Метрики.
       NUXT_YANDEX_METRIKA_ID: ${YANDEX_METRIKA_ID:-}
+      # Web Push для напоминаний полки и игровых уведомлений; без ключей пуши недоступны.
+      NUXT_SHELF_PUSH_PUBLIC_KEY: ${SHELF_PUSH_PUBLIC_KEY:-}
+      NUXT_SHELF_PUSH_PRIVATE_KEY: ${SHELF_PUSH_PRIVATE_KEY:-}
+      NUXT_SHELF_PUSH_SUBJECT: ${SHELF_PUSH_SUBJECT:-}
+    volumes:
+      # Очередь напоминаний полки (файлы) переживает пересборку контейнера.
+      - push-data:/app/.data
     depends_on:
       scanner:
         condition: service_healthy
@@ -161,6 +168,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  push-data:
   postgres-data:
   torch-cache:
   paddle-cache:

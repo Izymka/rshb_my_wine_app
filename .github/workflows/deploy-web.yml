@@ -86,6 +86,11 @@ jobs:
       TG_NOTIFY_TOKEN: ${{ secrets.TG_NOTIFY_TOKEN }}
       TG_NOTIFY_TARGET: ${{ vars.TG_NOTIFY_TARGET }}
       NUXT_YANDEX_METRIKA_ID: ${{ vars.NUXT_YANDEX_METRIKA_ID }}
+      # Web Push (напоминания полки и игровые уведомления): VAPID-ключи `npx web-push generate-vapid-keys`.
+      NUXT_SHELF_PUSH_PUBLIC_KEY: ${{ vars.NUXT_SHELF_PUSH_PUBLIC_KEY }}
+      NUXT_SHELF_PUSH_PRIVATE_KEY: ${{ secrets.NUXT_SHELF_PUSH_PRIVATE_KEY }}
+      NUXT_SHELF_PUSH_SUBJECT: ${{ vars.NUXT_SHELF_PUSH_SUBJECT }}
+      NUXT_GAME_SPEED: ${{ vars.NUXT_GAME_SPEED || '1' }}
     steps:
       - name: Validate scanner URL
         run: |
@@ -103,7 +108,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ vars.SSH_PORT || '22' }}
           fingerprint: ${{ secrets.SSH_HOST_FINGERPRINT }}
-          envs: IMAGE,REGISTRY_USER,REGISTRY_PASSWORD,WEB_PORT,NUXT_SCANNER_URL,NUXT_DATABASE_URL,TG_NOTIFY_TOKEN,TG_NOTIFY_TARGET,NUXT_YANDEX_METRIKA_ID
+          envs: IMAGE,REGISTRY_USER,REGISTRY_PASSWORD,WEB_PORT,NUXT_SCANNER_URL,NUXT_DATABASE_URL,TG_NOTIFY_TOKEN,TG_NOTIFY_TARGET,NUXT_YANDEX_METRIKA_ID,NUXT_SHELF_PUSH_PUBLIC_KEY,NUXT_SHELF_PUSH_PRIVATE_KEY,NUXT_SHELF_PUSH_SUBJECT,NUXT_GAME_SPEED
           command_timeout: 10m
           script: |
             set -eu
@@ -130,6 +135,9 @@ jobs:
               -e NUXT_DATABASE_URL \
               -e TG_NOTIFY_TOKEN -e TG_NOTIFY_TARGET \
               -e NUXT_YANDEX_METRIKA_ID \
+              -e NUXT_SHELF_PUSH_PUBLIC_KEY -e NUXT_SHELF_PUSH_PRIVATE_KEY -e NUXT_SHELF_PUSH_SUBJECT \
+              -e NUXT_GAME_SPEED \
+              -v wine-push-data:/app/.data \
               -p "127.0.0.1:$WEB_PORT:3000" "$IMAGE"; then
               attempt=0
               while [ "$attempt" -lt 30 ]; do
