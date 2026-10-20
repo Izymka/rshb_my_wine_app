@@ -68,7 +68,8 @@ services:
       # VLM-судья между близнецами одной винодельни: Yandex AI Studio (без VPN) или
       # OpenAI-совместимый чат. Включён только в /v1/eval/predict; в /scan — WINE_VLM_SCAN=1.
       # Без ключа YANDEX_LLM_API_KEY поставьте WINE_VLM=0; ключи — см. .env.example.
-      WINE_VLM: ${WINE_VLM:-1}
+      # 20.10: выключен — на финальных 100 фото судья испортил верный ответ (eval_photo_070).
+      WINE_VLM: ${WINE_VLM:-0}
       WINE_VLM_SCAN: ${WINE_VLM_SCAN:-0}
       WINE_VLM_TIMEOUT: ${WINE_VLM_TIMEOUT:-4}
       # Фолбэк на решающий слой: предел судьи от начала запроса и пауза после сбоев облака.
