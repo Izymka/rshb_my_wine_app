@@ -45,11 +45,20 @@ function pick(c: { item_id: string; card: Record<string, unknown> }, position: n
   ];
   result.value = {
     ...r.value, answered: true, item_id: c.item_id, card: c.card as never,
-    guard: null, vintage: null, analogues: similarKnown(c.item_id, c.card, knownCards),
+    guard: null, vintage: null, analogues: similarKnown(c.item_id, c.card, knownCards), twins: [],
   };
   wrong.value = false;
   pickedYear.value = null;
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+// Близнец по этикетке: показываем его карточку, а прежний ответ оставляем в «или это вино»,
+// чтобы можно было вернуться одним тапом.
+function pickTwin(c: { item_id: string; probability: number; card: Record<string, unknown> }, position: number) {
+  goal("scan_twin_pick", { slug: c.item_id, position: position + 1 });
+  const previous = { item_id: r.value.item_id!, probability: r.value.probability, card: r.value.card as never };
+  const rest = (r.value.twins || []).filter((t) => t.item_id !== c.item_id);
+  pick(c, position);
+  result.value = { ...result.value!, twins: [previous, ...rest] };
 }
 function notThis() {
   goal("scan_wrong_wine", { slug: shownSlug.value });
@@ -74,6 +83,19 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
           <img class="photo" style="width: 44px; height: 58px" :src="preview" alt="ваш кадр" />
           <span class="grow">Ваш кадр — смотрели именно на эту бутылку</span>
           <button class="link" @click="notThis">Не то вино?</button>
+        </div>
+        <!-- Соседки по линейке, которых по лицевой этикетке не отличить -->
+        <div v-if="r.twins && r.twins.length" class="card cream stack" style="gap: 8px">
+          <div style="font-weight: 600">Или это вино?</div>
+          <div class="small muted">По лицевой этикетке их не отличить. Сверьтесь с контрэтикеткой: на ней обычно указан сорт.</div>
+          <button v-for="(c, i) in r.twins" :key="c.item_id" class="candidate" @click="pickTwin(c, i)">
+            <div class="thumb"><WineBottle :slug="c.item_id" :card="c.card" :height="76" /></div>
+            <div class="grow">
+              <div style="font-weight: 600">{{ c.card.name }}</div>
+              <div class="small muted">{{ c.card.winery }}<span v-if="c.card.grapes"> · {{ c.card.grapes }}</span></div>
+            </div>
+            <i class="ph ph-caret-right" style="color: var(--text-3)" />
+          </button>
         </div>
         <!-- Вопрос о годе: один тап -->
         <div v-if="r.vintage && (r.vintage.year || r.vintage.ask)" class="card cream">
@@ -111,7 +133,7 @@ useHead({ title: computed(() => (answered.value ? `${card.value.name} — Сво
           <div class="grow">
             <h1 class="page-title" style="font-size: 26px">{{ wrong ? "Покажем похожие" : "Не узнали это вино" }}</h1>
             <p class="muted small" style="margin-top: 6px">
-              <template v-if="r.guard && r.guard.includes('twin')">
+              <template v-if="r.guard && (r.guard.includes('twin') || r.guard.includes('contra'))">
                 Этикетка почти как у знакомого вина, но слова на ней не сходятся с карточкой — скорее
                 всего, это соседний вариант линейки, которого пока нет в каталоге.
               </template>

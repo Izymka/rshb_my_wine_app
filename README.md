@@ -195,7 +195,7 @@ scanner может оставаться на локальном сервере �
 
 ```bash
 uv sync --extra api --extra rerank --extra ocr --extra decide
-WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_site1810_abd \
+WINE_INDEX=models/index_platform_sq_v3_site_1810 WINE_DECIDER=models/decider_site1810_abd3 \
   uv run uvicorn api.main:app --port 8080 --env-file .env     # .env необязателен
 cd web && npm install && NUXT_SCANNER_URL=http://127.0.0.1:8080 npm run dev   # интерфейс на :3000
 # аккаунты и отзывы: PostgreSQL в Docker на 127.0.0.1:5432 (make db, остановить — make db-stop);
@@ -213,7 +213,7 @@ make db && make web-dev
 | Переменная | Значение по умолчанию | Смысл |
 |---|---|---|
 | `WINE_INDEX` | `models/index` | Индекс каталога (в Docker — `models/index_platform_sq_v3_site_1810`: 2272 карточки, каталог сайта на 18.10.2026) |
-| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_site1810_abd`, обучен под OCR из `WINE_OCR_DET` и `WINE_OCR_REC`) |
+| `WINE_DECIDER` | `models/decider` | Решающий слой (в Docker — `models/decider_site1810_abd3`, обучен под OCR из `WINE_OCR_DET` и `WINE_OCR_REC`) |
 | `WINE_OCR` | `paddle` | `yandex` — Vision с откатом на PaddleOCR; `hybrid` — Vision только при слабом PaddleOCR; нужны `YANDEX_OCR_API_KEY`, `YANDEX_FOLDER_ID` |
 | `WINE_OCR_DET` | `PP-OCRv5_mobile_det` (в Docker и `.env.example` — `PP-OCRv6_medium_det`) | Детектор строк PaddleOCR. PP-OCRv6 medium на тесте 18.10: текст R@5 0.82 → 0.89, верных при пороге 0.4 87 → 89 из 100, общее время не растёт. Имя детектора входит в ключ кэша OCR |
 | `WINE_OCR_REC` | `eslav_PP-OCRv5_mobile_rec` (в Docker и `.env.example` — `models/ocr_rec/PP-OCRv6_medium_rec_ru`) | Распознаватель строк: имя модели PaddleOCR или папка модели; папка с `inference.onnx` читается через onnxruntime (`onnxruntime-gpu` в окружении OCR). Русский PP-OCRv6 medium с решающим слоем v8 на тесте 18.10: верных при пороге 0.4 89 → 94 из 100, ложных приёмов те же 14 из 102, общее время p50 0.98 → 1.03 с. Решающий слой обучен под распознаватель: v8 — под русский, v7 — под eslav. Входит в ключ кэша OCR |
@@ -231,9 +231,9 @@ make db && make web-dev
 | `YANDEX_LLM_API_KEY`, `YANDEX_FOLDER_ID` | — (ключ OCR), — | Ключ AI Studio: роль `ai.languageModels.user`, область ключа `yc.ai.languageModels.execute`; модели `YANDEX_VLM_MODEL` (`qwen3.6-35b-a3b`) и `YANDEX_LLM_MODEL` (`yandexgpt-5-lite`) |
 | `WINE_PORTAL` | `1` | `GET /catalog/{slug}` добавляет к карточке народный рейтинг, крепость, температуру подачи и гастрономию с портала vino-svoe.ru (кэш 6 ч); `0` — без портала |
 | `WINE_SOMMELIER` | `0` | `1` — цифровой сомелье (`/sommelier`); провайдер `WINE_LLM_PROVIDER` (`yandex` / `openai` — `WINE_LLM_*` или те же `WINE_VLM_*`), откат `WINE_LLM_FALLBACK` |
-| `WINE_THRESHOLD` | порог из `meta.json` решающего слоя (0.533); в `docker-compose.yml` — `0.4` | Порог отказа `/scan`. 0.40 вместо 0.533: больше ответов на ужатых кадрах ценой ложных приёмов (OOF train 5.8 → 7.1 %, тест 9.8 → 12.7 %) |
+| `WINE_THRESHOLD` | порог из `meta.json` решающего слоя (0.533); в `docker-compose.yml` — `0.375` (порог abd3 из его `meta.json`) | Порог отказа `/scan`. Раньше 0.40 вместо 0.533: больше ответов на ужатых кадрах ценой ложных приёмов (OOF train 5.8 → 7.1 %, тест 9.8 → 12.7 %) |
 | `WINE_SIBLING` | `0` | `1` — правило выбора внутри семьи по тексту поверх решающего слоя; выключено 29.09: на стенде train 176 → 162 верных из 185 |
-| `WINE_GUARD` | `warn` | Защита от близнеца: `warn` возвращает карточку с предупреждением; `twin` / `strict` отказывают, `off` выключает правило |
+| `WINE_GUARD` | `warn` (в Docker `contra`) | Защита от близнеца: `warn` возвращает карточку с предупреждением; `contra` отказывает, когда цвет, сладость или сорт этикетки противоречат ответу, прочие улики только предупреждают; `twin` / `strict` отказывают по любой улике, `off` выключает правило |
 | `WINE_RERANK_CANDIDATES` | `25` | Окно ре-ранкинга локальными признаками; признаки решающего слоя собираются с тем же окном 25 |
 | `WINE_VISUAL_CANDIDATES`, `WINE_TEXT_CANDIDATES` | `100`, `50` | Ширина визуальной и текстовой веток |
 | `WINE_FAMILY` | `1` | Расширение кандидатов роднёй по винодельне |
@@ -292,6 +292,15 @@ uv run python scripts/train_decider.py --features eval/results/features_platform
   --monotone text --gap-rivals text --out models/decider_site1810_abd
 uv run python eval/threshold_selection.py --decider models/decider_site1810_abd \
   --features eval/results/features_platform_site_v6det_ru_A.jsonl --apply utility
+# abd3 (сервис с 20.10.2026, WINE_GUARD=contra): тот же рецепт на train с 45 новыми кадрами и
+# уточнёнными правилами цвета, сладости и сорта (ocr/attributes.py); порог — по трудным незнакомым
+uv run python scripts/build_platform_features.py --index models/index_platform_sq_v3_site_1810 \
+  --sources synthetic,train --out eval/results/features_platform_site_v6det_ru_A3.jsonl
+uv run python scripts/train_decider.py --features eval/results/features_platform_site_v6det_ru_A3.jsonl \
+  --params-from models/decider_platform_sq_v3_v8 --calibration live-split --scenario real \
+  --monotone text --gap-rivals text --out models/decider_site1810_abd3
+uv run python eval/threshold_selection.py --decider models/decider_site1810_abd3 \
+  --features eval/results/features_platform_site_v6det_ru_A3.jsonl --unknowns hard --apply utility
 ```
 
 Решающий слой обучен на признаках, которые зависят от того, как OCR прочитал этикетку. Поэтому

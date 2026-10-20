@@ -49,7 +49,13 @@ from .catalog import EXCLUDED, load_equivalences
 from .decide import Decider, PairFeatures, Scored, derive
 from .decide.features import text_pair_features
 from .decide.guard import DEFAULT_MODE as DEFAULT_GUARD
-from .decide.guard import SIBLING_ENABLED, label_confirmed, sibling_swap, twin_guard
+from .decide.guard import (
+    SIBLING_ENABLED,
+    label_confirmed,
+    label_twins,
+    sibling_swap,
+    twin_guard,
+)
 from .decide.judge import VlmJudge
 from .detect import COCO_BOTTLE_MODEL, CachedCropper, build_cropper
 from .embed import Whitening, build_embedder, load_image, pick_device
@@ -166,6 +172,9 @@ class ScanResult:
     # среди всех кандидатов (`top5`) и отрыв от второго (`margin`). ТЗ просит метрику для
     # топ-1 и топ-5 — это она.
     confidence: dict | None = None
+    # Карточки той же винодельни, которые по лицевой этикетке не отличить от ответа
+    # (decide/guard.py, `label_twins`): клиент показывает их рядом — «или это вино».
+    twins: list[str] = field(default_factory=list)
     # Внутренности запроса для бенчмарка: вектор, полные списки обеих веток, окно, инлаеры.
     # Заполняется только по просьбе (`identify(..., trace=True)`) и наружу через to_dict
     # не уходит: сервису это лишние килобайты, а измерителю — единственный способ узнать,
@@ -205,6 +214,12 @@ class ScanResult:
             "guard": self.guard,
             "judge": self.judge,
             "analogues": self.analogues,
+            # Только вместе с ответом: при отказе клиент и так показывает список кандидатов.
+            "twins": [
+                {"item_id": c.item_id, "probability": c.probability, "card": c.card}
+                for c in self.candidates
+                if answer and c.item_id in self.twins
+            ],
             "frames": self.frames,
             "timings_ms": {k: round(v * 1000, 1) for k, v in self.timings.items()},
         }
@@ -898,7 +913,7 @@ class WineScanner:
         if scored and self.guard != "off":
             twin = twin_guard(scored[0].features, self.guard)
             if twin:
-                if self.guard == "warn":
+                if self.guard == "warn" or (self.guard == "contra" and twin != "contra"):
                     applied.append(f"{twin}_warning")
                 else:
                     scored[0].probability = min(scored[0].probability, self.threshold - GUARD_EPS)
@@ -981,6 +996,7 @@ class WineScanner:
             if best
             else None,
             confidence=confidence_of(candidates),
+            twins=label_twins(candidates[:REPORTED_CANDIDATES], self.text_index.family_of),
             trace=(
                 {
                     "vector": vector,

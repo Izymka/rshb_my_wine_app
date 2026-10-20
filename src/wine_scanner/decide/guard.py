@@ -21,13 +21,15 @@
 
 Все требуют читаемой этикетки (`ocr_lines >= 3`) и карточки, у которой есть что различать
 (`disc_n > 0`). Режим `warn` (по умолчанию) оставляет этот сигнал в `guard`, но не
-отменяет ответ. Режим `strict` — исходное, более узкое правило (обе улики сразу),
-оставлен для сравнения в бенчмарке. `off` — выключено.
+отменяет ответ. Режим `contra` отменяет ответ, только когда этикетка противоречит карточке
+по цвету, сладости или сорту, а прочие улики близнеца оставляет предупреждением, как `warn`.
+Режим `strict` — исходное, более узкое правило (обе улики сразу), оставлен для сравнения в
+бенчмарке. `off` — выключено.
 """
 
 import os
 
-GUARD_MODES = ("off", "strict", "twin", "warn")
+GUARD_MODES = ("off", "strict", "twin", "warn", "contra")
 # ``warn`` exposes twin evidence to the client but keeps the best catalogue answer.
 # The closed-world product flow prefers a useful nearest card to a silent refusal.
 DEFAULT_MODE = os.environ.get("WINE_GUARD", "warn")
@@ -51,6 +53,13 @@ def twin_guard(features: dict, mode: str = DEFAULT_MODE) -> str | None:
 
     if mode == "strict":
         return "twin" if color_contradicts and no_own_words else None
+    # Шаг В (разбор 20.10). Со старыми правилами цвета и сладости отказ по противоречию снимал
+    # на train 5 верных ответов ради 6–7 ложных приёмов; после правки правил — 0–1 верный ради
+    # 5–6 ложных приёмов из ~29 (OOF, 85 % ответов у знакомых).
+    if mode == "contra" and (
+        color_contradicts or style_contradicts or features.get("grape_match", 0) == -1
+    ):
+        return "contra"
     # Противоречие по цвету или сладости судит и карточки без различающих слов («Par Amour»
     # белое против розового на этикетке): это единственное, чем они отличаются.
     if color_contradicts or style_contradicts or (no_own_words and family_confirmed):
@@ -152,6 +161,52 @@ def sibling_swap(scored: list, family_of: dict, grape: bool | None = None) -> in
         if best_evidence is None or evidence > best_evidence:
             best_index, best_evidence = index, evidence
     return best_index
+
+
+# --- Неразличимые близнецы -------------------------------------------------------------------
+
+# Соседка по линейке показывается рядом с ответом («или это»), если решающий слой ставит её не
+# ниже этой доли от уверенности лидера, а текст этикетки не отличает её от лидера ничем.
+TWIN_RATIO = float(os.environ.get("WINE_TWIN_RATIO", "0.5"))
+TWIN_AXES = ("color_match", "style_match", "grape_match")
+# Разница долей подтверждённых различающих слов, которую ещё считаем равенством.
+TWIN_DISC_EPS = 0.05
+
+
+def label_twins(candidates: list, family_of: dict, limit: int = 2) -> list[str]:
+    """Карточки той же винодельни, которые по лицевой этикетке не отличить от лидера.
+
+    Решение о продукте, а не о модели (разбор ошибок 19.10): «Азюр» Рислинг и Вионье, «Мускат»
+    Захарьина авторский и серебряный, купажи Ведерникова отличаются сортом на контрэтикетке
+    или оттенком одного слова. Модель тут не поможет: различия на фото нет. Поэтому вместо
+    угадывания сервис называет обе карточки, а клиент спрашивает пользователя.
+
+    Соседка — близнец, если решающий слой не уверен в лидере сильно больше (`TWIN_RATIO`),
+    а этикетка по цвету, сладости, сорту и различающим словам говорит о ней ровно то же,
+    что о лидере, и ничему в ней не противоречит.
+    """
+    if not candidates:
+        return []
+    leader = candidates[0]
+    lead = leader.features or {}
+    family = family_of.get(leader.item_id)
+    if not lead or not family:
+        return []
+    twins = []
+    for candidate in candidates[1:]:
+        f = candidate.features or {}
+        if not f or family_of.get(candidate.item_id) != family:
+            continue
+        if candidate.probability < TWIN_RATIO * leader.probability:
+            continue
+        if any(int(f.get(a, 0)) == -1 or f.get(a, 0) != lead.get(a, 0) for a in TWIN_AXES):
+            continue
+        if abs(float(f.get("disc_hit", 0.0)) - float(lead.get("disc_hit", 0.0))) > TWIN_DISC_EPS:
+            continue
+        twins.append(candidate.item_id)
+        if len(twins) >= limit:
+            break
+    return twins
 
 
 def label_confirmed(features: dict, rule: dict | None) -> bool:

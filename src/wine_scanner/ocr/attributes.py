@@ -13,6 +13,8 @@
 
 from dataclasses import dataclass
 
+from rapidfuzz.distance import Levenshtein
+
 from .grapes import parse
 from .normalize import fold_phonetic, normalize
 
@@ -40,6 +42,25 @@ _SWEETNESS = {
         "ликёрное": "sweet",
     }.items()
 }
+# Нечёткое чтение слова сладости: «Полусладкок», «посусладкоев» — мелкий шрифт с одной-двумя
+# ошибками. Только длинные слова: у «сухое» и «сладкое» одна буква превращает их друг в друга
+# или в чужое слово, а «полусухое» от «полусладкого» отстоит на четыре правки.
+_FUZZY_MIN_LEN = 8
+_FUZZY_SWEETNESS = {form: value for form, value in _SWEETNESS.items() if len(form) >= 8}
+
+
+def _sweetness(token: str) -> str | None:
+    if token in _SWEETNESS:
+        return _SWEETNESS[token]
+    if len(token) < _FUZZY_MIN_LEN:
+        return None
+    limit = 1 if len(token) < 10 else 2
+    for form, value in _FUZZY_SWEETNESS.items():
+        if Levenshtein.distance(token, form, score_cutoff=limit) <= limit:
+            return value
+    return None
+
+
 _SPARKLING = {_fold(w) for w in ("игристое", "шампанское", "frizzante", "spumante", "petnat")}
 # Креплёные: для поиска аналогов портвейну нужен портвейн, а не сухое красное того же сорта.
 _FORTIFIED = {
@@ -51,15 +72,16 @@ _EXTRA = _fold("экстра")
 
 # Формы перечислены явно, а не по основе: иначе «belmas» и «krasnostop» превратятся в цвет.
 # Записаны по-русски и сворачиваются при импорте той же функцией, что и текст этикетки.
+# Родительного падежа единственного числа здесь нет: «Мускат белый Красного Камня» — белое,
+# а «КРАСНОГО» на его этикетке спорило с верной карточкой (разбор 20.10).
 _COLOR_FORMS = {
-    "red": {_fold(w) for w in ("красное", "красный", "красная", "красных", "красного", "красные")},
-    "rose": {
-        _fold(w)
-        for w in ("розовое", "розовый", "розовая", "розовых", "розового", "розовые", "розе")
-    },
+    "red": {_fold(w) for w in ("красное", "красный", "красная", "красных", "красные")},
+    "rose": {_fold(w) for w in ("розовое", "розовый", "розовая", "розовых", "розовые", "розе")},
     "orange": {_fold(w) for w in ("оранжевое", "оранжевый", "оранж", "оранжевых")},
-    "white": {_fold(w) for w in ("белое", "белый", "белая", "белых", "белого", "белые")},
+    "white": {_fold(w) for w in ("белое", "белый", "белая", "белых", "белые")},
 }
+_NOMINATIVE = tuple(form for forms in _COLOR_FORMS.values() for form in forms)
+_GENITIVE = tuple(_fold(w) for w in ("красного", "розового", "белого", "оранжевого"))
 
 
 # Основы для обрезанных слов: OCR на краю этикетки отдаёт «РОЗОВ», «КРАСН». Основа должна
@@ -78,6 +100,12 @@ def _color(token: str) -> str | None:
             return value
     if token.startswith(_STEM_EXCLUDE):
         return None
+    # «КРАСНОГ» — обрезанное «красного»: начало родительного падежа, с которого не начинается
+    # ни одна форма цвета.
+    if any(g.startswith(token) and len(token) > len(g) - 3 for g in _GENITIVE) and not any(
+        form.startswith(token) for form in _NOMINATIVE
+    ):
+        return None
     for value, stems in _COLOR_STEMS.items():
         if any(token.startswith(stem) and len(token) <= len(stem) + 3 for stem in stems):
             return value
@@ -92,6 +120,11 @@ class Attributes:
     fortified: bool | None = None
     # Сорта (ocr/grapes.py): у этикетки — найденные в тексте, у карточки — из поля `grapes`.
     grapes: frozenset[str] = frozenset()
+    # Только у карточки: все цвета, которые она о себе говорит, — категория и слово цвета в
+    # названии. Они расходятся у 27 карточек: «Мускат Оранж» записан белым, «Фанагория.
+    # Полусладкое розовое» — красным, «Красная Шапочка Серый Волк» — белым. Название
+    # напечатано на этикетке, поэтому его цвет не должен противоречить этой же карточке.
+    colors: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict:
         return {
@@ -121,8 +154,8 @@ def from_tokens(tokens: list[str]) -> Attributes:
             following = tokens[i + 1] if i + 1 < len(tokens) else ""
             if not following.startswith(_GRAPE_MARKER):
                 colors.add(color)
-        if token in _SWEETNESS:
-            value = _SWEETNESS[token]
+        value = _sweetness(token)
+        if value:
             if value == "brut" and i > 0 and tokens[i - 1] == _EXTRA:
                 value = "extra_brut"
             sweetness.add(value)
@@ -198,22 +231,26 @@ def from_card(payload: dict, name_tokens: list[str], grapes_from_name=None) -> A
       (`grapes_from_name`: «Мускатель» — мускат).
     """
     guessed = from_tokens(name_tokens)
-    color = _CATEGORY_COLOR.get(str(payload.get("category", "")).strip()) or guessed.color
+    category = _CATEGORY_COLOR.get(str(payload.get("category", "")).strip())
+    color = category or guessed.color
     sweetness = guessed.sweetness or sweetness_from_slug(payload.get("slug", ""))
     if guessed.fortified:
         sparkling = False
     else:
         stated = guessed.sparkling or sweetness in ("brut", "extra_brut")
         sparkling = True if stated or sparkling_from_card(payload) else None
+    # Сорта из названия добавляются и к заполненному полю: у «Пино Нуар - Саперави» в поле
+    # записан только Пино Нуар, и «САПЕРАВИ» на этикетке спорил с верной карточкой.
     grapes = parse(payload.get("grapes", ""))
-    if not grapes and grapes_from_name is not None:
-        grapes = grapes_from_name(name_tokens)
+    if grapes_from_name is not None:
+        grapes = grapes | grapes_from_name(name_tokens)
     return Attributes(
         color=color,
         sweetness=sweetness,
         sparkling=sparkling,
         fortified=guessed.fortified,
         grapes=grapes,
+        colors=frozenset(c for c in (category, guessed.color) if c),
     )
 
 
@@ -224,11 +261,31 @@ def compare_axis(a, b) -> int:
     return 1 if a == b else -1
 
 
+# Этикетка назвала часть слова карточки: OCR потерял «ПОЛУ» или «ЭКСТРА». Это не
+# противоречие, а неполное чтение. Обратное («полусухое» на этикетке, «сухое» у карточки)
+# остаётся противоречием: лишних букв OCR не придумывает.
+_TRUNCATED = {("dry", "semidry"), ("sweet", "semisweet"), ("brut", "extra_brut")}
+
+
+def compare_sweetness(label: str | None, card: str | None) -> int:
+    if (label, card) in _TRUNCATED:
+        return 0
+    return compare_axis(label, card)
+
+
+def compare_color(label: str | None, card: Attributes) -> int:
+    """Цвет этикетки против всех цветов карточки (`colors`), а если их нет — против `color`."""
+    known = card.colors or ({card.color} if card.color else set())
+    if label is None or not known:
+        return 0
+    return 1 if label in known else -1
+
+
 def compare(query: Attributes, card: Attributes) -> tuple[int, int]:
     """(цвет, стиль). Стиль — сладость и игристость вместе: −1 при любом противоречии,
     +1 если хоть одна ось совпала и ни одна не противоречит, иначе 0."""
-    color = compare_axis(query.color, card.color)
-    axes = [compare_axis(query.sweetness, card.sweetness)]
+    color = compare_color(query.color, card)
+    axes = [compare_sweetness(query.sweetness, card.sweetness)]
     # Игристость сравнивается только когда этикетка сама сказала «игристое»: отсутствие
     # слова на этикетке тихого вина — норма, а не свидетельство.
     if query.sparkling:
@@ -246,7 +303,7 @@ def is_attribute_word(token: str) -> bool:
     """Слово цвета, сладости или игристости — то, что сравнивают атрибуты, а не название."""
     return (
         _color(token) is not None
-        or token in _SWEETNESS
+        or _sweetness(token) is not None
         or token in _SPARKLING
         or token == _EXTRA
     )

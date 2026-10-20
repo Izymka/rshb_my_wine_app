@@ -212,6 +212,7 @@ class TextIndex:
         for item_id, payload, name, family in zip(
             self.item_ids, payloads, names, families, strict=True
         ):
+            ordered = list(dict.fromkeys(fold_tokens(str(payload.get("name", "")))))
             size = len(self.members[family])
             counts = family_df[family]
             # Слова цвета и сладости в различающие не идут: их сравнивают атрибуты
@@ -230,10 +231,18 @@ class TextIndex:
                 name=name,
                 winery=winery,
                 disc=disc,
-                attrs=attributes.from_card(payload, sorted(name), self.grapes.in_name),
+                # Слова по порядку, а не по алфавиту: в «Extra Brut» иначе «brut» встаёт
+                # раньше «ekstra», и экстра брют становился брютом.
+                attrs=attributes.from_card(
+                    payload, ordered, lambda words, n=payload: self._grapes_in_name(words, n)
+                ),
                 family=family,
                 disc_weights={t: math.log(size / counts[t]) + 0.1 for t in disc},
             )
+
+    def _grapes_in_name(self, words: list[str], payload: dict) -> frozenset[str]:
+        """Сорта в названии карточки: фразой («Пино Нуар») и началом слова («Мускатель»)."""
+        return self.grapes.in_name(words) | self.grapes.find(str(payload.get("name", "")))
 
     @property
     def disc_tokens(self) -> dict[str, frozenset[str]]:

@@ -43,6 +43,8 @@ export interface ScanResponse {
   guard: string | null;
   judge: Record<string, unknown> | null;
   analogues: Analogue[] | null;
+  // Соседки по линейке, которых по лицевой этикетке не отличить от ответа: «или это вино».
+  twins?: Candidate[];
   timings_ms: Record<string, number>;
 }
 
